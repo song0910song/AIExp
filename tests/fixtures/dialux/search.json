@@ -1,0 +1,21 @@
+{
+  "result": [
+    {
+      "luminaireId": "fixture-contract",
+      "articleName": "Contract Panel 4000K",
+      "brandName": "Example",
+      "summaryLine": "Ceiling recessed LED",
+      "technicalSummaryLine": "System power: 18 W IP44",
+      "toDetails": "/zh/article/fixture-contract",
+      "hasUld": true,
+      "hasPhotometryDownload": true
+    }
+  ],
+  "brands": [
+    {
+      "id": "example-brand",
+      "name": "Example"
+    }
+  ],
+  "isRandom": false
+}

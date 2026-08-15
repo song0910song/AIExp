@@ -1,0 +1,16 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local SQLite state and test artifacts
+data/lighting_design.sqlite3*
+.tmp/
+.cache/
+.pytest_cache/
