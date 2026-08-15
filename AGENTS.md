@@ -17,6 +17,15 @@ uv run uvicorn lighting_agent.web_api:app --reload    # 后端
 cd web; npm install; npm run dev           # 前端（代理 /backend/* → 后端 /api/*）
 ```
 
+下载/更新嵌入模型时，本机直连 huggingface.co 会超时（WinError 10060），须走镜像：
+
+```powershell
+$env:HF_ENDPOINT = "https://hf-mirror.com"; $env:LIGHTING_EMBEDDING_LOCAL_FILES_ONLY = "false"
+uv run python -c "from lighting_agent.rag import create_evidence_store; create_evidence_store()"
+```
+
+模型缓存于项目根目录 `.model-cache`；默认 `local_files_only=true`，缓存存在后离线可用。
+
 ## 架构分层
 
 ```
