@@ -13,8 +13,8 @@
 uv sync --group dev                        # 安装依赖（Python >= 3.14，含 torch/chromadb，较重）
 uv run pytest tests/ -q --basetemp .pytest-basetemp   # Windows 必须加 --basetemp，否则系统临时目录权限报错
 uv run python main.py --help               # CLI 入口（离线命令不需要 LLM key）
-uv run uvicorn lighting_agent.web_api:app --reload    # 后端
-cd web; npm install; npm run dev           # 前端（代理 /backend/* → 后端 /api/*）
+uv run uvicorn lighting_agent.web_api:app --reload    # 后端（也可省略，由 npm run dev 自动拉起）
+cd web; npm install; npm run dev           # 前端（代理 /backend/* → 后端 /api/*；dev 脚本先保证后端就绪再启动，见 web/scripts/dev.ps1）
 ```
 
 下载/更新嵌入模型时，本机直连 huggingface.co 会超时（WinError 10060），须走镜像：

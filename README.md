@@ -49,9 +49,16 @@ uv run python main.py chat --interactive
 Web 工作台：
 
 ```powershell
-uv run uvicorn lighting_agent.web_api:app --reload
 cd web
 npm install
+npm run dev        # 自动拉起后端并等待 /api/health 就绪后再启动前端
+```
+
+也可手动先启动后端（脚本检测到后端已就绪会直接复用）：
+
+```powershell
+uv run uvicorn lighting_agent.web_api:app --reload
+cd web
 npm run dev
 ```
 
