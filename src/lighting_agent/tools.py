@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from langchain.tools import tool
+# langchain_core.tools 的 tool 与 langchain.tools 等价，但导入快约 25 倍：
+# langchain.tools 会级联拉起 langgraph.prebuilt → sentence_transformers → torch。
+from langchain_core.tools import tool
 from pydantic import Field
 
 from .calculations import calculate_lumen_method, check_design_rules as run_rule_checks
