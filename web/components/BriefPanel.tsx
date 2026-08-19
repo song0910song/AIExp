@@ -44,7 +44,7 @@ export function BriefPanel({ project, onProject }: { project: Project; onProject
     setMessage(null);
     try {
       const confirmed = Object.entries(draft)
-        .filter(([key, value]) => !["confirmed_fields", "lighting_parameter_sources"].includes(key) && value !== null && value !== "" && (!Array.isArray(value) || value.length > 0))
+        .filter(([key, value]) => !["confirmed_fields", "lighting_parameter_sources", "template_origin"].includes(key) && value !== null && value !== "" && (!Array.isArray(value) || value.length > 0))
         .map(([key]) => key);
       const updated = await api.updateBrief(project.project_id, project.revision, { ...draft, confirmed_fields: confirmed });
       onProject(updated);
@@ -76,6 +76,7 @@ export function BriefPanel({ project, onProject }: { project: Project; onProject
             <Field label="偏好品牌" wide hint="多个品牌请用逗号分隔；偏好不是合规条件。"><input value={draft.preferred_brands.join("，")} onChange={(event) => setValue("preferred_brands", event.target.value.split(/[，,]/).map((item) => item.trim()).filter(Boolean))} /></Field>
             <Field label="项目备注" wide><textarea rows={4} value={draft.notes ?? ""} onChange={(event) => setValue("notes", event.target.value || null)} placeholder="记录甲方要求、现场限制或尚未结构化的条件。" /></Field>
           </div>
+          {draft.template_origin ? <div className="boundary-note"><strong>模板初始值</strong><p>{draft.template_origin.template_name} · {draft.template_origin.standard_reference}</p><p>模板值仅作为可编辑起点；请结合项目资料、RAG 证据和工程师确认修正。</p></div> : null}
           {message ? <Notice tone={message.tone}>{message.text}</Notice> : null}
         </Panel>
       </form>

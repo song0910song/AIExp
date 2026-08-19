@@ -50,6 +50,15 @@ class LightingParameterSource(StrictModel):
         return normalized
 
 
+class BriefTemplateOrigin(StrictModel):
+    """The editable indoor-lighting template used to initialise a brief."""
+
+    template_id: str = Field(min_length=1, max_length=80)
+    template_name: str = Field(min_length=1, max_length=100)
+    standard_reference: str = Field(min_length=1, max_length=300)
+    applied_at: datetime = Field(default_factory=utc_now)
+
+
 class DesignBrief(StrictModel):
     """Confirmed input for an indoor lighting design task.
 
@@ -78,6 +87,7 @@ class DesignBrief(StrictModel):
     notes: str | None = Field(default=None, max_length=4_000)
     confirmed_fields: set[str] = Field(default_factory=set)
     lighting_parameter_sources: dict[str, LightingParameterSource] = Field(default_factory=dict)
+    template_origin: BriefTemplateOrigin | None = None
 
     @field_validator("preferred_brands")
     @classmethod

@@ -41,6 +41,14 @@ export type DesignBrief = {
     evidence_ids: string[];
     applied_at: string;
   }>;
+  template_origin: BriefTemplateOrigin | null;
+};
+
+export type BriefTemplateOrigin = {
+  template_id: string;
+  template_name: string;
+  standard_reference: string;
+  applied_at: string;
 };
 
 export type Evidence = {
