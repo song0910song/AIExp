@@ -84,6 +84,43 @@ def test_rag_tool_does_not_overwrite_existing_manual_parameter(tmp_path, monkeyp
         )
 
 
+def test_rag_tool_records_provenance_when_value_matches_existing(tmp_path, monkeypatch) -> None:
+    store = ProjectStore(tmp_path / "projects")
+    project = store.create(
+        DesignBrief(
+            project_name="Template-initialised targets",
+            space_type="普通办公室",
+            area_m2=30,
+            mounting_height_m=2.7,
+            target_illuminance_lx=300,
+            min_cri=80,
+            confirmed_fields={"target_illuminance_lx", "min_cri"},
+        )
+    )
+    monkeypatch.setattr(agent_tools, "project_store", store)
+    monkeypatch.setattr(agent_tools, "evidence_store", FakeEvidenceStore())
+
+    result = agent_tools.apply_rag_lighting_parameters.invoke(
+        {
+            "project_id": project.project_id,
+            "expected_revision": project.revision,
+            "evidence_ids": ["meeting-room-standard"],
+            "target_illuminance_lx": 300,
+            "min_cri": 80,
+        }
+    )
+
+    saved = store.get(project.project_id)
+    assert result["status"] == "ok"
+    assert result["applied_fields"] == ["min_cri", "target_illuminance_lx"]
+    assert saved.brief.target_illuminance_lx == 300
+    assert saved.brief.min_cri == 80
+    assert saved.brief.lighting_parameter_sources["target_illuminance_lx"].evidence_ids == [
+        "meeting-room-standard"
+    ]
+    assert [item.evidence_id for item in saved.evidence] == ["meeting-room-standard"]
+
+
 def test_agent_prompt_uses_rag_before_user_clarification() -> None:
     assert "apply_rag_lighting_parameters" in agent.SYSTEM_PROMPT
     assert "只有证据明确、适用且不冲突时" in agent.SYSTEM_PROMPT

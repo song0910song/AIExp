@@ -202,7 +202,8 @@ def apply_rag_lighting_parameters(
 
     Only use values explicitly supported by the retrieved evidence and
     applicable to the current room/use. Existing manually or document-set
-    values are never overwritten by this tool.
+    values are never overwritten by this tool; identical values still receive
+    evidence provenance.
     """
 
     updates = {
@@ -235,17 +236,15 @@ def apply_rag_lighting_parameters(
         for name, value in updates.items():
             current_value = getattr(current.brief, name)
             current_source = sources.get(name)
-            if current_value is None or current_source is not None:
+            if current_value is None or current_source is not None or current_value == value:
                 applicable_updates[name] = value
-            elif current_value != value:
+            else:
                 protected_fields.append(name)
         if protected_fields:
             raise ValueError(
                 "RAG cannot overwrite manually or document-confirmed parameters: "
                 + ", ".join(protected_fields)
             )
-        if not applicable_updates:
-            raise ValueError("No missing or RAG-derived lighting parameters can be updated")
         applied_fields = sorted(applicable_updates)
 
         for name in applicable_updates:
