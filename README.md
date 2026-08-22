@@ -96,7 +96,7 @@ GET /api/projects/{project_id}/dialux-results
 GET /api/projects/{project_id}/dialux-results/{run_id}
 ```
 
-有关系统设计与 API 字段，见 [照明设计智能体方案](照明设计智能体方案.md) 和 [DIALux API 文档](DIALux-Luminaire-Finder-API.md)。
+有关系统设计与 API 字段，见 [照明设计智能体方案](docs/照明设计智能体方案.md) 和 [DIALux API 文档](docs/DIALux-Luminaire-Finder-API.md)。
 
 ## 验证
 
