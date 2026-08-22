@@ -11,6 +11,7 @@ wheels/
 
 # Local SQLite state and test artifacts
 data/lighting_design.sqlite3*
+data/chroma
 .tmp/
 .cache/
 .pytest_cache/
