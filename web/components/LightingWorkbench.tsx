@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Database,
+  FileText,
   FolderOpen,
   LayoutDashboard,
   Menu,
@@ -16,14 +17,16 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Health, Project, Section } from "@/lib/types";
-  import { ConversationPanel } from "./ConversationPanel";
-  import { CreateProjectModal } from "./CreateProjectModal";
-  import { OverviewPanel } from "./OverviewPanel";
+import { ConversationPanel } from "./ConversationPanel";
+import { CreateProjectModal } from "./CreateProjectModal";
+import { OverviewPanel } from "./OverviewPanel";
+import { KnowledgeBasePanel } from "./KnowledgeBasePanel";
 import { BusyButton, Modal, Notice } from "./ui";
 
 const navigation: Array<{ section: Section; label: string; icon: typeof LayoutDashboard }> = [
   { section: "chat", label: "智能对话", icon: MessageSquareText },
   { section: "overview", label: "项目概览", icon: LayoutDashboard },
+  { section: "knowledge", label: "资料入库", icon: FileText },
 ];
 
 function formatProjectTime(value: string) {
@@ -227,6 +230,8 @@ export function LightingWorkbench() {
               <p>请确认 Python API 已启动：<code>uv run uvicorn lighting_agent.web_api:app --reload</code></p>
               <button className="button button-primary" onClick={() => { setLoading(true); void load(); }}>重新连接</button>
             </div>
+          ) : section === "knowledge" ? (
+            <KnowledgeBasePanel />
           ) : !project ? (
             <section className="chatbot-no-project">
               <div className="app-logo app-logo-large" aria-hidden="true"><span /><span /><span /></div>
