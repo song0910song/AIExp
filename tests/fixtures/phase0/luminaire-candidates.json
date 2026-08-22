@@ -1,0 +1,12 @@
+[
+  {
+    "luminaire_id": "phase0-panel-001",
+    "article_name": "脱敏嵌入式面板灯 A",
+    "brand": "脱敏供应商",
+    "power_w": 36,
+    "luminous_flux_lm": 3600,
+    "cct_k": 4000,
+    "cri": 80,
+    "detail_url": "https://example.invalid/luminaire/phase0-panel-001"
+  }
+]

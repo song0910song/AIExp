@@ -1,0 +1,8 @@
+{
+  "source_kind": "manual_form",
+  "maintained_illuminance_lx": 300.0,
+  "minimum_illuminance_lx": 180.0,
+  "uniformity_u0": 0.60,
+  "ugr": 19.0,
+  "installed_power_density_w_m2": 6.0
+}
