@@ -29,7 +29,7 @@ uv run python -c "from lighting_agent.rag import create_evidence_store; create_e
 ## 架构分层
 
 ```
-web_api.py (FastAPI 适配层，无业务逻辑) → tools.py (17 个 LangChain 工具，薄封装)
+web_api.py (FastAPI 适配层，无业务逻辑) → tools.py (16 个 LangChain 工具，薄封装)
   ├─ project_store.py    ProjectState 版本化持久化 + 不可变 revision 快照
   ├─ rag.py              SQLite/Chroma 双后端证据检索
   ├─ dialux_api.py       DIALux 目录客户端（缓存/节流/熔断）

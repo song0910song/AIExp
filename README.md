@@ -105,6 +105,12 @@ uv run pytest
 uv run python main.py --help
 ```
 
+阶段 0 离线基线（固定使用 local RAG、本地嵌入和脱敏 fixture）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-phase0.ps1
+```
+
 ## SQLite 持久化
 
 项目当前状态、不可变 revision 快照、RAG 证据块和聊天会话均保存到
