@@ -17,3 +17,4 @@ data/chroma
 .pytest_cache/
 .pytest-basetemp/
 .uv-cache/
+.model_cache/
