@@ -202,7 +202,7 @@ export type Project = {
   updated_at: string;
 };
 
-export type Section = "overview" | "chat";
+export type Section = "overview" | "chat" | "knowledge";
 
 export type AgentStepStatus = "pending" | "active" | "done" | "failed" | "skipped";
 

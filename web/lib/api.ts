@@ -77,7 +77,7 @@ export const api = {
     const data = new FormData();
     data.append("file", file);
     data.append("source_type", sourceType);
-    return request<{ source_name: string; indexed_chunks: number; sha256: string }>("/documents", {
+    return request<{ source_name: string; source_type: string; indexed_chunks: number; sha256: string }>("/documents", {
       method: "POST",
       body: data,
     });
