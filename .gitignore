@@ -14,3 +14,5 @@ data/lighting_design.sqlite3*
 .tmp/
 .cache/
 .pytest_cache/
+.pytest-basetemp/
+.uv-cache/
