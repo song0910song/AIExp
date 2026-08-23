@@ -88,12 +88,21 @@ class StoredChunk:
     locator: str
     content: str
     indexed_at: str
+    project_id: str | None = None
 
 
 def stable_chunk_id(source_hash: str, position: int, content: str) -> str:
     """Return the identifier shared by the audit database and Chroma index."""
 
     return hashlib.sha256(f"{source_hash}:{position}:{content}".encode("utf-8")).hexdigest()
+
+
+def scoped_source_hash(source_hash: str, project_id: str | None) -> str:
+    """Keep identical files in different project scopes as separate records."""
+
+    if project_id is None:
+        return source_hash
+    return hashlib.sha256(f"project:{project_id}:{source_hash}".encode("utf-8")).hexdigest()
 
 
 class LocalEvidenceStore:
@@ -119,30 +128,38 @@ class LocalEvidenceStore:
             return index_path
         return index_path.with_suffix(".sqlite3")
 
-    def add_document(self, document: ParsedDocument, *, source_type: str = "project_document") -> int:
+    def add_document(
+        self,
+        document: ParsedDocument,
+        *,
+        source_type: str = "project_document",
+        project_id: str | None = None,
+    ) -> int:
         contents = chunk_text(document.content)
         now = datetime.now(UTC).isoformat()
+        storage_hash = scoped_source_hash(document.sha256, project_id)
         with self.database.transaction() as connection:
-            connection.execute("DELETE FROM documents WHERE source_hash = ?", (document.sha256,))
+            connection.execute("DELETE FROM documents WHERE source_hash = ?", (storage_hash,))
             connection.execute(
                 """
-                INSERT INTO documents (source_hash, source_name, source_type, page_count, indexed_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO documents (source_hash, source_name, source_type, project_id, page_count, indexed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (document.sha256, document.source_name, source_type, document.page_count, now),
+                (storage_hash, document.source_name, source_type, project_id, document.page_count, now),
             )
             connection.executemany(
                 """
                 INSERT INTO evidence_chunks
-                    (chunk_id, source_hash, source_name, source_type, locator, content, indexed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (chunk_id, source_hash, source_name, source_type, project_id, locator, content, indexed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
-                        stable_chunk_id(document.sha256, position, content),
-                        document.sha256,
+                        stable_chunk_id(storage_hash, position, content),
+                        storage_hash,
                         document.source_name,
                         source_type,
+                        project_id,
                         f"chunk {position}",
                         content,
                         now,
@@ -158,17 +175,18 @@ class LocalEvidenceStore:
         if not chunks:
             return 0
         documents = {
-            chunk.source_hash: (chunk.source_name, chunk.source_type, chunk.indexed_at)
+            chunk.source_hash: (chunk.source_name, chunk.source_type, chunk.project_id, chunk.indexed_at)
             for chunk in chunks
         }
         with self.database.transaction() as connection:
             connection.executemany(
                 """
-                INSERT INTO documents (source_hash, source_name, source_type, page_count, indexed_at)
-                VALUES (?, ?, ?, NULL, ?)
+                INSERT INTO documents (source_hash, source_name, source_type, project_id, page_count, indexed_at)
+                VALUES (?, ?, ?, ?, NULL, ?)
                 ON CONFLICT(source_hash) DO UPDATE SET
                     source_name = excluded.source_name,
                     source_type = excluded.source_type,
+                    project_id = excluded.project_id,
                     indexed_at = excluded.indexed_at
                 """,
                 [(source_hash, *values) for source_hash, values in documents.items()],
@@ -176,12 +194,13 @@ class LocalEvidenceStore:
             connection.executemany(
                 """
                 INSERT INTO evidence_chunks
-                    (chunk_id, source_hash, source_name, source_type, locator, content, indexed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (chunk_id, source_hash, source_name, source_type, project_id, locator, content, indexed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chunk_id) DO UPDATE SET
                     source_hash = excluded.source_hash,
                     source_name = excluded.source_name,
                     source_type = excluded.source_type,
+                    project_id = excluded.project_id,
                     locator = excluded.locator,
                     content = excluded.content,
                     indexed_at = excluded.indexed_at
@@ -192,6 +211,7 @@ class LocalEvidenceStore:
                         chunk.source_hash,
                         chunk.source_name,
                         chunk.source_type,
+                        chunk.project_id,
                         chunk.locator,
                         chunk.content,
                         chunk.indexed_at,
@@ -201,12 +221,12 @@ class LocalEvidenceStore:
             )
         return len(chunks)
 
-    def search(self, query: str, *, top_k: int = 3) -> list[Evidence]:
+    def search(self, query: str, *, top_k: int = 3, project_id: str | None = None) -> list[Evidence]:
         if not query.strip():
             raise ValueError("query must not be empty")
         query_tokens = set(tokenize(query))
         scored: list[tuple[float, StoredChunk]] = []
-        for chunk in self._load():
+        for chunk in self._load(project_id=project_id):
             content_tokens = tokenize(chunk.content)
             if not content_tokens:
                 continue
@@ -217,7 +237,7 @@ class LocalEvidenceStore:
         scored.sort(key=lambda item: item[0], reverse=True)
         return [self._evidence(chunk, score) for score, chunk in scored[:top_k]]
 
-    def get_evidence(self, evidence_ids: list[str]) -> list[Evidence]:
+    def get_evidence(self, evidence_ids: list[str], *, project_id: str | None = None) -> list[Evidence]:
         if not evidence_ids:
             raise ValueError("at least one evidence_id is required")
         unique_ids = list(dict.fromkeys(evidence_ids))
@@ -226,10 +246,11 @@ class LocalEvidenceStore:
         try:
             rows = connection.execute(
                 f"""
-                SELECT chunk_id, source_name, source_type, source_hash, locator, content, indexed_at
+                SELECT chunk_id, source_name, source_type, source_hash, project_id, locator, content, indexed_at
                 FROM evidence_chunks WHERE chunk_id IN ({placeholders})
+                  AND (project_id IS NULL OR project_id = ?)
                 """,
-                unique_ids,
+                [*unique_ids, project_id] if project_id is not None else [*unique_ids, None],
             ).fetchall()
         finally:
             connection.close()
@@ -239,6 +260,7 @@ class LocalEvidenceStore:
                 source_name=str(row["source_name"]),
                 source_type=str(row["source_type"]),
                 source_hash=str(row["source_hash"]),
+                project_id=str(row["project_id"]) if row["project_id"] is not None else None,
                 locator=str(row["locator"]),
                 content=str(row["content"]),
                 indexed_at=str(row["indexed_at"]),
@@ -250,14 +272,16 @@ class LocalEvidenceStore:
             raise EvidenceNotFoundError(f"Evidence was not found: {', '.join(missing)}")
         return [self._evidence(chunks[evidence_id]) for evidence_id in unique_ids]
 
-    def _load(self) -> list[StoredChunk]:
+    def _load(self, *, project_id: str | None = None) -> list[StoredChunk]:
         connection = self.database.connect()
         try:
             rows = connection.execute(
                 """
-                SELECT chunk_id, source_name, source_type, source_hash, locator, content, indexed_at
+                SELECT chunk_id, source_name, source_type, source_hash, project_id, locator, content, indexed_at
                 FROM evidence_chunks
+                WHERE project_id IS NULL OR project_id = ?
                 """
+                , (project_id,)
             ).fetchall()
         finally:
             connection.close()
@@ -267,6 +291,7 @@ class LocalEvidenceStore:
                 source_name=str(row["source_name"]),
                 source_type=str(row["source_type"]),
                 source_hash=str(row["source_hash"]),
+                project_id=str(row["project_id"]) if row["project_id"] is not None else None,
                 locator=str(row["locator"]),
                 content=str(row["content"]),
                 indexed_at=str(row["indexed_at"]),
@@ -284,6 +309,13 @@ class LocalEvidenceStore:
             locator=chunk.locator,
             score=round(min(score, 1.0), 4) if score is not None else None,
         )
+
+    def delete_project(self, project_id: str) -> int:
+        """Remove all project-scoped evidence and leave global knowledge intact."""
+
+        with self.database.transaction() as connection:
+            result = connection.execute("DELETE FROM documents WHERE project_id = ?", (project_id,))
+            return int(result.rowcount)
 
     def _import_legacy_index(self) -> None:
         legacy_index_path = self.index_path or LEGACY_RAG_INDEX_FILE
@@ -365,27 +397,41 @@ class ChromaEvidenceStore:
 
         return Document
 
-    def add_document(self, document: ParsedDocument, *, source_type: str = "project_document") -> int:
+    def add_document(
+        self,
+        document: ParsedDocument,
+        *,
+        source_type: str = "project_document",
+        project_id: str | None = None,
+    ) -> int:
         with _CHROMA_OPERATION_LOCK:
-            return self._add_document_unlocked(document, source_type=source_type)
+            return self._add_document_unlocked(document, source_type=source_type, project_id=project_id)
 
-    def _add_document_unlocked(self, document: ParsedDocument, *, source_type: str) -> int:
+    def _add_document_unlocked(
+        self,
+        document: ParsedDocument,
+        *,
+        source_type: str,
+        project_id: str | None = None,
+    ) -> int:
+        storage_hash = scoped_source_hash(document.sha256, project_id)
         records = [(position, content) for position, content in enumerate(chunk_text(document.content), start=1)]
         documents = [
             self._document_type(
                 page_content=content,
                 metadata={
-                    "chunk_id": self._chunk_id(document.sha256, position, content),
+                    "chunk_id": self._chunk_id(storage_hash, position, content),
                     "source_name": document.source_name,
                     "source_type": source_type,
-                    "source_hash": document.sha256,
+                    "source_hash": storage_hash,
+                    "project_id": project_id or "__global__",
                     "locator": f"chunk {position}",
                 },
             )
             for position, content in records
         ]
         if documents:
-            existing = self.vector_store.get(where={"source_hash": document.sha256})
+            existing = self.vector_store.get(where={"source_hash": storage_hash})
             existing_ids = {str(item) for item in existing.get("ids", [])}
             ids = [str(item.metadata["chunk_id"]) for item in documents]
             # Compute and write the replacement vectors before removing stale
@@ -401,24 +447,34 @@ class ChromaEvidenceStore:
             stale_ids = existing_ids.difference(ids)
             if stale_ids:
                 self.vector_store.delete(ids=list(stale_ids))
-            audited_count = self.audit_store.add_document(document, source_type=source_type)
+            audited_count = self.audit_store.add_document(document, source_type=source_type, project_id=project_id)
             if audited_count != len(documents):
                 raise RuntimeError("Chroma and SQLite produced different chunk counts")
         return len(documents)
 
-    def search(self, query: str, *, top_k: int = 3) -> list[Evidence]:
-        with _CHROMA_OPERATION_LOCK:
-            return self._search_unlocked(query, top_k=top_k)
+    @staticmethod
+    def _scope_matches(metadata: dict, project_id: str | None) -> bool:
+        stored_project = metadata.get("project_id")
+        if project_id is None:
+            return stored_project in (None, "", "__global__")
+        return stored_project in (None, "", "__global__", project_id)
 
-    def _search_unlocked(self, query: str, *, top_k: int) -> list[Evidence]:
+    def search(self, query: str, *, top_k: int = 3, project_id: str | None = None) -> list[Evidence]:
+        with _CHROMA_OPERATION_LOCK:
+            return self._search_unlocked(query, top_k=top_k, project_id=project_id)
+
+    def _search_unlocked(self, query: str, *, top_k: int, project_id: str | None = None) -> list[Evidence]:
         if not query.strip():
             raise ValueError("query must not be empty")
         # Vector search remains the primary retrieval path. Chroma's document
         # filter complements it for exact Chinese room/type terms embedded in
         # long OCR table chunks, which can otherwise be missed semantically.
         candidates: dict[str, tuple[str, dict, float]] = {}
-        for document, score in self.vector_store.similarity_search_with_relevance_scores(query, k=top_k):
+        candidate_k = top_k if project_id is None else max(top_k * 5, 20)
+        for document, score in self.vector_store.similarity_search_with_relevance_scores(query, k=candidate_k):
             metadata = document.metadata if isinstance(document.metadata, dict) else {}
+            if not self._scope_matches(metadata, project_id):
+                continue
             identifier = str(metadata.get("chunk_id") or document.page_content)
             candidates[identifier] = (document.page_content, metadata, float(score))
 
@@ -431,6 +487,8 @@ class ChromaEvidenceStore:
                 result.get("documents", []), result.get("metadatas", []), strict=False
             ):
                 if not content or not isinstance(metadata, dict):
+                    continue
+                if not self._scope_matches(metadata, project_id):
                     continue
                 identifier = str(metadata.get("chunk_id") or content)
                 existing = candidates.get(identifier)
@@ -446,11 +504,11 @@ class ChromaEvidenceStore:
         ranked = sorted(candidates.values(), key=lambda item: item[2], reverse=True)
         return [self._evidence(content, metadata, score) for content, metadata, score in ranked[:top_k]]
 
-    def get_evidence(self, evidence_ids: list[str]) -> list[Evidence]:
+    def get_evidence(self, evidence_ids: list[str], *, project_id: str | None = None) -> list[Evidence]:
         with _CHROMA_OPERATION_LOCK:
-            return self._get_evidence_unlocked(evidence_ids)
+            return self._get_evidence_unlocked(evidence_ids, project_id=project_id)
 
-    def _get_evidence_unlocked(self, evidence_ids: list[str]) -> list[Evidence]:
+    def _get_evidence_unlocked(self, evidence_ids: list[str], *, project_id: str | None = None) -> list[Evidence]:
         if not evidence_ids:
             raise ValueError("at least one evidence_id is required")
         unique_ids = list(dict.fromkeys(evidence_ids))
@@ -460,7 +518,7 @@ class ChromaEvidenceStore:
         resolved = {
             str(metadata.get("chunk_id", evidence_id)): self._evidence(str(content), metadata)
             for evidence_id, content, metadata in zip(result.get("ids", []), documents, metadata_rows, strict=False)
-            if isinstance(metadata, dict)
+            if isinstance(metadata, dict) and self._scope_matches(metadata, project_id)
         }
         missing = [evidence_id for evidence_id in unique_ids if evidence_id not in resolved]
         if missing:
@@ -504,6 +562,7 @@ class ChromaEvidenceStore:
                     "source_hash": chunk.source_hash,
                     "source_name": chunk.source_name,
                     "source_type": chunk.source_type,
+                    "project_id": chunk.project_id or "__global__",
                     "locator": chunk.locator,
                 }
                 for chunk in chunks
@@ -524,6 +583,9 @@ class ChromaEvidenceStore:
             source_hash = metadata.get("source_hash")
             source_name = metadata.get("source_name")
             source_type = metadata.get("source_type")
+            project_id = metadata.get("project_id")
+            if project_id == "__global__":
+                project_id = None
             locator = metadata.get("locator")
             chunk_id = metadata.get("chunk_id")
             if not all(isinstance(value, str) and value for value in (source_hash, source_name, source_type, locator, chunk_id)):
@@ -534,12 +596,23 @@ class ChromaEvidenceStore:
                     source_hash=source_hash,
                     source_name=source_name,
                     source_type=source_type,
+                    project_id=project_id if isinstance(project_id, str) and project_id else None,
                     locator=locator,
                     content=str(content),
                     indexed_at=now,
                 )
             )
         self.audit_store.upsert_chunks(chunks)
+
+    def delete_project(self, project_id: str) -> int:
+        """Delete project vectors and their durable audit rows."""
+
+        with _CHROMA_OPERATION_LOCK:
+            result = self.vector_store.get(where={"project_id": project_id}, include=["metadatas"])
+            ids = [str(item) for item in result.get("ids", [])]
+            if ids:
+                self.vector_store.delete(ids=ids)
+            return self.audit_store.delete_project(project_id)
 
     @staticmethod
     def _evidence(content: str, metadata: dict, score: float | None = None) -> Evidence:

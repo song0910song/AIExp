@@ -1,0 +1,44 @@
+{
+  "project_id": "2f73414fc79e4578806bc1c0baa9ffa1",
+  "updated_at": "2026-08-23T02:37:16.959841+00:00",
+  "assets": {
+    "G8UVgn45QB-Inupfyd5x9g": {
+      "luminaire_id": "G8UVgn45QB-Inupfyd5x9g",
+      "article_name": "Define LED Acoustic Luminaire",
+      "status": "downloaded",
+      "source_url": "https://luminaires.dialux.com/files/x0coZZrARy6EieXvf0d5Ow.zip",
+      "downloaded_at": "2026-08-23T02:37:16.423873Z",
+      "sha256": "1223e21f5afecf87112cd1699d1607d24d125ee5c39a9f401072b9946e7f5f92",
+      "zip_file": "archives/Define LED Acoustic Luminaire-G8UVgn45.zip",
+      "zip_size_bytes": 4171,
+      "extracted_files": [
+        {
+          "relative_path": "extracted/Define LED Acoustic Luminaire-G8UVgn45/572301.ies",
+          "sha256": "f6c5e7bab824238bb62bcebd0232c5a1572c8240144029e010e5d8a048d7b99c",
+          "size_bytes": 9430,
+          "file_type": "ies"
+        }
+      ],
+      "error": null
+    },
+    "_XOwNSPLRlaiG5IYCZ3i_g": {
+      "luminaire_id": "_XOwNSPLRlaiG5IYCZ3i_g",
+      "article_name": "quadro suspended white VDT",
+      "status": "downloaded",
+      "source_url": "https://luminaires.dialux.com/files/4FcgaeuLS6Gs5rSWlyfH4w.zip",
+      "downloaded_at": "2026-08-23T02:37:16.959349Z",
+      "sha256": "9b0837c26fe05ad62b33c3e29883591a2c80018ba1758df9ae40c4876ad9a5ab",
+      "zip_file": "archives/quadro suspended white VDT-_XOwNSPL.zip",
+      "zip_size_bytes": 1248,
+      "extracted_files": [
+        {
+          "relative_path": "extracted/quadro suspended white VDT-_XOwNSPL/192240.ldt",
+          "sha256": "9ce100075ce4652ee467c222d8b9e10739433ed6d9ac60bdfcc1c0e0fa9b6e19",
+          "size_bytes": 3036,
+          "file_type": "ldt"
+        }
+      ],
+      "error": null
+    }
+  }
+}

@@ -525,6 +525,7 @@ class ProjectStore:
         for directory in (
             self.directory / f"{project_id}.photometry",
             self.directory / f"{project_id}.plans",
+            self.directory / f"{project_id}.documents",
         ):
             if directory.exists():
                 shutil.rmtree(directory)

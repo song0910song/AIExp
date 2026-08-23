@@ -66,6 +66,7 @@ class RuleCheckRequest(StrictModel):
 class EvidenceSearchRequest(StrictModel):
     query: str = Field(min_length=1, max_length=500)
     top_k: int = Field(default=3, ge=1, le=10)
+    project_id: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class EvidenceAdoptionRequest(StrictModel):
@@ -686,6 +687,7 @@ def create_app(
     @app.delete("/api/projects/{project_id}", status_code=204)
     def delete_project(project_id: str) -> None:
         projects.delete(project_id)
+        evidence.delete_project(project_id)
         photometry_assets.remove_project(project_id)
 
     @app.get("/api/projects/{project_id}/revisions")
@@ -766,7 +768,9 @@ def create_app(
 
     @app.post("/api/evidence/search")
     def search_evidence(request: EvidenceSearchRequest) -> dict[str, Any]:
-        results = evidence.search(request.query, top_k=request.top_k)
+        if request.project_id:
+            projects.get(request.project_id)
+        results = evidence.search(request.query, top_k=request.top_k, project_id=request.project_id)
         return {
             "evidence": [item.model_dump(mode="json") for item in results],
             "formatted": format_evidence(results),
@@ -775,7 +779,7 @@ def create_app(
     @app.post("/api/projects/{project_id}/evidence")
     def adopt_evidence(project_id: str, request: EvidenceAdoptionRequest) -> dict[str, Any]:
         try:
-            adopted = evidence.get_evidence(request.evidence_ids)
+            adopted = evidence.get_evidence(request.evidence_ids, project_id=project_id)
         except EvidenceNotFoundError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         state = projects.get(project_id)
@@ -790,11 +794,16 @@ def create_app(
             "project": updated.model_dump(mode="json"),
         }
 
-    @app.post("/api/documents", status_code=201)
-    async def add_document(
+    async def _upload_document(
         file: Annotated[UploadFile, File()],
         source_type: Annotated[Literal["standard", "project_document", "user_note"], Form()] = "project_document",
+        *,
+        project_id: str | None = None,
     ) -> dict[str, Any]:
+        if project_id:
+            projects.get(project_id)
+        elif source_type == "project_document":
+            raise HTTPException(status_code=422, detail="项目资料必须从当前项目上传")
         safe_name = _safe_upload_name(file.filename or "document")
         suffix = Path(safe_name).suffix.lower()
         if suffix not in {".pdf", ".docx", ".md", ".txt"}:
@@ -802,12 +811,14 @@ def create_app(
         content = await file.read()
         if len(content) > MAX_DRAWING_BYTES:
             raise HTTPException(status_code=413, detail="文件不能超过 50 MB")
-        target = _unique_upload_target(USER_DOCUMENTS_DIRECTORY, safe_name)
+        storage_directory = USER_DOCUMENTS_DIRECTORY if project_id is None else projects.directory / f"{project_id}.documents"
+        storage_directory.mkdir(parents=True, exist_ok=True)
+        target = _unique_upload_target(storage_directory, safe_name)
         await run_in_threadpool(target.write_bytes, content)
 
         def index_upload():
-            document = load_document(target)
-            return document, evidence.add_document(document, source_type=source_type)
+            document = load_document(target, allowed_root=storage_directory)
+            return document, evidence.add_document(document, source_type=source_type, project_id=project_id)
 
         try:
             document, chunk_count = await run_in_threadpool(index_upload)
@@ -821,6 +832,25 @@ def create_app(
             "page_count": document.page_count,
             "indexed_chunks": chunk_count,
         }
+
+    @app.post("/api/documents", status_code=201)
+    async def add_document(
+        file: Annotated[UploadFile, File()],
+        source_type: Annotated[Literal["standard", "project_document", "user_note"], Form()] = "standard",
+    ) -> dict[str, Any]:
+        """Ingest a global knowledge-base document."""
+
+        return await _upload_document(file, source_type, project_id=None)
+
+    @app.post("/api/projects/{project_id}/documents", status_code=201)
+    async def add_project_document(
+        project_id: str,
+        file: Annotated[UploadFile, File()],
+        source_type: Annotated[Literal["project_document", "user_note"], Form()] = "project_document",
+    ) -> dict[str, Any]:
+        """Ingest a document visible only to one project and global evidence."""
+
+        return await _upload_document(file, source_type, project_id=project_id)
 
     @app.post("/api/projects/{project_id}/calculations")
     def calculate(project_id: str, request: CalculationRequest) -> dict[str, Any]:
