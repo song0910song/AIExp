@@ -45,6 +45,11 @@ SYSTEM_PROMPT = """你是室内照明设计顾问与流程编排者。
 11. 图纸能力边界：系统可解析项目已导入的 DXF/DWG 平面图，提取单位、图层、文字、墙体/净空边界候选、面积候选与灯具位置候选。解析结果是“候选事实”，只有经用户确认或规则自动选定并写入任务书的几何（面积、长宽、空间名称）才能用于计算和选型。不得把图纸解析候选描述为已确认设计事实，也不得声称系统已自动识别墙体、门窗、布灯位置、三维场景或 DIALux 仿真结果。
 12. 仿真结果边界：系统支持导入用户在 DIALux evo 导出的结构化仿真结果（照度、均匀度、UGR、LPD），并校验其与当前 DIALux 任务包（handoff_id、输入快照、最终灯具）是否一致。只有校验为 matched 的结果才能称为本项目结论；mismatch/incomplete/unverified 的结果只能作为参考资料说明，不能作为合规结论。任务书、最终灯具或图纸变化会使旧仿真结果标记为 stale，此时必须提示用户重新仿真，不得沿用旧结果。
 """
+
+# Scope rule is kept explicit for providers that choose tool arguments from
+# the system prompt: project uploads are private, while global knowledge is
+# available to every project.
+SYSTEM_PROMPT += "\nEvidence scope: when a current project_id is available, pass it to search_evidence so results combine global knowledge with that project's private documents. Never expose one project's documents to another project.\n"
 # Module-level hook so the shared agent can report SDK-level model retries
 # (429 / 5xx / connection errors) back to the active request. LangChain runs
 # model calls on its own executor threads, so a thread-local would miss them.

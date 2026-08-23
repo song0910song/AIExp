@@ -22,7 +22,7 @@ export function EvidencePanel({ project, onProject }: { project: Project; onProj
     setSearching(true);
     setNotice(null);
     try {
-      const response = await api.searchEvidence(query, 5);
+      const response = await api.searchEvidence(query, 5, project.project_id);
       setResults(response.evidence);
       setSelected([]);
     } catch (reason) {
@@ -56,7 +56,7 @@ export function EvidencePanel({ project, onProject }: { project: Project; onProj
     setUploading(true);
     setNotice(null);
     try {
-      const response = await api.uploadDocument(file, String(data.get("source_type")));
+      const response = await api.uploadProjectDocument(project.project_id, file, String(data.get("source_type")));
       setNotice({ tone: "success", text: `${response.source_name} 已入库，共 ${response.indexed_chunks} 个检索片段。` });
       event.currentTarget.reset();
     } catch (reason) {
@@ -107,7 +107,7 @@ export function EvidencePanel({ project, onProject }: { project: Project; onProj
 
         <Panel title="资料入库" eyebrow="DOCUMENT INGEST">
           <form onSubmit={upload} className="upload-form">
-            <Field label="资料类别"><select name="source_type" defaultValue="project_document"><option value="standard">标准规范</option><option value="project_document">项目资料</option><option value="user_note">人工备注</option></select></Field>
+            <Field label="资料类别"><select name="source_type" defaultValue="project_document"><option value="project_document">项目资料</option><option value="user_note">人工备注</option></select></Field>
             <Field label="选择文件" hint="支持 PDF、DOCX、Markdown、TXT；最大 50 MB。"><input name="file" type="file" required accept=".pdf,.docx,.md,.txt" /></Field>
             <BusyButton busy={uploading} type="submit"><FileUp size={16} />上传并入库</BusyButton>
           </form>

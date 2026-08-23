@@ -63,6 +63,7 @@ class SQLiteDatabase:
                 source_hash TEXT PRIMARY KEY,
                 source_name TEXT NOT NULL,
                 source_type TEXT NOT NULL,
+                project_id TEXT,
                 page_count INTEGER,
                 indexed_at TEXT NOT NULL
             );
@@ -72,6 +73,7 @@ class SQLiteDatabase:
                 source_hash TEXT NOT NULL REFERENCES documents(source_hash) ON DELETE CASCADE,
                 source_name TEXT NOT NULL,
                 source_type TEXT NOT NULL,
+                project_id TEXT,
                 locator TEXT NOT NULL,
                 content TEXT NOT NULL,
                 indexed_at TEXT NOT NULL
@@ -107,6 +109,14 @@ class SQLiteDatabase:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS chat_sessions_project_id_idx ON chat_sessions(project_id)"
         )
+        for table in ("documents", "evidence_chunks"):
+            table_columns = {
+                str(row[1]) for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall()
+            }
+            if "project_id" not in table_columns:
+                connection.execute(f'ALTER TABLE "{table}" ADD COLUMN project_id TEXT')
+        connection.execute("CREATE INDEX IF NOT EXISTS documents_project_id_idx ON documents(project_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS evidence_chunks_project_id_idx ON evidence_chunks(project_id)")
 
     def _is_healthy(self) -> bool:
         uri = f"file:{self.path.resolve().as_posix()}?mode=ro"

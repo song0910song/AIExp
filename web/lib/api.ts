@@ -63,10 +63,10 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ expected_revision, brief }),
     }),
-  searchEvidence: (query: string, top_k = 3) =>
+  searchEvidence: (query: string, top_k = 3, projectId?: string) =>
     request<{ evidence: import("./types").Evidence[]; formatted: string }>("/evidence/search", {
       method: "POST",
-      body: JSON.stringify({ query, top_k }),
+      body: JSON.stringify({ query, top_k, ...(projectId ? { project_id: projectId } : {}) }),
     }),
   adoptEvidence: (id: string, expected_revision: number, evidence_ids: string[]) =>
     request<{ evidence: import("./types").Evidence[]; project: Project }>(`/projects/${id}/evidence`, {
@@ -81,6 +81,15 @@ export const api = {
       method: "POST",
       body: data,
     });
+  },
+  uploadProjectDocument: (projectId: string, file: File, sourceType = "project_document") => {
+    const data = new FormData();
+    data.append("file", file);
+    data.append("source_type", sourceType);
+    return request<{ source_name: string; source_type: string; indexed_chunks: number; sha256: string }>(
+      `/projects/${projectId}/documents`,
+      { method: "POST", body: data },
+    );
   },
   calculate: (id: string, expected_revision: number, inputs: Record<string, number>) =>
     request<{ calculation: import("./types").Calculation; project: Project }>(`/projects/${id}/calculations`, {

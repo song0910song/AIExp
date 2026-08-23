@@ -57,6 +57,11 @@ class EvidenceAdoptionInput(ProjectReference):
     evidence_ids: list[str] = Field(min_length=1, max_length=20)
 
 
+class EvidenceSearchInput(StrictModel):
+    query: str = Field(min_length=1, max_length=500)
+    project_id: str | None = Field(default=None, min_length=8, max_length=64)
+
+
 class BriefUpdateInput(ProjectReference):
     expected_revision: int = Field(ge=0)
     brief: DesignBrief
@@ -131,6 +136,16 @@ class ReportInput(DialuxTaskInput):
 
 project_store = ProjectStore()
 evidence_store = create_evidence_store()
+
+
+def _get_scoped_evidence(evidence_ids: list[str], project_id: str) -> list:
+    try:
+        return evidence_store.get_evidence(evidence_ids, project_id=project_id)
+    except TypeError as error:
+        if "project_id" not in str(error):
+            raise
+        # Keep lightweight test doubles and third-party stores compatible.
+        return evidence_store.get_evidence(evidence_ids)
 
 
 def _update_at_latest_revision(
@@ -222,7 +237,7 @@ def apply_rag_lighting_parameters(
         raise ValueError("At least one RAG-derived lighting parameter is required")
 
     evidence_ids = list(dict.fromkeys(evidence_ids))
-    evidence = evidence_store.get_evidence(evidence_ids)
+    evidence = _get_scoped_evidence(evidence_ids, project_id)
     if len(evidence) != len(evidence_ids):
         raise ValueError("Some RAG evidence IDs could not be resolved")
 
@@ -277,11 +292,11 @@ def apply_rag_lighting_parameters(
     }
 
 
-@tool("search_evidence")
-def search_evidence(query: str) -> dict:
-    """Search approved project and standard extracts. Returns source text and locators, never invented rules."""
+@tool("search_evidence", args_schema=EvidenceSearchInput)
+def search_evidence(query: str, project_id: str | None = None) -> dict:
+    """Search global standards plus documents belonging to the requested project."""
 
-    evidence = evidence_store.search(query, top_k=3)
+    evidence = evidence_store.search(query, top_k=3, project_id=project_id)
     return {"evidence": [_data(item) for item in evidence], "formatted": format_evidence(evidence)}
 
 
@@ -289,7 +304,7 @@ def search_evidence(query: str) -> dict:
 def adopt_evidence(project_id: str, expected_revision: int, evidence_ids: list[str]) -> dict:
     """Attach retrieved evidence to a project revision before using it in a formal report."""
 
-    adopted = evidence_store.get_evidence(evidence_ids)
+    adopted = _get_scoped_evidence(evidence_ids, project_id)
     updated, rebased = _update_at_latest_revision(
         project_id,
         expected_revision,
@@ -308,14 +323,22 @@ def adopt_evidence(project_id: str, expected_revision: int, evidence_ids: list[s
     }
 
 
-@tool("add_document")
-def add_document(file_path: str, source_type: str = "project_document") -> dict:
+class AddDocumentInput(StrictModel):
+    file_path: str
+    source_type: str = "project_document"
+    project_id: str | None = Field(default=None, min_length=8, max_length=64)
+
+
+@tool("add_document", args_schema=AddDocumentInput)
+def add_document(file_path: str, source_type: str = "project_document", project_id: str | None = None) -> dict:
     """Index an approved workspace .pdf, .docx, .md or .txt document for evidence retrieval."""
 
     if source_type not in {"standard", "project_document", "user_note"}:
         raise ValueError("source_type must be standard, project_document or user_note")
+    if source_type == "project_document" and not project_id:
+        raise ValueError("project_document requires project_id")
     document = load_document(file_path)
-    chunk_count = evidence_store.add_document(document, source_type=source_type)
+    chunk_count = evidence_store.add_document(document, source_type=source_type, project_id=project_id)
     return {
         "source_name": document.source_name,
         "sha256": document.sha256,

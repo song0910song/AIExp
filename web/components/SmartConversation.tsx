@@ -373,7 +373,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
           uploads.push({ floorPlan, name: floorPlan.asset.source_name });
           continue;
         }
-        const document = await api.uploadDocument(file, "project_document");
+        const document = await api.uploadProjectDocument(project.project_id, file, "project_document");
         uploads.push({ name: document.source_name });
       }
       uploadedNames = uploads.map((upload) => upload.name);
