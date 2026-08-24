@@ -15,8 +15,7 @@ wheels/
 !.env.example
 
 # Local SQLite state and test artifacts
-data/lighting_design.sqlite3*
-data/chroma
+data/
 .tmp/
 .cache/
 .pytest_cache/
