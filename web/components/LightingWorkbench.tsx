@@ -164,7 +164,7 @@ export function LightingWorkbench() {
       <aside className={`chatbot-sidebar ${mobileOpen ? "chatbot-sidebar-open" : ""} ${sidebarCollapsed ? "chatbot-sidebar-is-collapsed" : ""}`}>
         <div className="chatbot-sidebar-brand">
           <div className="app-logo" aria-hidden="true"><span /><span /><span /></div>
-          <div className="chatbot-sidebar-copy"><strong>光序</strong><small>Lighting design agent</small></div>
+          <div className="chatbot-sidebar-copy"><strong>LuxBeyond</strong><small>Lighting design agent</small></div>
           <button className="sidebar-close" onClick={() => setMobileOpen(false)} aria-label="关闭导航"><X size={18} /></button>
           <button className="sidebar-toggle" onClick={toggleSidebar} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}>
             {sidebarCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
