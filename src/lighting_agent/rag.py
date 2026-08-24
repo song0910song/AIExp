@@ -91,6 +91,17 @@ class StoredChunk:
     project_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class StoredDocument:
+    source_hash: str
+    source_name: str
+    source_type: str
+    page_count: int | None
+    indexed_at: str
+    project_id: str | None
+    indexed_chunks: int
+
+
 def stable_chunk_id(source_hash: str, position: int, content: str) -> str:
     """Return the identifier shared by the audit database and Chroma index."""
 
@@ -316,6 +327,70 @@ class LocalEvidenceStore:
         with self.database.transaction() as connection:
             result = connection.execute("DELETE FROM documents WHERE project_id = ?", (project_id,))
             return int(result.rowcount)
+
+    def list_documents(self, *, project_id: str | None = None) -> list[StoredDocument]:
+        """List indexed documents in one scope, including their chunk counts."""
+
+        connection = self.database.connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT d.source_hash, d.source_name, d.source_type, d.page_count,
+                       d.indexed_at, d.project_id, COUNT(c.chunk_id) AS indexed_chunks
+                FROM documents AS d
+                LEFT JOIN evidence_chunks AS c ON c.source_hash = d.source_hash
+                WHERE d.project_id IS NULL OR d.project_id = ?
+                GROUP BY d.source_hash
+                ORDER BY d.indexed_at DESC, d.source_name COLLATE NOCASE
+                """,
+                (project_id,),
+            ).fetchall()
+        finally:
+            connection.close()
+        return [
+            StoredDocument(
+                source_hash=str(row["source_hash"]),
+                source_name=str(row["source_name"]),
+                source_type=str(row["source_type"]),
+                page_count=int(row["page_count"]) if row["page_count"] is not None else None,
+                indexed_at=str(row["indexed_at"]),
+                project_id=str(row["project_id"]) if row["project_id"] is not None else None,
+                indexed_chunks=int(row["indexed_chunks"]),
+            )
+            for row in rows
+        ]
+
+    def delete_document(self, source_hash: str) -> StoredDocument:
+        """Delete one indexed document and its cascaded evidence chunks."""
+
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT d.source_hash, d.source_name, d.source_type, d.page_count,
+                       d.indexed_at, d.project_id, COUNT(c.chunk_id) AS indexed_chunks
+                FROM documents AS d
+                LEFT JOIN evidence_chunks AS c ON c.source_hash = d.source_hash
+                WHERE d.source_hash = ? AND d.project_id IS NULL
+                GROUP BY d.source_hash
+                """,
+                (source_hash,),
+            ).fetchone()
+            if row is None:
+                raise EvidenceNotFoundError(f"Document was not found: {source_hash}")
+            document = StoredDocument(
+                source_hash=str(row["source_hash"]),
+                source_name=str(row["source_name"]),
+                source_type=str(row["source_type"]),
+                page_count=int(row["page_count"]) if row["page_count"] is not None else None,
+                indexed_at=str(row["indexed_at"]),
+                project_id=str(row["project_id"]) if row["project_id"] is not None else None,
+                indexed_chunks=int(row["indexed_chunks"]),
+            )
+            connection.execute(
+                "DELETE FROM documents WHERE source_hash = ? AND project_id IS NULL",
+                (source_hash,),
+            )
+            return document
 
     def _import_legacy_index(self) -> None:
         legacy_index_path = self.index_path or LEGACY_RAG_INDEX_FILE
@@ -613,6 +688,18 @@ class ChromaEvidenceStore:
             if ids:
                 self.vector_store.delete(ids=ids)
             return self.audit_store.delete_project(project_id)
+
+    def list_documents(self, *, project_id: str | None = None) -> list[StoredDocument]:
+        return self.audit_store.list_documents(project_id=project_id)
+
+    def delete_document(self, source_hash: str) -> StoredDocument:
+        with _CHROMA_OPERATION_LOCK:
+            document = self.audit_store.delete_document(source_hash)
+            result = self.vector_store.get(where={"source_hash": source_hash}, include=["metadatas"])
+            ids = [str(item) for item in result.get("ids", [])]
+            if ids:
+                self.vector_store.delete(ids=ids)
+            return document
 
     @staticmethod
     def _evidence(content: str, metadata: dict, score: float | None = None) -> Evidence:

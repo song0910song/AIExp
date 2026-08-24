@@ -794,6 +794,35 @@ def create_app(
             "project": updated.model_dump(mode="json"),
         }
 
+    @app.get("/api/documents")
+    def list_global_documents() -> list[dict[str, Any]]:
+        """List documents imported into the global knowledge base."""
+
+        return [
+            {
+                "source_hash": item.source_hash,
+                "source_name": item.source_name,
+                "source_type": item.source_type,
+                "page_count": item.page_count,
+                "indexed_at": item.indexed_at,
+                "indexed_chunks": item.indexed_chunks,
+            }
+            for item in evidence.list_documents()
+        ]
+
+    @app.delete("/api/documents/{source_hash}", status_code=204)
+    def delete_global_document(source_hash: str) -> None:
+        """Remove a global document, its RAG chunks and its uploaded file."""
+
+        try:
+            document = evidence.delete_document(source_hash)
+        except EvidenceNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        target = (USER_DOCUMENTS_DIRECTORY / Path(document.source_name).name).resolve()
+        root = USER_DOCUMENTS_DIRECTORY.resolve()
+        if target.parent == root:
+            target.unlink(missing_ok=True)
+
     async def _upload_document(
         file: Annotated[UploadFile, File()],
         source_type: Annotated[Literal["standard", "project_document", "user_note"], Form()] = "project_document",
@@ -802,7 +831,7 @@ def create_app(
     ) -> dict[str, Any]:
         if project_id:
             projects.get(project_id)
-        elif source_type == "project_document":
+        if source_type not in {"standard", "project_document", "user_note"}:
             raise HTTPException(status_code=422, detail="项目资料必须从当前项目上传")
         safe_name = _safe_upload_name(file.filename or "document")
         suffix = Path(safe_name).suffix.lower()

@@ -887,9 +887,11 @@ textarea:focus {
 }
 
 .knowledge-history-panel { margin-top: 16px; }
-.knowledge-history-row { display: grid; grid-template-columns: minmax(220px, 1.5fr) 100px 120px 150px auto; color: var(--ink-muted); font-size: 11px; }
+.knowledge-history-row { display: grid; grid-template-columns: minmax(220px, 1.5fr) 100px 120px 150px 145px auto; color: var(--ink-muted); font-size: 11px; }
 .knowledge-history-file strong { overflow: hidden; color: var(--ink-soft); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .knowledge-history-row code { overflow: hidden; color: var(--ink-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-delete-button { color: var(--ink-muted); }
+.knowledge-delete-button:hover:not(:disabled) { color: var(--danger); }
 
 @media (max-width: 800px) {
   .knowledge-grid { grid-template-columns: 1fr; }
