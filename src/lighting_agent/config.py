@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIRECTORY = PROJECT_ROOT / "data"
@@ -15,6 +17,10 @@ LEGACY_RAG_INDEX_FILE = DATA_DIRECTORY / "rag" / "index.json"
 USER_DOCUMENTS_DIRECTORY = PROJECT_ROOT / "src" / "data" / "user_docs"
 DATABASE_FILE = DATA_DIRECTORY / "lighting_design.sqlite3"
 
+# Load local .env before Settings defaults are evaluated (dataclass defaults run
+# at class definition time); existing environment variables take precedence.
+load_dotenv(PROJECT_ROOT / ".env")
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -22,7 +28,7 @@ class Settings:
 
     llm_model: str = os.getenv("LIGHTING_LLM_MODEL", "deepseek-v4-flash")
     llm_base_url: str = os.getenv("LIGHTING_LLM_BASE_URL", "https://opencode.ai/zen/go/v1/")
-    llm_api_key: str | None = os.getenv("LIGHTING_LLM_API_KEY", "sk-MI6DGswt1YQRw7kGfDv1xHf47dqx2RNUhYIpX5KxD605AsFwr2RDM02KWFJEbluZ")
+    llm_api_key: str | None = os.getenv("LIGHTING_LLM_API_KEY")
     llm_temperature: float = float(os.getenv("LIGHTING_LLM_TEMPERATURE", "0.3"))
     llm_timeout_seconds: float = float(os.getenv("LIGHTING_LLM_TIMEOUT_SECONDS", "60"))
     # Codex-style: SDK retries transient model failures (429/5xx/connection) up to 5 times with exponential backoff + jitter.
