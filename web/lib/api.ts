@@ -37,6 +37,15 @@ type ChatHistoryMessage = {
   content: string;
 };
 
+export type GlobalDocument = {
+  source_hash: string;
+  source_name: string;
+  source_type: string;
+  page_count: number | null;
+  indexed_at: string;
+  indexed_chunks: number;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_ROOT}${path}`, {
     ...init,
@@ -54,10 +63,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<Health>("/health"),
   projects: () => request<Project[]>("/projects"),
+  globalDocuments: () => request<GlobalDocument[]>("/documents"),
   project: (id: string) => request<Project>(`/projects/${id}`),
   createProject: (brief: Partial<DesignBrief> & { project_name: string }) =>
     request<Project>("/projects", { method: "POST", body: JSON.stringify(brief) }),
   deleteProject: (id: string) => request<void>(`/projects/${id}`, { method: "DELETE" }),
+  deleteGlobalDocument: (sourceHash: string) => request<void>(`/documents/${encodeURIComponent(sourceHash)}`, { method: "DELETE" }),
   updateBrief: (id: string, expected_revision: number, brief: DesignBrief) =>
     request<Project>(`/projects/${id}/brief`, {
       method: "PUT",
