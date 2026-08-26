@@ -102,8 +102,8 @@ export const api = {
       { method: "POST", body: data },
     );
   },
-  calculate: (id: string, expected_revision: number, inputs: Record<string, number>) =>
-    request<{ calculation: import("./types").Calculation; project: Project }>(`/projects/${id}/calculations`, {
+  calculate: (id: string, expected_revision: number, inputs: Record<string, unknown> | Array<Record<string, unknown>>) =>
+    request<{ calculations: import("./types").Calculation[]; project: Project }>(`/projects/${id}/calculations`, {
       method: "POST",
       body: JSON.stringify({ expected_revision, inputs }),
     }),
@@ -134,10 +134,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  selectLuminaires: (id: string, expectedRevision: number, luminaireIds: string[]) =>
+  selectLuminaires: (id: string, expectedRevision: number, luminaireIds: string[], groupAssignments: Record<string, string[]> = {}) =>
     request<Project>(`/projects/${id}/selected-luminaires`, {
       method: "PUT",
-      body: JSON.stringify({ expected_revision: expectedRevision, luminaire_ids: luminaireIds }),
+      body: JSON.stringify({ expected_revision: expectedRevision, luminaire_ids: luminaireIds, group_assignments: groupAssignments }),
     }),
   photometryAssets: (id: string) =>
     request<{ assets: import("./types").PhotometryAsset[] }>(`/projects/${id}/photometry`),

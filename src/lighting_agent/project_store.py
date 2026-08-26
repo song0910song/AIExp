@@ -144,6 +144,7 @@ class ProjectStore:
                 "luminaires",
                 "luminaire_search_runs",
                 "selected_luminaire_ids",
+                "luminaire_group_assignments",
                 "floor_plan",
                 "simulation_runs",
                 "open_questions",
@@ -156,6 +157,12 @@ class ProjectStore:
                 state.selected_luminaire_ids = [
                     item for item in state.selected_luminaire_ids if item in candidate_ids
                 ]
+                state.luminaire_group_assignments = {
+                    group_id: [item for item in ids if item in candidate_ids]
+                    for group_id, ids in state.luminaire_group_assignments.items()
+                }
+            if update.selected_luminaire_ids is not None and update.luminaire_group_assignments is None:
+                state.luminaire_group_assignments = {}
             if update.brief is not None and update.open_questions is None:
                 state.refresh_open_questions()
             if brief_changed:
@@ -165,6 +172,7 @@ class ProjectStore:
                 ]
                 # A changed task brief invalidates the prior final-selection conclusion.
                 state.selected_luminaire_ids = []
+                state.luminaire_group_assignments = {}
             if brief_changed or selected_changed or floor_plan_changed or luminaires_changed:
                 self._mark_simulation_runs_stale(
                     state,
@@ -353,6 +361,7 @@ class ProjectStore:
         project_id: str,
         expected_revision: int,
         luminaire_ids: list[str],
+        group_assignments: dict[str, list[str]] | None = None,
     ) -> ProjectState:
         """Persist final luminaires, separately from the searchable candidate history."""
 
@@ -391,10 +400,32 @@ class ProjectStore:
                     "Final luminaire selection requires candidates verified against the current brief: "
                     + ", ".join(ineligible_ids)
                 )
-            if state.selected_luminaire_ids == selected_ids:
+            assignments = {
+                str(group_id): list(dict.fromkeys(ids))
+                for group_id, ids in (group_assignments or {}).items()
+            }
+            unknown_assigned = [
+                item for ids in assignments.values() for item in ids if item not in selected_ids
+            ]
+            if unknown_assigned:
+                raise ValueError(
+                    "Group assignments must reference final selected luminaires: "
+                    + ", ".join(dict.fromkeys(unknown_assigned))
+                )
+            group_ids = {group.group_id for group in state.brief.lighting_groups}
+            unknown_groups = [item for item in assignments if item not in group_ids]
+            if unknown_groups:
+                raise ValueError(
+                    "Group assignments reference unknown lighting groups: " + ", ".join(unknown_groups)
+                )
+            if (
+                state.selected_luminaire_ids == selected_ids
+                and state.luminaire_group_assignments == assignments
+            ):
                 return state
 
             state.selected_luminaire_ids = selected_ids
+            state.luminaire_group_assignments = assignments
             self._mark_simulation_runs_stale(state, "Project inputs changed: selected luminaires")
             state.refresh_workflow_status()
             state.revision += 1

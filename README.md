@@ -33,11 +33,11 @@ $env:LIGHTING_LLM_MODEL = "deepseek-v4-flash"  # 可选
 ## 快速开始
 
 ```powershell
-uv run python main.py init-project "会议室改造" --space-type "会议室" --area-m2 30 --mounting-height-m 2.7 --target-lx 500 --target-cct-k 4000 --min-cri 80
+uv run python main.py init-project "会议室改造" --space-type "会议室" --area-m2 30 --lighting-groups-json '[{"group_id":"general-01","region_name":"会议室","group_name":"基础照明","area_m2":30,"mounting_height_m":2.7,"target_illuminance_lx":500,"confirmed":true}]' --target-lx 500 --target-cct-k 4000 --min-cri 80
 uv run python main.py show-project <project_id>
 uv run python main.py add-document .\src\data\user_docs\GB-50034-2024.md --source-type standard
 uv run python main.py search-evidence "会议室 照度 显色指数"
-uv run python main.py calculate <project_id> --revision 0 --area-m2 30 --target-lx 500 --lumens 3200 --power-w 24 --utilization-factor 0.6 --maintenance-factor 0.8
+uv run python main.py calculate <project_id> --revision 0 --group-id general-01 --region-name "会议室" --group-name "基础照明" --mounting-height-m 2.7 --area-m2 30 --target-lx 500 --lumens 3200 --power-w 24 --utilization-factor 0.6 --maintenance-factor 0.8
 uv run python main.py search-luminaires "嵌入式 LED 筒灯" --target-cct-k 4000 --min-cri 80 --max-power-w 25
 uv run python main.py create-dialux-task <project_id> --revision 1
 uv run python main.py import-dialux-result <project_id> --revision 1 --handoff-id <handoff_id> --maintained-lx 750 --uniformity-u0 0.6

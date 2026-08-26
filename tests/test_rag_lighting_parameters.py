@@ -5,7 +5,19 @@ import pytest
 import lighting_agent.agent as agent
 import lighting_agent.tools as agent_tools
 from lighting_agent.project_store import ProjectStore
-from lighting_agent.schemas import DesignBrief, Evidence
+from lighting_agent.schemas import DesignBrief, Evidence, LightingGroup
+
+
+def _group() -> LightingGroup:
+    return LightingGroup(
+        group_id="group-0001",
+        region_name="Meeting room",
+        group_name="General lighting",
+        area_m2=30,
+        mounting_height_m=2.7,
+        target_illuminance_lx=300,
+        confirmed=True,
+    )
 
 
 class FakeEvidenceStore:
@@ -31,7 +43,7 @@ def test_rag_tool_persists_lighting_parameters_and_field_provenance(tmp_path, mo
             project_name="RAG meeting room",
             space_type="普通会议室",
             area_m2=30,
-            mounting_height_m=2.7,
+            lighting_groups=[_group()],
         )
     )
     monkeypatch.setattr(agent_tools, "project_store", store)
@@ -91,7 +103,7 @@ def test_rag_tool_records_provenance_when_value_matches_existing(tmp_path, monke
             project_name="Template-initialised targets",
             space_type="普通办公室",
             area_m2=30,
-            mounting_height_m=2.7,
+            lighting_groups=[_group()],
             target_illuminance_lx=300,
             min_cri=80,
             confirmed_fields={"target_illuminance_lx", "min_cri"},

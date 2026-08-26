@@ -5,6 +5,10 @@ from lighting_agent.schemas import CalculationInput, RuleRequirement
 def test_lumen_method_is_reproducible() -> None:
     result = calculate_lumen_method(
         CalculationInput(
+            group_id="group-a",
+            region_name="Open office",
+            group_name="General lighting",
+            mounting_height_m=2.7,
             area_m2=30,
             target_illuminance_lx=500,
             luminaire_luminous_flux_lm=3200,

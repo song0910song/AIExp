@@ -22,7 +22,6 @@ export type DesignBrief = {
   length_m: number | null;
   width_m: number | null;
   room_height_m: number | null;
-  mounting_height_m: number | null;
   workplane_height_m: number | null;
   target_illuminance_lx: number | null;
   target_cct_k: number | null;
@@ -42,6 +41,28 @@ export type DesignBrief = {
     applied_at: string;
   }>;
   template_origin: BriefTemplateOrigin | null;
+  lighting_groups: LightingGroup[];
+};
+
+export type LightingGroup = {
+  group_id: string;
+  region_name: string;
+  group_name: string;
+  purpose: string | null;
+  area_m2: number;
+  mounting_height_m: number;
+  target_illuminance_lx: number;
+  target_cct_k: number | null;
+  min_cri: number | null;
+  target_ugr: number | null;
+  target_uniformity_u0: number | null;
+  max_lpd_w_m2: number | null;
+  utilization_factor: number | null;
+  maintenance_factor: number | null;
+  luminaire_ids: string[];
+  source_evidence_ids: string[];
+  source_references: string[];
+  confirmed: boolean;
 };
 
 export type BriefTemplateOrigin = {
@@ -63,6 +84,10 @@ export type Evidence = {
 export type Calculation = {
   method: "lumen_method";
   inputs: {
+    group_id: string;
+    region_name: string;
+    group_name: string;
+    mounting_height_m: number | null;
     area_m2: number;
     target_illuminance_lx: number;
     luminaire_luminous_flux_lm: number;
@@ -77,6 +102,10 @@ export type Calculation = {
   assumptions: string[];
   limitations: string[];
   calculated_at: string;
+  group_id: string;
+  region_name: string;
+  group_name: string;
+  mounting_height_m: number | null;
 };
 
 export type RuleCheck = {
@@ -196,6 +225,7 @@ export type Project = {
   rule_checks: RuleCheck[];
   luminaires: Luminaire[];
   selected_luminaire_ids: string[];
+  luminaire_group_assignments: Record<string, string[]>;
   floor_plan: FloorPlan | null;
   open_questions: string[];
   created_at: string;
