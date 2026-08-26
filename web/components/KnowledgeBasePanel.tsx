@@ -40,6 +40,7 @@ export function KnowledgeBasePanel() {
   const [documentContent, setDocumentContent] = useState<GlobalDocumentContent | null>(null);
   const [loadingContent, setLoadingContent] = useState(false);
   const [contentError, setContentError] = useState<string | null>(null);
+  const documentRequestSeq = useRef(0);
 
   useEffect(() => {
     if (!viewingDocument) return;
@@ -51,20 +52,25 @@ export function KnowledgeBasePanel() {
   }, [viewingDocument]);
 
   async function openDocument(document: GlobalDocument) {
+    const requestId = ++documentRequestSeq.current;
     setViewingDocument(document);
     setDocumentContent(null);
     setContentError(null);
     setLoadingContent(true);
     try {
-      setDocumentContent(await api.globalDocumentContent(document.source_hash));
+      const content = await api.globalDocumentContent(document.source_hash);
+      if (requestId === documentRequestSeq.current) setDocumentContent(content);
     } catch (reason) {
-      setContentError(reason instanceof Error ? reason.message : "读取资料内容失败");
+      if (requestId === documentRequestSeq.current) {
+        setContentError(reason instanceof Error ? reason.message : "读取资料内容失败");
+      }
     } finally {
-      setLoadingContent(false);
+      if (requestId === documentRequestSeq.current) setLoadingContent(false);
     }
   }
 
   function closeViewer() {
+    documentRequestSeq.current += 1;
     setViewingDocument(null);
     setDocumentContent(null);
     setContentError(null);
