@@ -46,6 +46,10 @@ export type GlobalDocument = {
   indexed_chunks: number;
 };
 
+export type GlobalDocumentContent = GlobalDocument & {
+  content: string;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_ROOT}${path}`, {
     ...init,
@@ -64,6 +68,8 @@ export const api = {
   health: () => request<Health>("/health"),
   projects: () => request<Project[]>("/projects"),
   globalDocuments: () => request<GlobalDocument[]>("/documents"),
+  globalDocumentContent: (sourceHash: string) =>
+    request<GlobalDocumentContent>(`/documents/${encodeURIComponent(sourceHash)}`),
   project: (id: string) => request<Project>(`/projects/${id}`),
   createProject: (brief: Partial<DesignBrief> & { project_name: string }) =>
     request<Project>("/projects", { method: "POST", body: JSON.stringify(brief) }),

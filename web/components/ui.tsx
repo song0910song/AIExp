@@ -98,10 +98,10 @@ export function Notice({ tone = "info", children }: { tone?: "info" | "danger" |
   );
 }
 
-export function Modal({ title, eyebrow = "NEW PROJECT", children, onClose }: { title: string; eyebrow?: string; children: ReactNode; onClose: () => void }) {
+export function Modal({ title, eyebrow = "NEW PROJECT", className = "", children, onClose }: { title: string; eyebrow?: string; className?: string; children: ReactNode; onClose: () => void }) {
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="modal" role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
+      <section className={`modal ${className}`} role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
         <header className="modal-header">
           <div>
             <p className="eyebrow">{eyebrow}</p>

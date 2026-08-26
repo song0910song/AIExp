@@ -379,6 +379,26 @@ def _context_usage_from_chunk(chunk: Any, context_window_tokens: int) -> dict[st
     return None
 
 
+def _merge_chunk_content(contents: list[str]) -> str:
+    """Join chunked text back into a single document, dropping slide overlaps."""
+
+    merged = ""
+    for text in contents:
+        text = text.strip()
+        if not text:
+            continue
+        if not merged:
+            merged = text
+            continue
+        overlap = 0
+        for size in range(min(400, len(text), len(merged)), 39, -1):
+            if merged.endswith(text[:size]):
+                overlap = size
+                break
+        merged += text[overlap:]
+    return merged
+
+
 def _chat_error_detail(error: Exception, settings: Settings) -> str:
     """Make upstream model failures actionable in the browser."""
 
@@ -824,6 +844,27 @@ def create_app(
         root = USER_DOCUMENTS_DIRECTORY.resolve()
         if target.parent == root:
             target.unlink(missing_ok=True)
+
+    @app.get("/api/documents/{source_hash}")
+    def get_global_document(source_hash: str) -> dict[str, Any]:
+        """Return one global document with its merged full text content."""
+
+        document = next(
+            (item for item in evidence.list_documents() if item.source_hash == source_hash),
+            None,
+        )
+        if document is None:
+            raise HTTPException(status_code=404, detail="全局资料不存在或已删除")
+        chunks = evidence.get_document_chunks(source_hash)
+        return {
+            "source_hash": document.source_hash,
+            "source_name": document.source_name,
+            "source_type": document.source_type,
+            "page_count": document.page_count,
+            "indexed_at": document.indexed_at,
+            "indexed_chunks": document.indexed_chunks,
+            "content": _merge_chunk_content([chunk.content for chunk in chunks]),
+        }
 
     async def _upload_document(
         file: Annotated[UploadFile, File()],
