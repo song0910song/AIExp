@@ -283,6 +283,36 @@ class LocalEvidenceStore:
             raise EvidenceNotFoundError(f"Evidence was not found: {', '.join(missing)}")
         return [self._evidence(chunks[evidence_id]) for evidence_id in unique_ids]
 
+    def get_document_chunks(self, source_hash: str, *, project_id: str | None = None) -> list[StoredChunk]:
+        """Return one document's chunks in index order for full-content preview."""
+
+        connection = self.database.connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT chunk_id, source_name, source_type, source_hash, project_id, locator, content, indexed_at
+                FROM evidence_chunks
+                WHERE source_hash = ? AND (project_id IS NULL OR project_id = ?)
+                ORDER BY rowid ASC
+                """,
+                (source_hash, project_id) if project_id is not None else (source_hash, None),
+            ).fetchall()
+        finally:
+            connection.close()
+        return [
+            StoredChunk(
+                chunk_id=str(row["chunk_id"]),
+                source_name=str(row["source_name"]),
+                source_type=str(row["source_type"]),
+                source_hash=str(row["source_hash"]),
+                project_id=str(row["project_id"]) if row["project_id"] is not None else None,
+                locator=str(row["locator"]),
+                content=str(row["content"]),
+                indexed_at=str(row["indexed_at"]),
+            )
+            for row in rows
+        ]
+
     def _load(self, *, project_id: str | None = None) -> list[StoredChunk]:
         connection = self.database.connect()
         try:
@@ -691,6 +721,9 @@ class ChromaEvidenceStore:
 
     def list_documents(self, *, project_id: str | None = None) -> list[StoredDocument]:
         return self.audit_store.list_documents(project_id=project_id)
+
+    def get_document_chunks(self, source_hash: str, *, project_id: str | None = None) -> list[StoredChunk]:
+        return self.audit_store.get_document_chunks(source_hash, project_id=project_id)
 
     def delete_document(self, source_hash: str) -> StoredDocument:
         with _CHROMA_OPERATION_LOCK:

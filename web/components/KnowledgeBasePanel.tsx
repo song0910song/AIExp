@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { CheckCircle2, FileText, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
-import { api, type GlobalDocument } from "@/lib/api";
+import { CheckCircle2, Eye, FileText, RefreshCw, Search, Trash2, Upload, X } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { api, type GlobalDocument, type GlobalDocumentContent } from "@/lib/api";
 import type { Evidence } from "@/lib/types";
-import { BusyButton, Field, Notice, Panel, StatusPill } from "./ui";
+import { BusyButton, Field, Modal, Notice, Panel, StatusPill } from "./ui";
 
 const sourceTypes = [
   { value: "standard", label: "规范标准", hint: "国家标准、行业标准、企业规范" },
@@ -34,6 +36,39 @@ export function KnowledgeBasePanel() {
   const [results, setResults] = useState<Evidence[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [viewingDocument, setViewingDocument] = useState<GlobalDocument | null>(null);
+  const [documentContent, setDocumentContent] = useState<GlobalDocumentContent | null>(null);
+  const [loadingContent, setLoadingContent] = useState(false);
+  const [contentError, setContentError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!viewingDocument) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") closeViewer();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [viewingDocument]);
+
+  async function openDocument(document: GlobalDocument) {
+    setViewingDocument(document);
+    setDocumentContent(null);
+    setContentError(null);
+    setLoadingContent(true);
+    try {
+      setDocumentContent(await api.globalDocumentContent(document.source_hash));
+    } catch (reason) {
+      setContentError(reason instanceof Error ? reason.message : "读取资料内容失败");
+    } finally {
+      setLoadingContent(false);
+    }
+  }
+
+  function closeViewer() {
+    setViewingDocument(null);
+    setDocumentContent(null);
+    setContentError(null);
+  }
 
   async function refreshDocuments() {
     setLoadingDocuments(true);
@@ -119,8 +154,16 @@ export function KnowledgeBasePanel() {
         </Panel>
       </div>
       <Panel title="已加入的全局资料" eyebrow="GLOBAL DOCUMENTS" className="knowledge-history-panel" action={<button className="icon-button" type="button" onClick={() => void refreshDocuments()} disabled={loadingDocuments} aria-label="刷新全局资料" title="刷新全局资料"><RefreshCw size={15} className={loadingDocuments ? "spin" : ""} /></button>}>
-        {loadingDocuments ? <div className="knowledge-history-empty">正在读取全局资料</div> : documents.length ? <div className="knowledge-history-list">{documents.map((item) => <div className="knowledge-history-row" key={item.source_hash}><span className="knowledge-history-file"><FileText size={16} /><strong title={item.source_name}>{item.source_name}</strong></span><span>{formatSourceType(item.source_type)}</span><span>{item.indexed_chunks} 个资料片段</span><code title={item.source_hash}>{item.source_hash.slice(0, 16)}…</code><span>{formatIndexedAt(item.indexed_at)}</span><button className="icon-button knowledge-delete-button" type="button" onClick={() => void deleteDocument(item)} disabled={deletingHash !== null} aria-label={`删除全局资料 ${item.source_name}`} title="删除全局资料">{deletingHash === item.source_hash ? <RefreshCw size={15} className="spin" /> : <Trash2 size={15} />}</button></div>)}</div> : <div className="knowledge-history-empty">尚未加入全局资料</div>}
+        {loadingDocuments ? <div className="knowledge-history-empty">正在读取全局资料</div> : documents.length ? <div className="knowledge-history-list">{documents.map((item) => <div className="knowledge-history-row" key={item.source_hash} role="button" tabIndex={0} title="点击查看资料内容" onClick={() => void openDocument(item)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openDocument(item); } }}><span className="knowledge-history-file"><FileText size={16} /><strong title={item.source_name}>{item.source_name}</strong></span><span>{formatSourceType(item.source_type)}</span><span>{item.indexed_chunks} 个资料片段</span><code title={item.source_hash}>{item.source_hash.slice(0, 16)}…</code><span>{formatIndexedAt(item.indexed_at)}</span><button className="icon-button knowledge-view-button" type="button" disabled={deletingHash !== null} title="查看内容" aria-label={`查看全局资料 ${item.source_name}`} onClick={(event) => { event.stopPropagation(); void openDocument(item); }}><Eye size={15} /></button><button className="icon-button knowledge-delete-button" type="button" onClick={(event) => { event.stopPropagation(); void deleteDocument(item); }} disabled={deletingHash !== null} aria-label={`删除全局资料 ${item.source_name}`} title="删除全局资料">{deletingHash === item.source_hash ? <RefreshCw size={15} className="spin" /> : <Trash2 size={15} />}</button></div>)}</div> : <div className="knowledge-history-empty">尚未加入全局资料</div>}
       </Panel>
+      {viewingDocument ? (
+        <Modal title={viewingDocument.source_name} eyebrow="DOCUMENT VIEW" className="modal-document" onClose={closeViewer}>
+          <div className="knowledge-doc-meta"><span>{formatSourceType(viewingDocument.source_type)}</span><span>{viewingDocument.indexed_chunks} 个资料片段</span>{viewingDocument.page_count ? <span>{viewingDocument.page_count} 页</span> : null}<span>{formatIndexedAt(viewingDocument.indexed_at)}</span></div>
+          {contentError ? <Notice tone="danger">{contentError}</Notice> : null}
+          {loadingContent ? <div className="knowledge-doc-loading"><RefreshCw size={18} className="spin" /><p>正在加载资料内容…</p></div> : null}
+          {!loadingContent && !contentError && documentContent ? <div className="knowledge-doc-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{documentContent.content || "（资料内容为空）"}</ReactMarkdown></div> : null}
+        </Modal>
+      ) : null}
     </div>
   );
 }
