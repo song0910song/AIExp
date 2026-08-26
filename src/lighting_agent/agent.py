@@ -26,6 +26,7 @@ from .tools import (
     search_luminaires,
     select_luminaires,
     update_project_brief,
+    update_lighting_groups,
 )
 
 
@@ -50,6 +51,9 @@ SYSTEM_PROMPT = """你是室内照明设计顾问与流程编排者。
 # the system prompt: project uploads are private, while global knowledge is
 # available to every project.
 SYSTEM_PROMPT += "\nEvidence scope: when a current project_id is available, pass it to search_evidence so results combine global knowledge with that project's private documents. Never expose one project's documents to another project.\n"
+SYSTEM_PROMPT += """
+Lighting groups are mandatory. Divide the design by concrete rooms, zones, or functional regions. Every group must carry a region name, group name, area, mounting-point height above finished floor, target illuminance, and confirmation status. The mounting-point height is the height to the luminaire mounting or suspension point, not a guessed room height. Extract candidate values only from user chat, approved project documents/PDF/Word evidence, or explicit CAD/DXF text/layer/block metadata. Never infer an unmentioned height from common practice. When height or region evidence conflicts or is missing, call ask_user. Save only user-confirmed groups with update_lighting_groups. Run calculate_preliminary_lighting with one CalculationInput per confirmed group, including group_id and mounting_height_m. Search luminaires with lighting_group_id so each search is tied to one group. Assign final luminaires with group_assignments when calling select_luminaires.
+"""
 # Module-level hook so the shared agent can report SDK-level model retries
 # (429 / 5xx / connection errors) back to the active request. LangChain runs
 # model calls on its own executor threads, so a thread-local would miss them.
@@ -120,6 +124,7 @@ def build_agent(settings: Settings | None = None) -> Any:
             create_project,
             ask_user,
             update_project_brief,
+            update_lighting_groups,
             apply_rag_lighting_parameters,
             search_evidence,
             adopt_evidence,

@@ -8,7 +8,6 @@ const questionLabels: Record<string, string> = {
   space_type: "空间类型",
   area_m2: "面积",
   target_illuminance_lx: "目标照度",
-  mounting_height_m: "安装高度",
 };
 
 export function OverviewPanel({ project, onStartAgent }: { project: Project; onStartAgent: () => void }) {
@@ -46,7 +45,7 @@ export function OverviewPanel({ project, onStartAgent }: { project: Project; onS
         <dl className="overview-facts">
           <div><dt>面积</dt><dd>{formatNumber(project.brief.area_m2)} <small>m2</small></dd></div>
           <div><dt>目标照度</dt><dd>{formatNumber(project.brief.target_illuminance_lx, 0)} <small>lx</small></dd></div>
-          <div><dt>安装高度</dt><dd>{formatNumber(project.brief.mounting_height_m)} <small>m</small></dd></div>
+          <div><dt>照明组 / 吊装点高度</dt><dd>{project.brief.lighting_groups.length ? `${project.brief.lighting_groups.length} 组` : "待确认"}</dd></div>
           <div><dt>目标色温</dt><dd>{formatNumber(project.brief.target_cct_k, 0)} <small>K</small></dd></div>
         </dl>
       </section>

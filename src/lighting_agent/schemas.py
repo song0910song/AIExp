@@ -59,6 +59,34 @@ class BriefTemplateOrigin(StrictModel):
     applied_at: datetime = Field(default_factory=utc_now)
 
 
+class LightingGroup(StrictModel):
+    """One independently calculated lighting group in a room or zone."""
+
+    group_id: str = Field(default_factory=lambda: uuid4().hex, min_length=8, max_length=64)
+    region_name: str = Field(min_length=1, max_length=160)
+    group_name: str = Field(min_length=1, max_length=160)
+    purpose: str | None = Field(default=None, max_length=100)
+    area_m2: float = Field(gt=0, le=100_000)
+    mounting_height_m: float = Field(gt=0, le=100)
+    target_illuminance_lx: float = Field(gt=0, le=100_000)
+    target_cct_k: int | None = Field(default=None, ge=1_000, le=20_000)
+    min_cri: int | None = Field(default=None, ge=0, le=100)
+    target_ugr: float | None = Field(default=None, ge=0, le=40)
+    target_uniformity_u0: float | None = Field(default=None, ge=0, le=1)
+    max_lpd_w_m2: float | None = Field(default=None, gt=0, le=1_000)
+    utilization_factor: float | None = Field(default=None, gt=0, le=1)
+    maintenance_factor: float | None = Field(default=None, gt=0, le=1)
+    luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
+    source_evidence_ids: list[str] = Field(default_factory=list, max_length=20)
+    source_references: list[str] = Field(default_factory=list, max_length=20)
+    confirmed: bool = False
+
+    @field_validator("luminaire_ids", "source_evidence_ids", "source_references")
+    @classmethod
+    def unique_values(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(value.strip() for value in values if value and value.strip()))
+
+
 class DesignBrief(StrictModel):
     """Confirmed input for an indoor lighting design task.
 
@@ -72,7 +100,6 @@ class DesignBrief(StrictModel):
     length_m: float | None = Field(default=None, gt=0, le=1_000)
     width_m: float | None = Field(default=None, gt=0, le=1_000)
     room_height_m: float | None = Field(default=None, gt=0, le=100)
-    mounting_height_m: float | None = Field(default=None, gt=0, le=100)
     workplane_height_m: float | None = Field(default=0.75, ge=0, le=10)
     target_illuminance_lx: float | None = Field(default=None, gt=0, le=100_000)
     target_cct_k: int | None = Field(default=None, ge=1_000, le=20_000)
@@ -88,6 +115,7 @@ class DesignBrief(StrictModel):
     confirmed_fields: set[str] = Field(default_factory=set)
     lighting_parameter_sources: dict[str, LightingParameterSource] = Field(default_factory=dict)
     template_origin: BriefTemplateOrigin | None = None
+    lighting_groups: list[LightingGroup] = Field(default_factory=list, max_length=100)
 
     @field_validator("preferred_brands")
     @classmethod
@@ -108,8 +136,22 @@ class DesignBrief(StrictModel):
         return values
 
     def missing_design_inputs(self) -> list[str]:
-        required = ("space_type", "area_m2", "target_illuminance_lx", "mounting_height_m")
-        return [name for name in required if getattr(self, name) is None]
+        missing: list[str] = []
+        if not self.space_type:
+            missing.append("space_type")
+        if not self.lighting_groups:
+            missing.append("lighting_groups")
+        elif any(not group.confirmed for group in self.lighting_groups):
+            missing.append("lighting_groups_confirmation")
+        return missing
+
+    @field_validator("lighting_groups")
+    @classmethod
+    def unique_lighting_groups(cls, values: list[LightingGroup]) -> list[LightingGroup]:
+        ids = [item.group_id for item in values]
+        if len(ids) != len(set(ids)):
+            raise ValueError("lighting_groups must have unique group_id values")
+        return values
 
 
 class Evidence(StrictModel):
@@ -123,6 +165,10 @@ class Evidence(StrictModel):
 
 
 class CalculationInput(StrictModel):
+    group_id: str = Field(default="unassigned", min_length=1, max_length=64)
+    region_name: str = Field(default="Unassigned region", min_length=1, max_length=160)
+    group_name: str = Field(default="Unassigned group", min_length=1, max_length=160)
+    mounting_height_m: float | None = Field(default=None, gt=0, le=100)
     area_m2: float = Field(gt=0)
     target_illuminance_lx: float = Field(gt=0)
     luminaire_luminous_flux_lm: float = Field(gt=0)
@@ -134,6 +180,10 @@ class CalculationInput(StrictModel):
 class CalculationResult(StrictModel):
     method: Literal["lumen_method"] = "lumen_method"
     inputs: CalculationInput
+    group_id: str = "unassigned"
+    region_name: str = "Unassigned region"
+    group_name: str = "Unassigned group"
+    mounting_height_m: float | None = None
     required_luminous_flux_lm: float
     luminaire_count: int
     installed_power_w: float
@@ -217,6 +267,9 @@ class SimulationRun(StrictModel):
 
 class LuminaireSearchRequest(StrictModel):
     keyword: str = Field(min_length=1, max_length=160)
+    lighting_group_id: str | None = Field(default=None, min_length=8, max_length=64)
+    region_name: str | None = Field(default=None, max_length=160)
+    mounting_height_m: float | None = Field(default=None, gt=0, le=100)
     language: str = Field(default="zh", pattern=r"^[A-Za-z-]{2,5}$")
     brand: str | None = Field(default=None, max_length=100)
     brand_id: str | None = Field(default=None, max_length=128)
@@ -408,6 +461,7 @@ class ProjectState(StrictModel):
     luminaires: list[LuminaireCandidate] = Field(default_factory=list)
     luminaire_search_runs: list[LuminaireSearchRun] = Field(default_factory=list, max_length=500)
     selected_luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
+    luminaire_group_assignments: dict[str, list[str]] = Field(default_factory=dict)
     floor_plan: FloorPlan | None = None
     simulation_runs: list[SimulationRun] = Field(default_factory=list)
     workflow_status: Literal[
@@ -470,6 +524,29 @@ class ProjectState(StrictModel):
         unknown_ids = [item for item in self.selected_luminaire_ids if item not in saved_ids]
         if unknown_ids:
             raise ValueError(f"Selected luminaires are not saved project candidates: {', '.join(unknown_ids)}")
+        selected = set(self.selected_luminaire_ids)
+        unknown_assigned = [
+            luminaire_id
+            for ids in self.luminaire_group_assignments.values()
+            for luminaire_id in ids
+            if luminaire_id not in saved_ids
+        ]
+        if unknown_assigned:
+            raise ValueError(
+                "Assigned luminaires are not saved project candidates: "
+                + ", ".join(dict.fromkeys(unknown_assigned))
+            )
+        unselected_assigned = [
+            luminaire_id
+            for ids in self.luminaire_group_assignments.values()
+            for luminaire_id in ids
+            if luminaire_id not in selected
+        ]
+        if unselected_assigned:
+            raise ValueError(
+                "Assigned luminaires must be final selected luminaires: "
+                + ", ".join(dict.fromkeys(unselected_assigned))
+            )
         return self
 
     def selected_luminaires(self) -> list[LuminaireCandidate]:
@@ -488,6 +565,7 @@ class ProjectUpdate(StrictModel):
     luminaires: list[LuminaireCandidate] | None = None
     luminaire_search_runs: list[LuminaireSearchRun] | None = None
     selected_luminaire_ids: list[str] | None = None
+    luminaire_group_assignments: dict[str, list[str]] | None = None
     floor_plan: FloorPlan | None = None
     simulation_runs: list[SimulationRun] | None = None
     open_questions: list[str] | None = None

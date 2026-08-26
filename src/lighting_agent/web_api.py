@@ -54,7 +54,7 @@ class BriefUpdateRequest(StrictModel):
 
 class CalculationRequest(StrictModel):
     expected_revision: int = Field(ge=0)
-    inputs: CalculationInput
+    inputs: CalculationInput | list[CalculationInput]
 
 
 class RuleCheckRequest(StrictModel):
@@ -82,6 +82,7 @@ class LuminaireWebRequest(LuminaireSearchRequest):
 class LuminaireSelectionRequest(StrictModel):
     expected_revision: int = Field(ge=0)
     luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
+    group_assignments: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class DialuxResultRequest(StrictModel):
@@ -272,10 +273,11 @@ def _fallback_clarification(project: ProjectState) -> dict[str, Any]:
             )
 
     missing_fields = {
+        "lighting_groups": ("Lighting regions and groups", "Confirm each region, group, area, mounting-point height, and target illuminance.", "text"),
+        "lighting_groups_confirmation": ("Confirm lighting groups", "Confirm the source and value of every group mounting-point height.", "text"),
         "space_type": ("空间类型", "请填写空间用途，例如会议室、教室或走廊。", "text"),
         "area_m2": ("设计面积（m2）", "请填写实际参与照明计算的面积。", "number"),
         "target_illuminance_lx": ("目标照度（lx）", "请填写工作面维持照度目标。", "number"),
-        "mounting_height_m": ("灯具安装高度（m）", "请填写灯具发光面距完成地面的安装高度。", "number"),
     }
     for field_id in brief.missing_design_inputs():
         label, description, input_type = missing_fields[field_id]
@@ -444,7 +446,7 @@ _AGENT_WORKFLOW_STEPS: tuple[dict[str, Any], ...] = (
         "id": "brief",
         "title": "补齐设计条件",
         "description": "优先使用已确认 CAD 平面图、规范与项目资料补齐设计条件；仅在证据不确定时请求确认。",
-        "tools": ["apply_rag_lighting_parameters", "ask_user", "update_project_brief"],
+        "tools": ["apply_rag_lighting_parameters", "ask_user", "update_project_brief", "update_lighting_groups"],
     },
     {
         "id": "calculation",
@@ -883,17 +885,18 @@ def create_app(
 
     @app.post("/api/projects/{project_id}/calculations")
     def calculate(project_id: str, request: CalculationRequest) -> dict[str, Any]:
-        result = calculate_lumen_method(request.inputs)
+        inputs = request.inputs if isinstance(request.inputs, list) else [request.inputs]
+        result = [calculate_lumen_method(item) for item in inputs]
         state = projects.get(project_id)
         updated = projects.update(
             project_id,
             ProjectUpdate(
                 expected_revision=request.expected_revision,
-                calculations=[*state.calculations, result],
+                calculations=[*state.calculations, *result],
             ),
         )
         return {
-            "calculation": result.model_dump(mode="json"),
+            "calculations": [item.model_dump(mode="json") for item in result],
             "project": updated.model_dump(mode="json"),
         }
 
@@ -1043,6 +1046,7 @@ def create_app(
                 project_id,
                 request.expected_revision,
                 request.luminaire_ids,
+                request.group_assignments,
             )
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error

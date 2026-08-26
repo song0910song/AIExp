@@ -10,7 +10,6 @@ type ProjectDraft = {
   project_name: string;
   space_type: string;
   area_m2: string;
-  mounting_height_m: string;
   workplane_height_m: string;
   target_illuminance_lx: string;
   target_cct_k: string;
@@ -24,7 +23,6 @@ const emptyDraft: ProjectDraft = {
   project_name: "",
   space_type: "",
   area_m2: "",
-  mounting_height_m: "",
   workplane_height_m: "0.75",
   target_illuminance_lx: "",
   target_cct_k: "",
@@ -76,7 +74,6 @@ export function CreateProjectModal({ onClose, onCreated }: { onClose: () => void
         project_name: draft.project_name.trim(),
         space_type: draft.space_type || null,
         area_m2: toNullableNumber(draft.area_m2),
-        mounting_height_m: toNullableNumber(draft.mounting_height_m),
         workplane_height_m: toNullableNumber(draft.workplane_height_m),
         target_illuminance_lx: toNullableNumber(draft.target_illuminance_lx),
         target_cct_k: toNullableNumber(draft.target_cct_k),
@@ -134,9 +131,6 @@ export function CreateProjectModal({ onClose, onCreated }: { onClose: () => void
           </Field>
           <Field label="面积 / m²">
             <input value={draft.area_m2} onChange={(event) => updateField("area_m2", event.target.value)} type="number" min="0.1" step="0.1" placeholder="30" />
-          </Field>
-          <Field label="安装高度 / m">
-            <input value={draft.mounting_height_m} onChange={(event) => updateField("mounting_height_m", event.target.value)} type="number" min="0.1" step="0.1" placeholder="2.7" />
           </Field>
           <Field label="工作面高度 / m">
             <input value={draft.workplane_height_m} onChange={(event) => updateField("workplane_height_m", event.target.value)} type="number" min="0" step="0.05" />

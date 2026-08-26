@@ -39,7 +39,7 @@ def _add_brief_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--length-m", type=float)
     parser.add_argument("--width-m", type=float)
     parser.add_argument("--room-height-m", type=float)
-    parser.add_argument("--mounting-height-m", type=float)
+    parser.add_argument("--lighting-groups-json", help="JSON array of confirmed lighting groups")
     parser.add_argument("--target-lx", type=float)
     parser.add_argument("--target-cct-k", type=int)
     parser.add_argument("--min-cri", type=int)
@@ -79,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
     calculate.add_argument("--power-w", type=float, required=True)
     calculate.add_argument("--utilization-factor", type=float, required=True)
     calculate.add_argument("--maintenance-factor", type=float, required=True)
+    calculate.add_argument("--group-id", required=True)
+    calculate.add_argument("--region-name", required=True)
+    calculate.add_argument("--group-name", required=True)
+    calculate.add_argument("--mounting-height-m", type=float, required=True)
 
     luminaire = subcommands.add_parser("search-luminaires", help="search DIALux Luminaire Finder candidates")
     luminaire.add_argument("keyword")
@@ -125,7 +129,6 @@ def _brief_from_args(args: argparse.Namespace) -> DesignBrief:
         "length_m": args.length_m,
         "width_m": args.width_m,
         "room_height_m": args.room_height_m,
-        "mounting_height_m": args.mounting_height_m,
         "target_illuminance_lx": args.target_lx,
         "target_cct_k": args.target_cct_k,
         "min_cri": args.min_cri,
@@ -137,6 +140,8 @@ def _brief_from_args(args: argparse.Namespace) -> DesignBrief:
         "preferred_brands": args.brand,
         "notes": args.notes,
     }
+    if args.lighting_groups_json:
+        values["lighting_groups"] = json.loads(args.lighting_groups_json)
     confirmed = {key for key, value in values.items() if value not in (None, [], "") and key != "project_name"}
     return DesignBrief(**values, confirmed_fields=confirmed)
 
@@ -163,6 +168,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "calculate":
         result = calculate_lumen_method(
             CalculationInput(
+                group_id=args.group_id,
+                region_name=args.region_name,
+                group_name=args.group_name,
+                mounting_height_m=args.mounting_height_m,
                 area_m2=args.area_m2,
                 target_illuminance_lx=args.target_lx,
                 luminaire_luminous_flux_lm=args.lumens,

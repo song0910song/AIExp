@@ -26,6 +26,7 @@ from .rag import create_evidence_store, format_evidence
 from .schemas import (
     CalculationInput,
     DesignBrief,
+    LightingGroup,
     LightingParameterSource,
     LuminaireSearchRun,
     LuminaireSearchRequest,
@@ -67,6 +68,11 @@ class BriefUpdateInput(ProjectReference):
     brief: DesignBrief
 
 
+class LightingGroupsUpdateInput(ProjectReference):
+    expected_revision: int = Field(ge=0)
+    lighting_groups: list[LightingGroup] = Field(min_length=1, max_length=100)
+
+
 class RagLightingParameterInput(ProjectReference):
     """Evidence-backed values extracted from approved RAG results."""
 
@@ -82,7 +88,7 @@ class RagLightingParameterInput(ProjectReference):
 
 class ProjectCalculationInput(ProjectReference):
     expected_revision: int = Field(ge=0)
-    inputs: CalculationInput
+    inputs: CalculationInput | list[CalculationInput]
 
 
 class RuleCheckInput(ProjectReference):
@@ -99,6 +105,7 @@ class LuminaireSearchToolInput(LuminaireSearchRequest):
 class LuminaireSelectionInput(ProjectReference):
     expected_revision: int = Field(ge=0)
     luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
+    group_assignments: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class LuminaireDetailInput(ProjectReference):
@@ -199,6 +206,25 @@ def update_project_brief(project_id: str, expected_revision: int, brief: DesignB
     # overwrite conditions just confirmed in another browser session.
     updated = project_store.update(project_id, ProjectUpdate(expected_revision=expected_revision, brief=brief))
     return {**updated.model_dump(mode="json"), "project_revision": updated.revision, "rebased": False}
+
+
+@tool("update_lighting_groups", args_schema=LightingGroupsUpdateInput)
+def update_lighting_groups(
+    project_id: str, expected_revision: int, lighting_groups: list[LightingGroup]
+) -> dict:
+    """Save explicit, user-confirmed region lighting groups and their mounting heights."""
+
+    state = project_store.get(project_id)
+    brief = state.brief.model_copy(update={"lighting_groups": lighting_groups})
+    updated = project_store.update(
+        project_id,
+        ProjectUpdate(expected_revision=expected_revision, brief=brief),
+    )
+    return {
+        "lighting_groups": [item.model_dump(mode="json") for item in updated.brief.lighting_groups],
+        "project_revision": updated.revision,
+        "rebased": False,
+    }
 
 
 @tool("apply_rag_lighting_parameters", args_schema=RagLightingParameterInput)
@@ -348,19 +374,48 @@ def add_document(file_path: str, source_type: str = "project_document", project_
 
 
 @tool("calculate_preliminary_lighting", args_schema=ProjectCalculationInput)
-def calculate_preliminary_lighting(project_id: str, expected_revision: int, inputs: CalculationInput) -> dict:
+def calculate_preliminary_lighting(
+    project_id: str, expected_revision: int, inputs: CalculationInput | list[CalculationInput]
+) -> dict:
     """Run the reproducible lumen-method calculation and save its inputs, outputs and limitations."""
 
-    result = calculate_lumen_method(inputs)
+    if isinstance(inputs, CalculationInput):
+        normalized_inputs = [inputs]
+    else:
+        normalized_inputs = list(inputs)
+    state = project_store.get(project_id)
+    groups = {group.group_id: group for group in state.brief.lighting_groups}
+    unknown_groups = [item.group_id for item in normalized_inputs if item.group_id not in groups]
+    if unknown_groups:
+        raise ValueError("Calculation inputs reference unknown lighting groups: " + ", ".join(dict.fromkeys(unknown_groups)))
+    unconfirmed = [item.group_id for item in normalized_inputs if item.group_id in groups and not groups[item.group_id].confirmed]
+    if unconfirmed:
+        raise ValueError("Lighting groups must be user-confirmed before calculation: " + ", ".join(dict.fromkeys(unconfirmed)))
+    mismatched_height = [
+        item.group_id
+        for item in normalized_inputs
+        if item.group_id in groups
+        and (item.mounting_height_m is None or item.mounting_height_m != groups[item.group_id].mounting_height_m)
+    ]
+    if mismatched_height:
+        raise ValueError(
+            "Calculation mounting point height must match the confirmed lighting group: "
+            + ", ".join(dict.fromkeys(mismatched_height))
+        )
+    results = [calculate_lumen_method(item) for item in normalized_inputs]
     updated, rebased = _update_at_latest_revision(
         project_id,
         expected_revision,
         lambda current: ProjectUpdate(
             expected_revision=current.revision,
-            calculations=[*current.calculations, result],
+            calculations=[*current.calculations, *results],
         ),
     )
-    return {"calculation": _data(result), "project_revision": updated.revision, "rebased": rebased}
+    return {
+        "calculations": [_data(result) for result in results],
+        "project_revision": updated.revision,
+        "rebased": rebased,
+    }
 
 
 @tool("check_design_rules", args_schema=RuleCheckInput)
@@ -390,6 +445,9 @@ def check_design_rules(
 
 def _luminaire_request(
     keyword: str,
+    lighting_group_id: str | None,
+    region_name: str | None,
+    mounting_height_m: float | None,
     language: str,
     brand: str | None,
     brand_id: str | None,
@@ -405,6 +463,9 @@ def _luminaire_request(
 ) -> LuminaireSearchRequest:
     return LuminaireSearchRequest(
         keyword=keyword,
+        lighting_group_id=lighting_group_id,
+        region_name=region_name,
+        mounting_height_m=mounting_height_m,
         language=language,
         brand=brand,
         brand_id=brand_id,
@@ -431,6 +492,9 @@ def _prepare_luminaire_request(
 @tool("prepare_luminaire_search", args_schema=LuminaireSearchToolInput)
 def prepare_luminaire_search(
     keyword: str,
+    lighting_group_id: str | None = None,
+    region_name: str | None = None,
+    mounting_height_m: float | None = None,
     language: str = "zh",
     brand: str | None = None,
     brand_id: str | None = None,
@@ -450,6 +514,9 @@ def prepare_luminaire_search(
 
     request = _luminaire_request(
         keyword,
+        lighting_group_id,
+        region_name,
+        mounting_height_m,
         language,
         brand,
         brand_id,
@@ -476,6 +543,9 @@ def prepare_luminaire_search(
 @tool("search_luminaires", args_schema=LuminaireSearchToolInput)
 def search_luminaires(
     keyword: str,
+    lighting_group_id: str | None = None,
+    region_name: str | None = None,
+    mounting_height_m: float | None = None,
     language: str = "zh",
     brand: str | None = None,
     brand_id: str | None = None,
@@ -500,6 +570,9 @@ def search_luminaires(
 
     request = _luminaire_request(
         keyword,
+        lighting_group_id,
+        region_name,
+        mounting_height_m,
         language,
         brand,
         brand_id,
@@ -619,16 +692,24 @@ def get_luminaire_detail(project_id: str, luminaire_id: str) -> dict:
 
 
 @tool("select_luminaires", args_schema=LuminaireSelectionInput)
-def select_luminaires(project_id: str, expected_revision: int, luminaire_ids: list[str]) -> dict:
+def select_luminaires(
+    project_id: str,
+    expected_revision: int,
+    luminaire_ids: list[str],
+    group_assignments: dict[str, list[str]] | None = None,
+) -> dict:
     """Confirm final project luminaires for DIALux task-package photometry downloads.
 
     A room usually combines several luminaire types (base lighting, accent or
     emergency lighting), so the list may hold multiple final selections.
     """
 
-    updated = project_store.set_selected_luminaires(project_id, expected_revision, luminaire_ids)
+    updated = project_store.set_selected_luminaires(
+        project_id, expected_revision, luminaire_ids, group_assignments
+    )
     return {
         "selected_luminaire_ids": updated.selected_luminaire_ids,
+        "luminaire_group_assignments": updated.luminaire_group_assignments,
         "project_revision": updated.revision,
         "rebased": False,
     }

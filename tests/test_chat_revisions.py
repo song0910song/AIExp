@@ -80,13 +80,24 @@ def test_agent_luminaire_search_rebases_an_obsolete_chat_revision(tmp_path, monk
 
 def test_agent_append_tools_rebase_stale_revision_within_one_chat_turn(tmp_path, monkeypatch) -> None:
     import lighting_agent.tools as agent_tools
-    from lighting_agent.schemas import CalculationInput, DesignBrief
+    from lighting_agent.schemas import CalculationInput, DesignBrief, LightingGroup
 
     store = ProjectStore(tmp_path / "projects")
-    project = store.create(DesignBrief(project_name="Agent revision rebase"))
+    project = store.create(DesignBrief(
+        project_name="Agent revision rebase",
+        space_type="Office",
+        lighting_groups=[LightingGroup(
+            group_id="general-01", region_name="Room", group_name="General",
+            area_m2=30, mounting_height_m=2.7, target_illuminance_lx=500, confirmed=True,
+        )],
+    ))
     monkeypatch.setattr(agent_tools, "project_store", store)
 
     inputs = CalculationInput(
+        group_id="general-01",
+        region_name="Room",
+        group_name="General",
+        mounting_height_m=2.7,
         area_m2=30,
         target_illuminance_lx=500,
         luminaire_luminous_flux_lm=3200,

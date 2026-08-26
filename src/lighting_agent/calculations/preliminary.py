@@ -19,6 +19,10 @@ def calculate_lumen_method(inputs: CalculationInput) -> CalculationResult:
     installed_power = luminaire_count * inputs.luminaire_power_w
     return CalculationResult(
         inputs=inputs,
+        group_id=inputs.group_id,
+        region_name=inputs.region_name,
+        group_name=inputs.group_name,
+        mounting_height_m=inputs.mounting_height_m,
         required_luminous_flux_lm=round(required_flux, 2),
         luminaire_count=luminaire_count,
         installed_power_w=round(installed_power, 2),

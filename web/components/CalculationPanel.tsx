@@ -15,11 +15,15 @@ export function CalculationPanel({ project, onProject }: { project: Project; onP
     const data = new FormData(event.currentTarget);
     setBusy("calculation"); setError(null);
     try {
-      const result = await api.calculate(project.project_id, project.revision, {
+    const group = project.brief.lighting_groups[0];
+    if (!group) throw new Error("请先确认至少一个照明区域/照明组");
+    const result = await api.calculate(project.project_id, project.revision, [{
+        group_id: group.group_id, region_name: group.region_name, group_name: group.group_name,
+        mounting_height_m: group.mounting_height_m,
         area_m2: Number(data.get("area_m2")), target_illuminance_lx: Number(data.get("target_illuminance_lx")),
         luminaire_luminous_flux_lm: Number(data.get("lumens")), luminaire_power_w: Number(data.get("power")),
         utilization_factor: Number(data.get("uf")), maintenance_factor: Number(data.get("mf")),
-      });
+      }]);
       onProject(result.project);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "计算失败"); } finally { setBusy(null); }
   }

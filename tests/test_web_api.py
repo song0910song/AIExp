@@ -164,7 +164,15 @@ def test_web_project_calculation_and_luminaire_flow(tmp_path) -> None:
             "project_name": "Web 会议室",
             "space_type": "会议室",
             "area_m2": 30,
-            "mounting_height_m": 2.7,
+            "lighting_groups": [{
+                "group_id": "group-0001",
+                "region_name": "Meeting room",
+                "group_name": "General lighting",
+                "area_m2": 30,
+                "mounting_height_m": 2.7,
+                "target_illuminance_lx": 500,
+                "confirmed": True,
+            }],
             "target_illuminance_lx": 500,
             "mounting": "recessed",
             "target_cct_k": 4000,
@@ -178,6 +186,10 @@ def test_web_project_calculation_and_luminaire_flow(tmp_path) -> None:
         json={
             "expected_revision": 0,
             "inputs": {
+                "group_id": "group-0001",
+                "region_name": "Meeting room",
+                "group_name": "General lighting",
+                "mounting_height_m": 2.7,
                 "area_m2": 30,
                 "target_illuminance_lx": 500,
                 "luminaire_luminous_flux_lm": 3200,
@@ -188,7 +200,7 @@ def test_web_project_calculation_and_luminaire_flow(tmp_path) -> None:
         },
     )
     assert calculated.status_code == 200
-    assert calculated.json()["calculation"]["luminaire_count"] == 10
+    assert calculated.json()["calculations"][0]["luminaire_count"] == 10
 
     luminaires = client.post(
         f"/api/projects/{project['project_id']}/luminaires",
