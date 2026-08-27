@@ -216,6 +216,78 @@ export type FloorPlanImport = {
   applied_area_candidate_index: number | null;
 };
 
+export type PhotometryPreviewRequest = {
+  expected_revision: number;
+  luminaire_id: string;
+  lighting_group_id?: string | null;
+  fixture_rows: number;
+  fixture_columns: number;
+  room_length_m?: number | null;
+  room_width_m?: number | null;
+  workplane_height_m?: number | null;
+  mounting_height_m?: number | null;
+  maintenance_factor?: number | null;
+  utilization_factor?: number | null;
+  total_flux_lm?: number | null;
+};
+
+export type PhotometryPreviewResult = {
+  solver_version: string;
+  grid_rows: number;
+  grid_columns: number;
+  grid_x_coordinates_m: number[];
+  grid_y_coordinates_m: number[];
+  illuminance_lx: number[][];
+  direct_average_lx: number;
+  calibration_scale: number;
+  average_illuminance_lx: number;
+  minimum_illuminance_lx: number;
+  maximum_illuminance_lx: number;
+  uniformity_u0: number;
+  installed_flux_lm: number;
+  installed_power_w: number | null;
+  assumptions: string[];
+  limitations: string[];
+};
+
+export type PhotometryPreviewPayload = {
+  schema_version: number;
+  kind: "preview";
+  solver_version: string;
+  generated_at: string;
+  input_project_revision: number;
+  input_snapshot_sha256: string;
+  luminaire: {
+    luminaire_id: string;
+    article_name: string;
+    source_file: string;
+    file_type: "ies" | "ldt";
+    photometry_sha256: string;
+  };
+  warnings: string[];
+  result: PhotometryPreviewResult;
+};
+
+export type PhotometryParseSummary = {
+  luminaire_id: string;
+  source_file: string;
+  summary: {
+    format: "ies" | "ldt";
+    photometric_system: string;
+    lamp_count: number;
+    power_w: number | null;
+    declared_flux_lm: number | null;
+    absolute_flux_declared: boolean;
+    integrated_flux_lm: number;
+    max_candela_cd: number;
+    c_plane_count: number;
+    gamma_angle_count: number;
+    full_circle_coverage: boolean;
+    symmetric_about_vertical_axis: boolean;
+    warnings: string[];
+  };
+};
+
 export type Project = {
   project_id: string;
   revision: number;

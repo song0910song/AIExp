@@ -89,7 +89,13 @@ export function StatusPill({
   return <span className={`status-pill status-${status}`}>{children}</span>;
 }
 
-export function Notice({ tone = "info", children }: { tone?: "info" | "danger" | "success"; children: ReactNode }) {
+export function Notice({
+  tone = "info",
+  children,
+}: {
+  tone?: "info" | "danger" | "success" | "warning";
+  children: ReactNode;
+}) {
   return (
     <div className={`notice notice-${tone}`}>
       {tone === "success" ? <Check size={16} /> : <AlertCircle size={16} />}
