@@ -124,6 +124,7 @@ class LocalEvidenceStore:
         index_path: Path | None = None,
         *,
         database_path: Path | None = None,
+        import_legacy: bool = True,
     ) -> None:
         ensure_data_directories()
         self.index_path = index_path
@@ -131,7 +132,8 @@ class LocalEvidenceStore:
             DATABASE_FILE if index_path is None else self._database_path_for(index_path)
         )
         self.database = SQLiteDatabase(self.database_path)
-        self._import_legacy_index()
+        if import_legacy:
+            self._import_legacy_index()
 
     @staticmethod
     def _database_path_for(index_path: Path) -> Path:

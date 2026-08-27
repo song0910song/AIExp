@@ -50,6 +50,12 @@ export type GlobalDocumentContent = GlobalDocument & {
   content: string;
 };
 
+export type WorkspaceDirectorySelection = {
+  selected: boolean;
+  selection_id?: string;
+  directory?: string;
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_ROOT}${path}`, {
     ...init,
@@ -71,7 +77,8 @@ export const api = {
   globalDocumentContent: (sourceHash: string) =>
     request<GlobalDocumentContent>(`/documents/${encodeURIComponent(sourceHash)}`),
   project: (id: string) => request<Project>(`/projects/${id}`),
-  createProject: (brief: Partial<DesignBrief> & { project_name: string }) =>
+  selectWorkspaceDirectory: () => request<WorkspaceDirectorySelection>("/workspaces/select-directory", { method: "POST" }),
+  createProject: (brief: Partial<DesignBrief> & { project_name: string; workspace_selection_id?: string }) =>
     request<Project>("/projects", { method: "POST", body: JSON.stringify(brief) }),
   deleteProject: (id: string) => request<void>(`/projects/${id}`, { method: "DELETE" }),
   deleteGlobalDocument: (sourceHash: string) => request<void>(`/documents/${encodeURIComponent(sourceHash)}`, { method: "DELETE" }),
@@ -168,8 +175,10 @@ export const api = {
     ),
   chat: (payload: ChatPayload) =>
     request<{ session_id: string; answer: string }>("/chat", { method: "POST", body: JSON.stringify(payload) }),
-  chatHistory: (sessionId: string) =>
-    request<{ session_id: string; messages: ChatHistoryMessage[] }>(`/chat/${sessionId}`),
+  chatHistory: (sessionId: string, projectId?: string) =>
+    request<{ session_id: string; messages: ChatHistoryMessage[] }>(
+      `/chat/${sessionId}${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`,
+    ),
   chatStream: async (payload: ChatPayload, handlers: ChatStreamHandlers = {}) => {
     const response = await fetch(`${API_ROOT}/chat/stream`, {
       method: "POST",
@@ -218,5 +227,6 @@ export const api = {
     if (!state.completed) throw new Error("聊天流意外结束");
     return state.completed;
   },
-  clearChat: (sessionId: string) => request<void>(`/chat/${sessionId}`, { method: "DELETE" }),
+  clearChat: (sessionId: string, projectId?: string) =>
+    request<void>(`/chat/${sessionId}${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`, { method: "DELETE" }),
 };

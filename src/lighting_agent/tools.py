@@ -11,7 +11,6 @@ from langchain_core.tools import tool
 from pydantic import Field
 
 from .calculations import calculate_lumen_method, check_design_rules as run_rule_checks
-from .config import PROJECTS_DIRECTORY
 from .dialux_api import (
     DialuxAPI,
     DialuxAPIError,
@@ -143,6 +142,28 @@ class ReportInput(DialuxTaskInput):
 
 project_store = ProjectStore()
 evidence_store = create_evidence_store()
+
+
+def configure_runtime_services(*, projects, evidence) -> None:
+    """Bind browser requests to their active persistence services."""
+
+    global project_store, evidence_store
+    project_store = projects
+    evidence_store = evidence
+
+
+def _project_directory(project_id: str) -> Path:
+    directory_for = getattr(project_store, "directory_for", None)
+    if callable(directory_for):
+        return directory_for(project_id)
+    return project_store.directory
+
+
+def _artifact_path(project_id: str, suffix: str) -> Path:
+    artifact_path = getattr(project_store, "artifact_path", None)
+    if callable(artifact_path):
+        return artifact_path(project_id, suffix)
+    return _project_directory(project_id) / f"{project_id}{suffix}"
 
 
 def _get_scoped_evidence(evidence_ids: list[str], project_id: str) -> list:
@@ -736,8 +757,8 @@ def create_dialux_task_package(project_id: str, expected_revision: int) -> dict:
         raise RevisionConflictError(
             f"Project revision is {state.revision}, but request expected {expected_revision}"
         )
-    target = PROJECTS_DIRECTORY / f"{project_id}.dialux-task.zip"
-    target.write_bytes(build_dialux_task_archive(state, PhotometryAssetStore(PROJECTS_DIRECTORY, DialuxAPI())))
+    target = _artifact_path(project_id, ".dialux-task.zip")
+    target.write_bytes(build_dialux_task_archive(state, PhotometryAssetStore(_project_directory(project_id), DialuxAPI())))
     return {
         "task_package": str(target),
         "handoff": build_dialux_task_package(state),
@@ -751,7 +772,7 @@ def generate_design_report(project_id: str, expected_revision: int) -> dict:
     """Generate a Markdown report that contains only saved facts, evidence and explicit limitations."""
 
     state = project_store.get(project_id)
-    target = PROJECTS_DIRECTORY / f"{project_id}.design-report.md"
+    target = _artifact_path(project_id, ".design-report.md")
     target.write_text(build_design_report(state), encoding="utf-8")
     return {
         "report": str(target),

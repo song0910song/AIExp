@@ -738,6 +738,17 @@ textarea:focus {
   font-size: 11px;
 }
 
+.directory-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.directory-picker input {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .knowledge-page {
   max-width: 1120px;
   margin: 0 auto;

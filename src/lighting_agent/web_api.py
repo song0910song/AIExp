@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Thread
-from typing import Annotated, Any, Literal
+from threading import Lock, Thread
+from typing import Annotated, Any, Callable, Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -25,7 +26,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .agent import build_agent, set_retry_notifier
 from .calculations import calculate_lumen_method, check_design_rules
-from .config import Settings, USER_DOCUMENTS_DIRECTORY, ensure_data_directories
+from .config import DATABASE_FILE, Settings, USER_DOCUMENTS_DIRECTORY, ensure_data_directories
 from .deliverables import build_design_report, build_dialux_task_archive, read_dialux_task_package
 from .dialux_api import DialuxAPI, DialuxAPIError, validate_luminaire_search
 from .document_loader import DocumentLoadError, load_document
@@ -45,11 +46,18 @@ from .schemas import (
     StrictModel,
 )
 from .storage import SQLiteDatabase
+from .workspace import WorkspaceError, WorkspaceEvidenceStore, WorkspaceProjectStore
 
 
 class BriefUpdateRequest(StrictModel):
     expected_revision: int = Field(ge=0)
     brief: DesignBrief
+
+
+class ProjectCreateRequest(DesignBrief):
+    """Creation data plus the server-issued token for a native folder choice."""
+
+    workspace_selection_id: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class CalculationRequest(StrictModel):
@@ -170,6 +178,32 @@ class ChatSessionStore:
         from langchain_core.messages import messages_from_dict
 
         return list(messages_from_dict(json.loads(payload)))
+
+
+def choose_workspace_directory() -> Path | None:
+    """Open the native Windows directory picker for the local desktop user."""
+
+    if sys.platform != "win32":
+        raise RuntimeError("项目文件夹选择仅支持运行服务的 Windows 本机")
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        window = tk.Tk()
+        window.withdraw()
+        window.attributes("-topmost", True)
+        window.update()
+        try:
+            selected = filedialog.askdirectory(
+                parent=window,
+                title="选择照明项目文件夹",
+                mustexist=True,
+            )
+        finally:
+            window.destroy()
+    except Exception as error:
+        raise RuntimeError(f"无法打开 Windows 文件夹选择器：{error}") from error
+    return Path(selected).resolve() if selected else None
 
 
 def _event_line(event: dict[str, Any]) -> str:
@@ -644,18 +678,47 @@ def _tool_result_from_chunk(chunk: Any, *, include_debug: bool = False) -> dict[
 
 def create_app(
     *,
-    project_store: ProjectStore | None = None,
+    project_store: ProjectStore | WorkspaceProjectStore | None = None,
     evidence_store: Any | None = None,
     dialux_api: DialuxAPI | None = None,
+    directory_picker: Callable[[], Path | None] | None = None,
 ) -> FastAPI:
     ensure_data_directories()
-    projects = project_store or ProjectStore()
-    evidence = evidence_store or create_evidence_store()
+    projects = project_store or WorkspaceProjectStore()
+    global_evidence = evidence_store or create_evidence_store()
+    evidence = (
+        WorkspaceEvidenceStore(global_evidence, projects)
+        if isinstance(projects, WorkspaceProjectStore)
+        else global_evidence
+    )
     dialux = dialux_api or DialuxAPI()
     settings = Settings()
-    photometry_assets = PhotometryAssetStore(projects.directory, dialux)
-    sessions = ChatSessionStore(projects.database_path)
+    sessions = ChatSessionStore(
+        DATABASE_FILE if isinstance(projects, WorkspaceProjectStore) else projects.database_path,
+        settings,
+    )
+    picker = directory_picker or choose_workspace_directory
+    workspace_selections: dict[str, Path] = {}
+    workspace_selection_lock = Lock()
     agent_holder: dict[str, Any] = {}
+
+    # Agent tools are module-level LangChain callables. Bind them to the same
+    # workspace-aware stores used by this application instance.
+    from . import tools as agent_tools
+
+    agent_tools.configure_runtime_services(projects=projects, evidence=evidence)
+
+    def project_directory(project_id: str) -> Path:
+        directory_for = getattr(projects, "directory_for", None)
+        return directory_for(project_id) if callable(directory_for) else projects.directory
+
+    def project_sessions(project_id: str | None) -> ChatSessionStore:
+        if project_id and isinstance(projects, WorkspaceProjectStore):
+            return ChatSessionStore(projects.database_path_for(project_id), settings)
+        return sessions
+
+    def project_photometry(project_id: str) -> PhotometryAssetStore:
+        return PhotometryAssetStore(project_directory(project_id), dialux)
 
     app = FastAPI(
         title="照明设计智能体 API",
@@ -698,9 +761,47 @@ def create_app(
         states = sorted(projects.list(), key=lambda item: item.updated_at, reverse=True)
         return [state.model_dump(mode="json") for state in states]
 
+    @app.post("/api/workspaces/select-directory")
+    def select_workspace_directory() -> dict[str, Any]:
+        """Ask the local Windows host for the directory that will hold one project."""
+
+        try:
+            directory = picker()
+        except RuntimeError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        if directory is None:
+            return {"selected": False}
+        try:
+            directory = directory.resolve()
+            if not directory.is_dir():
+                raise WorkspaceError("所选项目文件夹不存在或不是目录")
+        except (OSError, WorkspaceError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        selection_id = uuid4().hex
+        with workspace_selection_lock:
+            workspace_selections[selection_id] = directory
+        return {"selected": True, "selection_id": selection_id, "directory": str(directory)}
+
     @app.post("/api/projects", status_code=201)
-    def create_project(brief: DesignBrief) -> dict[str, Any]:
-        return projects.create(brief).model_dump(mode="json")
+    def create_project(request: ProjectCreateRequest) -> dict[str, Any]:
+        brief = DesignBrief.model_validate(
+            request.model_dump(exclude={"workspace_selection_id"})
+        )
+        if not isinstance(projects, WorkspaceProjectStore):
+            return projects.create(brief).model_dump(mode="json")
+        if not request.workspace_selection_id:
+            raise HTTPException(status_code=422, detail="请先选择项目文件夹")
+        with workspace_selection_lock:
+            directory = workspace_selections.get(request.workspace_selection_id)
+        if directory is None:
+            raise HTTPException(status_code=422, detail="项目文件夹选择已失效，请重新选择")
+        try:
+            state = projects.create_workspace(brief, directory)
+        except WorkspaceError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        with workspace_selection_lock:
+            workspace_selections.pop(request.workspace_selection_id, None)
+        return state.model_dump(mode="json")
 
     @app.get("/api/projects/{project_id}")
     def get_project(project_id: str) -> dict[str, Any]:
@@ -708,9 +809,9 @@ def create_app(
 
     @app.delete("/api/projects/{project_id}", status_code=204)
     def delete_project(project_id: str) -> None:
-        projects.delete(project_id)
         evidence.delete_project(project_id)
-        photometry_assets.remove_project(project_id)
+        project_photometry(project_id).remove_project(project_id)
+        projects.delete(project_id)
 
     @app.get("/api/projects/{project_id}/revisions")
     def get_project_revisions(project_id: str) -> list[dict[str, Any]]:
@@ -883,7 +984,11 @@ def create_app(
         content = await file.read()
         if len(content) > MAX_DRAWING_BYTES:
             raise HTTPException(status_code=413, detail="文件不能超过 50 MB")
-        storage_directory = USER_DOCUMENTS_DIRECTORY if project_id is None else projects.directory / f"{project_id}.documents"
+        storage_directory = (
+            USER_DOCUMENTS_DIRECTORY
+            if project_id is None
+            else project_directory(project_id) / f"{project_id}.documents"
+        )
         storage_directory.mkdir(parents=True, exist_ok=True)
         target = _unique_upload_target(storage_directory, safe_name)
         await run_in_threadpool(target.write_bytes, content)
@@ -962,10 +1067,11 @@ def create_app(
         content = await file.read()
         if len(content) > 50 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="平面图文件不能超过 50 MB")
-        plans_directory = projects.directory / f"{project_id}.plans"
+        project_root = project_directory(project_id)
+        plans_directory = project_root / f"{project_id}.plans"
         target = _unique_upload_target(plans_directory, safe_name)
         await run_in_threadpool(target.write_bytes, content)
-        storage_path = str(target.relative_to(projects.directory).as_posix())
+        storage_path = str(target.relative_to(project_root).as_posix())
         try:
             floor_plan = await run_in_threadpool(
                 parse_floor_plan,
@@ -1097,7 +1203,10 @@ def create_app(
     def list_photometry_assets(project_id: str) -> dict[str, Any]:
         state = projects.get(project_id)
         return {
-            "assets": [item.model_dump(mode="json") for item in photometry_assets.list_assets(state)],
+            "assets": [
+                item.model_dump(mode="json")
+                for item in project_photometry(project_id).list_assets(state)
+            ],
         }
 
     @app.post("/api/projects/{project_id}/luminaires/{luminaire_id}/photometry")
@@ -1109,7 +1218,7 @@ def create_app(
                 detail="请先将灯具设为最终选定项；仅最终选定灯具可下载配光数据",
             )
         try:
-            asset = photometry_assets.download(state, luminaire_id)
+            asset = project_photometry(project_id).download(state, luminaire_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         return {"asset": asset.model_dump(mode="json")}
@@ -1123,13 +1232,17 @@ def create_app(
                 detail="该灯具不是当前最终选定项，配光文件不可下载",
             )
         asset = next(
-            (item for item in photometry_assets.list_assets(state) if item.luminaire_id == luminaire_id),
+            (
+                item
+                for item in project_photometry(project_id).list_assets(state)
+                if item.luminaire_id == luminaire_id
+            ),
             None,
         )
         if asset is None or asset.status != "downloaded" or asset.zip_file is None:
             raise HTTPException(status_code=404, detail="Photometry ZIP has not been downloaded for this luminaire")
         try:
-            target = photometry_assets.read_file(project_id, asset.zip_file)
+            target = project_photometry(project_id).read_file(project_id, asset.zip_file)
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail="Saved photometry ZIP is missing") from error
         return FileResponse(target, media_type="application/zip", filename=target.name)
@@ -1152,7 +1265,11 @@ def create_app(
         if luminaire_id not in state.selected_luminaire_ids:
             raise HTTPException(status_code=404, detail="该灯具不是当前最终选定项，配光文件不可下载")
         asset = next(
-            (item for item in photometry_assets.list_assets(state) if item.luminaire_id == luminaire_id),
+            (
+                item
+                for item in project_photometry(project_id).list_assets(state)
+                if item.luminaire_id == luminaire_id
+            ),
             None,
         )
         extracted = next(
@@ -1162,7 +1279,7 @@ def create_app(
         if extracted is None:
             raise HTTPException(status_code=404, detail="未找到该灯具的已验证配光文件")
         try:
-            target = photometry_assets.read_file(project_id, extracted.relative_path)
+            target = project_photometry(project_id).read_file(project_id, extracted.relative_path)
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail="已保存的配光文件不存在") from error
         media_type = "application/octet-stream" if extracted.file_type == "uld" else "text/plain"
@@ -1178,7 +1295,7 @@ def create_app(
             project_id,
             ProjectUpdate(expected_revision=expected_revision, luminaires=remaining),
         )
-        photometry_assets.remove(project_id, luminaire_id)
+        project_photometry(project_id).remove(project_id, luminaire_id)
         return updated.model_dump(mode="json")
 
     @app.post("/api/projects/{project_id}/deliverables/{kind}")
@@ -1197,7 +1314,7 @@ def create_app(
             target.write_text(build_design_report(state), encoding="utf-8")
         else:
             target = projects.artifact_path(project_id, ".dialux-task.zip")
-            target.write_bytes(build_dialux_task_archive(state, photometry_assets))
+            target.write_bytes(build_dialux_task_archive(state, project_photometry(project_id)))
         return {
             "kind": kind,
             "filename": target.name,
@@ -1220,7 +1337,8 @@ def create_app(
         if not settings.llm_api_key:
             raise HTTPException(status_code=503, detail="未配置 LIGHTING_LLM_API_KEY，聊天功能暂不可用")
         session_id = request.session_id or uuid4().hex
-        messages = _chat_history(sessions.get(session_id))
+        session_store = project_sessions(request.project_id)
+        messages = _chat_history(session_store.get(session_id))
         content = request.message
         if request.project_id:
             project = projects.get(request.project_id)
@@ -1236,7 +1354,7 @@ def create_app(
         )
         output_messages = list(result["messages"])
         answer = str(output_messages[-1].content)
-        sessions.save(
+        session_store.save(
             session_id,
             [*messages, {"role": "user", "content": request.message}, {"role": "assistant", "content": answer}],
             project_id=request.project_id,
@@ -1255,7 +1373,8 @@ def create_app(
         if not settings.llm_api_key:
             raise HTTPException(status_code=503, detail="未配置 LIGHTING_LLM_API_KEY，聊天功能暂不可用")
         session_id = request.session_id or uuid4().hex
-        messages = _chat_history(sessions.get(session_id))
+        session_store = project_sessions(request.project_id)
+        messages = _chat_history(session_store.get(session_id))
         content = request.message
         if request.project_id:
             project = projects.get(request.project_id)
@@ -1336,7 +1455,7 @@ def create_app(
                         and _claims_structured_clarification(answer)
                     ):
                         output_queue.put(("clarification", _fallback_clarification(projects.get(request.project_id))))
-                    sessions.save(
+                    session_store.save(
                         session_id,
                         [
                             *messages,
@@ -1461,17 +1580,17 @@ def create_app(
         )
 
     @app.get("/api/chat/{session_id}")
-    def get_chat_history(session_id: str) -> dict[str, Any]:
+    def get_chat_history(session_id: str, project_id: str | None = None) -> dict[str, Any]:
         """Restore a persisted chat transcript for the browser's project session."""
 
         return {
             "session_id": session_id,
-            "messages": _chat_history(sessions.get(session_id)),
+            "messages": _chat_history(project_sessions(project_id).get(session_id)),
         }
 
     @app.delete("/api/chat/{session_id}", status_code=204)
-    def clear_chat(session_id: str) -> None:
-        sessions.clear(session_id)
+    def clear_chat(session_id: str, project_id: str | None = None) -> None:
+        project_sessions(project_id).clear(session_id)
 
     return app
 
