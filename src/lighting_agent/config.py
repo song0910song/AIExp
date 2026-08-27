@@ -27,8 +27,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 class Settings:
     """Runtime settings, read once so secrets are never printed or persisted."""
 
-    llm_model: str = os.getenv("LIGHTING_LLM_MODEL", "deepseek-v4-flash")
-    llm_base_url: str = os.getenv("LIGHTING_LLM_BASE_URL", "https://opencode.ai/zen/go/v1/")
+    llm_model: str = os.getenv("LIGHTING_LLM_MODEL")
+    llm_base_url: str = os.getenv("LIGHTING_LLM_BASE_URL")
     llm_api_key: str | None = os.getenv("LIGHTING_LLM_API_KEY")
     llm_temperature: float = float(os.getenv("LIGHTING_LLM_TEMPERATURE", "0.3"))
     llm_timeout_seconds: float = float(os.getenv("LIGHTING_LLM_TIMEOUT_SECONDS", "60"))
