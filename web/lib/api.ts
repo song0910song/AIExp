@@ -173,6 +173,21 @@ export const api = {
       `/projects/${id}/deliverables/${kind}?expected_revision=${revision}`,
       { method: "POST" },
     ),
+  parseLuminairePhotometry: (id: string, luminaireId: string) =>
+    request<import("./types").PhotometryParseSummary>(
+      `/projects/${id}/luminaires/${encodeURIComponent(luminaireId)}/photometry/parse`,
+    ),
+  createPhotometryPreview: (id: string, payload: import("./types").PhotometryPreviewRequest) =>
+    request<{ preview: import("./types").PhotometryPreviewPayload; saved: boolean }>(
+      `/projects/${id}/photometry-preview`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+  getPhotometryPreview: (id: string) =>
+    request<{
+      preview: import("./types").PhotometryPreviewPayload;
+      is_current: boolean;
+      stale_reasons: string[];
+    }>(`/projects/${id}/photometry-preview`),
   chat: (payload: ChatPayload) =>
     request<{ session_id: string; answer: string }>("/chat", { method: "POST", body: JSON.stringify(payload) }),
   chatHistory: (sessionId: string, projectId?: string) =>

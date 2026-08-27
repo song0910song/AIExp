@@ -8,6 +8,7 @@ used by the CLI and LangChain tools.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sys
 import time
@@ -25,7 +26,15 @@ from pydantic import Field
 from starlette.concurrency import run_in_threadpool
 
 from .agent import build_agent, set_retry_notifier
-from .calculations import calculate_lumen_method, check_design_rules
+from .calculations import (
+    IlluminancePreviewRequest,
+    SOLVER_VERSION,
+    calculate_lumen_method,
+    check_design_rules,
+    compute_illuminance_preview,
+)
+from .calculations.photometry import PhotometryParseError, parse_photometry_file
+from .calculations.preview import PreviewGeometryError
 from .config import DATABASE_FILE, Settings, USER_DOCUMENTS_DIRECTORY, ensure_data_directories
 from .deliverables import build_design_report, build_dialux_task_archive, read_dialux_task_package
 from .dialux_api import DialuxAPI, DialuxAPIError, validate_luminaire_search
@@ -38,6 +47,7 @@ from .schemas import (
     CalculationInput,
     DesignBrief,
     LuminaireSearchRequest,
+    PhotometryExtractedFile,
     ProjectState,
     ProjectUpdate,
     RuleRequirement,
@@ -101,6 +111,12 @@ class DialuxResultRequest(StrictModel):
     source_kind: Literal["dialux_pdf", "dialux_csv", "dialux_json", "manual_form"] = "manual_form"
     solver_version: str | None = Field(default=None, max_length=120)
     parser_version: str = Field(default="manual-form-1", max_length=80)
+
+
+class PhotometryPreviewWebRequest(IlluminancePreviewRequest):
+    """Illuminance preview inputs plus the mandatory optimistic-lock revision."""
+
+    expected_revision: int = Field(ge=0)
 
 
 class ChatRequest(StrictModel):
@@ -1284,6 +1300,219 @@ def create_app(
             raise HTTPException(status_code=404, detail="已保存的配光文件不存在") from error
         media_type = "application/octet-stream" if extracted.file_type == "uld" else "text/plain"
         return FileResponse(target, media_type=media_type, filename=target.name)
+
+    # --- Approximate illuminance preview based on parsed photometry files ---
+
+    _preview_artifact_suffix = ".photometry-preview.json"
+
+    def _resolve_photometry_source(
+        state: ProjectState, luminaire_id: str
+    ) -> tuple[Any, PhotometryExtractedFile]:
+        """Return the downloaded ies/ldt asset entry for a final selection."""
+
+        if luminaire_id not in state.selected_luminaire_ids:
+            raise HTTPException(
+                status_code=422,
+                detail="仅最终选定且已下载配光文件的灯具可用于照度预览",
+            )
+        asset = next(
+            (
+                item
+                for item in project_photometry(state.project_id).list_assets(state)
+                if item.luminaire_id == luminaire_id
+            ),
+            None,
+        )
+        if asset is None or asset.status != "downloaded":
+            raise HTTPException(status_code=422, detail="请先为该灯具下载配光文件")
+        ordered = [
+            item
+            for extension in ("ies", "ldt")
+            for item in asset.extracted_files
+            if item.file_type == extension
+        ]
+        if not ordered:
+            raise HTTPException(
+                status_code=422,
+                detail="该灯具暂未提供 IES/LDT 配光文件（ULD 解析暂不支持），无法生成照度预览",
+            )
+        return asset, ordered[0]
+
+    @app.get("/api/projects/{project_id}/luminaires/{luminaire_id}/photometry/parse")
+    def parse_luminaire_photometry(project_id: str, luminaire_id: str) -> dict[str, Any]:
+        state = projects.get(project_id)
+        _, extracted = _resolve_photometry_source(state, luminaire_id)
+        try:
+            path = project_photometry(project_id).read_file(
+                state.project_id,
+                extracted.relative_path,
+            )
+            distribution = parse_photometry_file(path, extracted.file_type)
+        except PhotometryParseError as error:
+            raise HTTPException(status_code=422, detail=f"配光文件解析失败：{error}") from error
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="已保存的配光文件不存在") from error
+        return {
+            "luminaire_id": luminaire_id,
+            "source_file": Path(extracted.relative_path).name,
+            "summary": distribution.summary(),
+        }
+
+    @staticmethod
+    def _preview_snapshot_inputs(
+        state: ProjectState, request_dict: dict[str, Any], photometry_sha256: str | None
+    ) -> dict[str, Any]:
+        """Canonical inputs whose change must invalidate the stored preview."""
+
+        return {
+            "schema_version": 1,
+            "project_revision": state.revision,
+            "brief": state.brief.model_dump(mode="json"),
+            "selected_luminaire_ids": state.selected_luminaire_ids,
+            "photometry_sha256": photometry_sha256,
+            "request_fields": request_dict,
+        }
+
+    def _preview_snapshot_sha256(snapshot_inputs: dict[str, Any]) -> str:
+        canonical = json.dumps(
+            snapshot_inputs, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @app.post("/api/projects/{project_id}/photometry-preview")
+    def create_photometry_preview(project_id: str, request: PhotometryPreviewWebRequest) -> dict[str, Any]:
+        state = projects.get(project_id)
+        if state.revision != request.expected_revision:
+            raise RevisionConflictError(
+                f"Project revision is {state.revision}, but request expected {request.expected_revision}"
+            )
+        candidate = next(
+            (item for item in state.luminaires if item.luminaire_id == request.luminaire_id),
+            None,
+        )
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Luminaire is not in this project")
+
+        group = next(
+            (
+                item
+                for item in state.brief.lighting_groups
+                if item.group_id == request.lighting_group_id
+            ),
+            None,
+        )
+        resolved_request = IlluminancePreviewRequest.model_validate(
+            request.model_dump(exclude={"expected_revision"})
+        )
+        group_maintenance = group.maintenance_factor if group else None
+        group_utilization = group.utilization_factor if group else None
+        resolved_request = resolved_request.model_copy(
+            update={
+                "room_length_m": resolved_request.room_length_m or state.brief.length_m,
+                "room_width_m": resolved_request.room_width_m or state.brief.width_m,
+                "mounting_height_m": resolved_request.mounting_height_m
+                or (group.mounting_height_m if group else None),
+                "maintenance_factor": resolved_request.maintenance_factor or group_maintenance or 1.0,
+                "utilization_factor": resolved_request.utilization_factor or group_utilization,
+            }
+        )
+
+        store = project_photometry(project_id)
+        _, extracted = _resolve_photometry_source(state, request.luminaire_id)
+        try:
+            path = store.read_file(state.project_id, extracted.relative_path)
+            distribution = parse_photometry_file(path, extracted.file_type)
+        except PhotometryParseError as error:
+            raise HTTPException(status_code=422, detail=f"配光文件解析失败：{error}") from error
+
+        effective_flux = (
+            resolved_request.total_flux_lm
+            or candidate.luminous_flux_lm
+            or distribution.declared_flux_lm
+        )
+        effective_request = resolved_request.model_copy(update={"total_flux_lm": effective_flux})
+        try:
+            result = compute_illuminance_preview(distribution, effective_request)
+        except PreviewGeometryError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+
+        snapshot_inputs = _preview_snapshot_inputs(
+            state, effective_request.model_dump(mode="json"), extracted.sha256
+        )
+        payload = {
+            "schema_version": 1,
+            "kind": "preview",
+            "solver_version": SOLVER_VERSION,
+            "generated_at": datetime.now(UTC).isoformat(),
+            "input_project_revision": state.revision,
+            "input_snapshot_sha256": _preview_snapshot_sha256(snapshot_inputs),
+            "snapshot_inputs": snapshot_inputs,
+            "luminaire": {
+                "luminaire_id": candidate.luminaire_id,
+                "article_name": candidate.article_name,
+                "source_file": Path(extracted.relative_path).name,
+                "file_type": extracted.file_type,
+                "photometry_sha256": extracted.sha256,
+            },
+            "distribution_summary": distribution.summary(),
+            "warnings": list(distribution.warnings),
+            "result": result.model_dump(mode="json"),
+        }
+        target = projects.artifact_path(project_id, _preview_artifact_suffix)
+        temporary = target.with_name(f".{target.name}.tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(target)
+        return {
+            "preview": payload,
+            "saved": True,
+            "download_url": f"/api/projects/{project_id}/photometry-preview",
+        }
+
+    @app.get("/api/projects/{project_id}/photometry-preview")
+    def get_photometry_preview(project_id: str) -> dict[str, Any]:
+        target = projects.artifact_path(project_id, _preview_artifact_suffix)
+        if not target.exists():
+            raise HTTPException(status_code=404, detail="尚未生成照度预览")
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail="预览文件损坏，请重新生成") from error
+
+        state = projects.get(project_id)
+        stale_reasons: list[str] = []
+        snapshot_inputs = payload.get("snapshot_inputs") if isinstance(payload, dict) else None
+        if not isinstance(snapshot_inputs, dict) or snapshot_inputs.get("schema_version") != 1:
+            stale_reasons.append("预览格式版本已过期，请重新生成")
+        else:
+            if snapshot_inputs.get("brief") != state.brief.model_dump(mode="json"):
+                stale_reasons.append("设计任务书在生成预览后发生变化")
+            if snapshot_inputs.get("selected_luminaire_ids") != state.selected_luminaire_ids:
+                stale_reasons.append("最终选定灯具在生成预览后发生变化")
+            if snapshot_inputs.get("project_revision") != state.revision:
+                stale_reasons.append(
+                    f"项目 revision 已从 r{snapshot_inputs.get('project_revision')} 变为 r{state.revision}"
+                )
+            stored_sha = snapshot_inputs.get("photometry_sha256")
+            luminaire_id = (payload.get("luminaire") or {}).get("luminaire_id")
+            if stored_sha and luminaire_id:
+                luminaire_asset = next(
+                    (
+                        item
+                        for item in project_photometry(project_id).list_assets(state)
+                        if item.luminaire_id == luminaire_id
+                    ),
+                    None,
+                )
+                live_hashes = {
+                    item.sha256 for item in (luminaire_asset.extracted_files if luminaire_asset else [])
+                }
+                if luminaire_asset is None or stored_sha not in live_hashes:
+                    stale_reasons.append("配光文件在生成预览后发生变化")
+        return {
+            "preview": payload,
+            "is_current": not stale_reasons,
+            "stale_reasons": stale_reasons,
+        }
 
     @app.delete("/api/projects/{project_id}/luminaires/{luminaire_id}")
     def remove_luminaire(project_id: str, luminaire_id: str, expected_revision: int) -> dict[str, Any]:

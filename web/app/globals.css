@@ -1007,6 +1007,12 @@ textarea:focus {
   background: #fffbeb;
 }
 
+.notice-warning {
+  border-color: #fdba74;
+  color: #9a3412;
+  background: #fff7ed;
+}
+
 .chat-retry-notice {
   display: inline-flex;
   align-items: center;
@@ -2380,3 +2386,79 @@ textarea:focus {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* --- Work-plane illuminance preview (approximate) --- */
+.photometry-preview .photometry-preview-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.65rem;
+  align-items: end;
+}
+.photometry-preview-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--muted-foreground, #5b6472);
+}
+.photometry-preview-form input,
+.photometry-preview-form select {
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid rgba(15, 23, 42, 0.16);
+  background: #fff;
+  font-size: 0.86rem;
+}
+.photometry-preview-form .pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+}
+.photometry-preview-form .run-preview {
+  white-space: nowrap;
+}
+.photometry-preview-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+.photometry-preview-stats article {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+  padding: 0.55rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.photometry-preview-stats article span { font-size: 0.72rem; color: #6b7280; letter-spacing: 0.02em; }
+.photometry-preview-stats article strong { font-size: 1.05rem; }
+.preview-heatmap {
+  margin-top: 1rem;
+  display: grid;
+  gap: 2px;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.preview-heatmap span {
+  aspect-ratio: 1 / 1;
+  min-height: 18px;
+  font-size: 0.62rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(30, 35, 48, 0.85);
+}
+.heatmap-scale-note,
+.preview-limitations p {
+  margin-top: 0.5rem;
+  font-size: 0.78rem;
+  color: #6b7280;
+}
+.preview-limitations summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: #374151;
+}
+.preview-limitations ul { margin: 0.5rem 0 0 1rem; list-style: disc; }
+.preview-limitations li { font-size: 0.78rem; color: #4b5563; margin-bottom: 0.25rem; }
