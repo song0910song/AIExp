@@ -316,7 +316,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
       return () => { active = false; };
     }
     setRestoring(true);
-    void api.chatHistory(storedSessionId)
+    void api.chatHistory(storedSessionId, project.project_id)
       .then((response) => {
         if (!active) return;
         if (!response.messages.length) window.localStorage.removeItem(sessionStorageKey);
@@ -475,7 +475,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
 
   async function clear() {
     if (busy) return;
-    if (sessionId) await api.clearChat(sessionId).catch(() => undefined);
+    if (sessionId) await api.clearChat(sessionId, project.project_id).catch(() => undefined);
     window.localStorage.removeItem(sessionStorageKey);
     window.localStorage.removeItem(clarificationStorageKey);
     setSessionId(undefined);

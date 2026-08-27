@@ -11,6 +11,7 @@
 - DIALux Luminaire Finder：搜索 JSON 列表、补取产品详情页、标准化型号/品牌/功率/IP/详情链接/ULD 与配光下载标记，并声明字段缺失。
 - 交付草稿：可生成包含证据、输入、计算、规则状态、候选灯具、待确认事项与人工复核声明的 Markdown 报告，以及 DIALux evo 仿真交接包；任务包和配光文件只使用项目中明确确认的最终灯具。
 - `create_agent`：提供项目、检索、计算、校核、灯具查询和 DIALux 交接包工具。没有 `LIGHTING_LLM_API_KEY` 时，离线命令仍可正常使用。
+- Web 工作区：新建项目时由本机 Windows 文件夹选择器指定项目目录。一个目录只对应一个项目；项目状态、私有资料索引、聊天记录、图纸、配光文件和交付文件均存放在该目录，已有用户文件不会被覆盖或删除。
 
 ## 安装与配置
 
@@ -53,6 +54,8 @@ cd web
 npm install
 npm run dev        # 自动拉起后端并等待 /api/health 就绪后再启动前端
 ```
+
+点击“新建照明项目”后，先选择项目文件夹，再填写项目条件并创建。选择已有内容的文件夹是允许的；若该文件夹已经是本系统的工作区，将直接重新打开其中的项目而不会覆盖任务书。
 
 也可手动先启动后端（脚本检测到后端已就绪会直接复用）：
 
@@ -113,8 +116,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify-phase0.ps1
 
 ## SQLite 持久化
 
-项目当前状态、不可变 revision 快照、RAG 证据块和聊天会话均保存到
-`data/lighting_design.sqlite3`。首次启动时会自动导入旧的
+命令行项目与全局规范资料库仍使用 `data/lighting_design.sqlite3`。Web 工作区将项目当前状态、不可变 revision 快照、项目私有 RAG 证据块和聊天会话保存到用户选择的项目目录中的 `lighting_design.sqlite3`；项目资料、图纸、配光与交付文件也保存在同一目录。`data/workspace_registry.sqlite3` 只记录工作区目录与项目 ID 的对应关系，不保存项目设计内容。
+
+全局数据库首次启动时会自动导入旧的
 `data/projects/*.json` 与旧版 `data/rag/index.json`（若存在）；原始 JSON 不会被删除，
 新安装不会创建 `data/rag/` 目录。
 

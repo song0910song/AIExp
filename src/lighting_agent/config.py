@@ -16,6 +16,7 @@ PROJECTS_DIRECTORY = DATA_DIRECTORY / "projects"
 LEGACY_RAG_INDEX_FILE = DATA_DIRECTORY / "rag" / "index.json"
 USER_DOCUMENTS_DIRECTORY = PROJECT_ROOT / "src" / "data" / "user_docs"
 DATABASE_FILE = DATA_DIRECTORY / "lighting_design.sqlite3"
+WORKSPACE_REGISTRY_FILE = DATA_DIRECTORY / "workspace_registry.sqlite3"
 
 # Load local .env before Settings defaults are evaluated (dataclass defaults run
 # at class definition time); existing environment variables take precedence.

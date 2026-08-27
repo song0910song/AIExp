@@ -61,7 +61,13 @@ class ProjectStore:
     isolated database there, preserving the original test and CLI ergonomics.
     """
 
-    def __init__(self, directory: Path | None = None, *, database_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        directory: Path | None = None,
+        *,
+        database_path: Path | None = None,
+        import_legacy: bool = True,
+    ) -> None:
         ensure_data_directories()
         self.directory = directory or PROJECTS_DIRECTORY
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -69,7 +75,8 @@ class ProjectStore:
             DATABASE_FILE if directory is None else self.directory / "lighting_design.sqlite3"
         )
         self.database = SQLiteDatabase(self.database_path)
-        self._import_legacy_projects()
+        if import_legacy:
+            self._import_legacy_projects()
 
     @staticmethod
     def _validate_project_id(project_id: str) -> None:

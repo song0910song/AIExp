@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { FolderOpen } from "lucide-react";
 import { LIGHTING_TEMPLATES } from "@/lib/lighting-templates";
-import { api } from "@/lib/api";
+import { api, type WorkspaceDirectorySelection } from "@/lib/api";
 import type { Project } from "@/lib/types";
 import { BusyButton, Field, Modal, Notice, toNullableNumber } from "./ui";
 
@@ -47,6 +48,8 @@ export function CreateProjectModal({ onClose, onCreated }: { onClose: () => void
   const [draft, setDraft] = useState<ProjectDraft>(emptyDraft);
   const [templateId, setTemplateId] = useState("");
   const [busy, setBusy] = useState(false);
+  const [selectingDirectory, setSelectingDirectory] = useState(false);
+  const [workspaceDirectory, setWorkspaceDirectory] = useState<WorkspaceDirectorySelection | null>(null);
   const [error, setError] = useState<string | null>(null);
   const selectedTemplate = LIGHTING_TEMPLATES.find((template) => template.id === templateId) ?? null;
 
@@ -65,11 +68,29 @@ export function CreateProjectModal({ onClose, onCreated }: { onClose: () => void
     }));
   }
 
+  async function selectDirectory() {
+    setSelectingDirectory(true);
+    setError(null);
+    try {
+      const selected = await api.selectWorkspaceDirectory();
+      if (selected.selected && selected.selection_id && selected.directory) {
+        setWorkspaceDirectory(selected);
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法打开项目文件夹选择器");
+    } finally {
+      setSelectingDirectory(false);
+    }
+  }
+
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
+      if (!workspaceDirectory?.selection_id) {
+        throw new Error("请先选择项目文件夹");
+      }
       const values = {
         project_name: draft.project_name.trim(),
         space_type: draft.space_type || null,
@@ -88,6 +109,7 @@ export function CreateProjectModal({ onClose, onCreated }: { onClose: () => void
 
       const project = await api.createProject({
         ...values,
+        workspace_selection_id: workspaceDirectory.selection_id,
         confirmed_fields,
         template_origin: selectedTemplate
           ? {
@@ -125,6 +147,14 @@ export function CreateProjectModal({ onClose, onCreated }: { onClose: () => void
           ) : null}
           <Field label="项目名称" wide>
             <input value={draft.project_name} onChange={(event) => updateField("project_name", event.target.value)} required placeholder="例如：总部三层会议室改造" autoFocus />
+          </Field>
+          <Field label="项目文件夹" hint="项目状态、资料、图纸、配光和交付文件均保存于此目录" wide>
+            <div className="directory-picker">
+              <input value={workspaceDirectory?.directory ?? ""} readOnly placeholder="请选择本机项目文件夹" aria-label="项目文件夹" />
+              <BusyButton className="button button-secondary" busy={selectingDirectory} type="button" onClick={() => void selectDirectory()} disabled={busy}>
+                <FolderOpen size={16} />选择文件夹
+              </BusyButton>
+            </div>
           </Field>
           <Field label="空间类型">
             <input value={draft.space_type} onChange={(event) => updateField("space_type", event.target.value)} placeholder="会议室" />
