@@ -73,6 +73,8 @@ CCT_PATTERN = re.compile(r"\b(\d{4,5})\s*K\b", re.I)
 CRI_PATTERN = re.compile(r"\b(?:CRI|Ra)\s*[:>=]?\s*(\d{2,3})\b", re.I)
 UGR_PATTERN = re.compile(r"\bUGR\s*(?:[:<≤]|max(?:\.|imum)?\s*)?\s*(\d{1,2}(?:[.,]\d)?)(?!\d)", re.I)
 PHOTOMETRY_ZIP_HREF_PATTERN = re.compile(r"href\s*=\s*['\"](?P<href>[^'\"]+\.zip(?:\?[^'\"]*)?)['\"]", re.I)
+# Same shape the site embeds behind its "Send to DIALux" button.
+DIALUX_PROTOCOL_LINK_PATTERN = re.compile(r"dial://[^\s\"'<>]+\.uld", re.I)
 MAX_PHOTOMETRY_ZIP_BYTES = 50 * 1024 * 1024
 PARSER_VERSION = "2.0"
 
@@ -636,6 +638,21 @@ class DialuxAPI:
         if not zipfile.is_zipfile(BytesIO(content)):
             raise DialuxAPIError("DIALux photometric download was not a valid ZIP file", code="invalid_zip")
         return source_url, content
+
+    def resolve_send_to_dialux_url(self, detail_url: str) -> str:
+        """Extract the product page's Send-to-DIALux ``dial://`` link."""
+
+        _, detail_response = self._trusted_get(
+            detail_url,
+            headers={"Accept": "text/html", "User-Agent": self.headers["User-Agent"]},
+        )
+        match = DIALUX_PROTOCOL_LINK_PATTERN.search(detail_response.text)
+        if match is None:
+            raise DialuxAPIError(
+                "产品页未提供“送到 DIALux”协议链接（页面可能由脚本渲染）",
+                code="send_to_dialux_link_not_found",
+            )
+        return match.group(0)
 
     def _assert_dialux_url(self, value: str) -> None:
         candidate = urlparse(value)

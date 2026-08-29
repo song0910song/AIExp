@@ -159,6 +159,11 @@ export const api = {
       `/projects/${id}/luminaires/${encodeURIComponent(luminaireId)}/photometry`,
       { method: "POST" },
     ),
+  sendLuminaireToDialux: (id: string, luminaireId: string) =>
+    request<{ status: string; luminaire_id: string; dialux_protocol_url: string; handler: string }>(
+      `/projects/${id}/luminaires/${encodeURIComponent(luminaireId)}/send-to-dialux`,
+      { method: "POST" },
+    ),
   savedLuminairePhotometryUrl: (id: string, luminaireId: string) =>
     `${API_ROOT}/projects/${id}/luminaires/${encodeURIComponent(luminaireId)}/photometry/file`,
   extractedLuminairePhotometryUrl: (id: string, luminaireId: string, relativePath: string) =>

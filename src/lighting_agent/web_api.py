@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import Field
 from starlette.concurrency import run_in_threadpool
 
+from . import dialux_protocol
 from .agent import build_agent, set_retry_notifier
 from .calculations import (
     IlluminancePreviewRequest,
@@ -38,6 +39,7 @@ from .calculations.preview import PreviewGeometryError
 from .config import DATABASE_FILE, Settings, USER_DOCUMENTS_DIRECTORY, ensure_data_directories
 from .deliverables import build_design_report, build_dialux_task_archive, read_dialux_task_package
 from .dialux_api import DialuxAPI, DialuxAPIError, validate_luminaire_search
+from .dialux_protocol import DialuxProtocolError
 from .document_loader import DocumentLoadError, load_document
 from .floor_plan import MAX_DRAWING_BYTES, FloorPlanParseError, parse_floor_plan
 from .project_store import ProjectNotFoundError, ProjectStore, RevisionConflictError
@@ -1200,6 +1202,27 @@ def create_app(
         return {
             "candidate": candidate.model_dump(mode="json"),
             "untrusted_supplier_data": True,
+        }
+
+    @app.post("/api/projects/{project_id}/luminaires/{luminaire_id}/send-to-dialux")
+    def send_luminaire_to_dialux(project_id: str, luminaire_id: str) -> dict[str, Any]:
+        state = projects.get(project_id)
+        candidate = next((item for item in state.luminaires if item.luminaire_id == luminaire_id), None)
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Luminaire is not in this project")
+        try:
+            dial_url = dialux.resolve_send_to_dialux_url(candidate.detail_url)
+        except DialuxAPIError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        try:
+            handler = dialux_protocol.open_in_dialux(dial_url)
+        except DialuxProtocolError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "status": "launched",
+            "luminaire_id": luminaire_id,
+            "dialux_protocol_url": dial_url,
+            "handler": handler,
         }
 
     @app.put("/api/projects/{project_id}/selected-luminaires")
