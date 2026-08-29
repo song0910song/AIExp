@@ -11,12 +11,14 @@ from langchain_core.tools import tool
 from pydantic import Field
 
 from .calculations import calculate_lumen_method, check_design_rules as run_rule_checks
+from . import dialux_protocol
 from .dialux_api import (
     DialuxAPI,
     DialuxAPIError,
     candidate_summary,
     validate_luminaire_search,
 )
+from .dialux_protocol import DialuxProtocolError
 from .deliverables import build_design_report, build_dialux_task_archive, build_dialux_task_package
 from .document_loader import load_document
 from .project_store import ProjectStore, RevisionConflictError
@@ -108,6 +110,10 @@ class LuminaireSelectionInput(ProjectReference):
 
 
 class LuminaireDetailInput(ProjectReference):
+    luminaire_id: str = Field(min_length=1, max_length=200)
+
+
+class SendToDialuxInput(ProjectReference):
     luminaire_id: str = Field(min_length=1, max_length=200)
 
 
@@ -709,6 +715,35 @@ def get_luminaire_detail(project_id: str, luminaire_id: str) -> dict:
         "candidate": candidate_summary(candidate),
         "detail_fields": candidate.detail_fields,
         "untrusted_supplier_data": True,
+    }
+
+
+@tool("send_luminaire_to_dialux", args_schema=SendToDialuxInput)
+def send_luminaire_to_dialux(project_id: str, luminaire_id: str) -> dict:
+    """Hand one saved candidate to the local DIALux evo via the dial:// protocol (Windows)."""
+
+    state = project_store.get(project_id)
+    candidate = next((item for item in state.luminaires if item.luminaire_id == luminaire_id), None)
+    if candidate is None:
+        return {
+            "status": "not_found",
+            "luminaire_id": luminaire_id,
+            "message": "该灯具不在本项目的已保存候选中，请先调用 search_luminaires。",
+        }
+    try:
+        dial_url = DialuxAPI().resolve_send_to_dialux_url(candidate.detail_url)
+    except DialuxAPIError as error:
+        return {"status": "vendor_error", "vendor_error": error.as_dict()}
+    try:
+        handler = dialux_protocol.open_in_dialux(dial_url)
+    except DialuxProtocolError as error:
+        return {"status": "local_handoff_failed", "error": error.as_dict()}
+    return {
+        "status": "launched",
+        "luminaire_id": luminaire_id,
+        "dialux_protocol_url": dial_url,
+        "handler": handler,
+        "notice": "已通过 dial:// 协议唤起本机 DIALux（与网页“送到 DIALux”按钮等价），请在 DIALux 中确认导入；仿真结论仍需在 DIALux evo 中核验。",
     }
 
 

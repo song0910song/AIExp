@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Download, ExternalLink, FolderArchive, RotateCcw, Search, Trash2 } from "lucide-react";
+import { Download, ExternalLink, FolderArchive, MonitorUp, RotateCcw, Search, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Luminaire, PhotometryAsset, Project } from "@/lib/types";
 import { PhotometryControls } from "./LuminairePhotometryControls";
@@ -12,6 +12,7 @@ export function LuminairePanel({ project, onProject }: { project: Project; onPro
   const [notice, setNotice] = useState<{ tone: "danger" | "success"; text: string } | null>(null);
   const [assets, setAssets] = useState<Record<string, PhotometryAsset>>({});
   const [assetBusy, setAssetBusy] = useState<string | null>(null);
+  const [sendBusy, setSendBusy] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<{ completed: number; total: number; failed: number } | null>(null);
   const requestInFlight = useRef(false);
 
@@ -48,6 +49,20 @@ export function LuminairePanel({ project, onProject }: { project: Project; onPro
       setNotice({ tone: "danger", text: reason instanceof Error ? reason.message : "配光 ZIP 下载失败" });
     } finally {
       setAssetBusy(null);
+    }
+  }
+
+  async function sendToDialux(item: Luminaire) {
+    if (sendBusy) return;
+    setSendBusy(item.luminaire_id);
+    setNotice(null);
+    try {
+      await api.sendLuminaireToDialux(project.project_id, item.luminaire_id);
+      setNotice({ tone: "success", text: `已唤起本机 DIALux 导入“${item.article_name}”，请在 DIALux 中确认。` });
+    } catch (reason) {
+      setNotice({ tone: "danger", text: reason instanceof Error ? reason.message : "唤起本机 DIALux 失败" });
+    } finally {
+      setSendBusy(null);
     }
   }
 
@@ -198,7 +213,10 @@ export function LuminairePanel({ project, onProject }: { project: Project; onPro
                   <dl className="spec-row"><div><dt>功率</dt><dd>{formatNumber(item.power_w)} W</dd></div><div><dt>CCT</dt><dd>{formatNumber(item.cct_k, 0)} K</dd></div><div><dt>CRI</dt><dd>{formatNumber(item.cri, 0)}</dd></div><div><dt>UGR</dt><dd>{formatNumber(item.ugr, 0)}</dd></div><div><dt>防护</dt><dd>{item.ip_rating ?? "—"}</dd></div></dl>
                   <div className="resource-row"><span className={item.has_uld ? "available" : ""}>ULD {item.has_uld ? "可用" : "缺失"}</span><span className={item.has_photometry_download ? "available" : ""}>配光 {item.has_photometry_download ? "可用" : "缺失"}</span></div>
                   {item.missing_requested_fields.length ? <p className="missing-fields">缺少筛选字段：{item.missing_requested_fields.join("、")}</p> : null}
-                  <a className="text-link" href={item.detail_url} target="_blank" rel="noreferrer">查看 DIALux 详情 <ExternalLink size={14} /></a>
+                  <div className="photometry-batch-actions">
+                    <BusyButton busy={sendBusy === item.luminaire_id} disabled={Boolean(sendBusy)} type="button" onClick={() => void sendToDialux(item)}><MonitorUp size={16} />送到 DIALux</BusyButton>
+                    <a className="text-link" href={item.detail_url} target="_blank" rel="noreferrer">查看 DIALux 详情 <ExternalLink size={14} /></a>
+                  </div>
                 </div>
               </article>
             ))}
