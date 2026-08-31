@@ -22,3 +22,4 @@ data/
 .pytest-basetemp/
 .uv-cache/
 .model-cache/
+dialux_sim.py
