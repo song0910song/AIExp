@@ -206,7 +206,50 @@ export type FloorPlan = {
   text_items: string[];
   room_name: string | null;
   area_candidates: FloorPlanAreaCandidate[];
+  luminaire_placements: LuminairePlacement[];
   selected_area_candidate_index: number | null;
+  warnings: string[];
+};
+
+export type LuminairePlacement = {
+  placement_id: string;
+  luminaire_id: string;
+  model: string | null;
+  manufacturer: string | null;
+  product_code: string | null;
+  category: "general_candidate" | "accent_candidate" | "unclassified";
+  x_m: number;
+  y_m: number;
+  z_m: number | null;
+  rotation_deg: number | null;
+  footprint: { length_m: number | null; width_m: number | null; source: string };
+  group_id: string | null;
+  source_refs: string[];
+  dxf_entity_handles: string[];
+  dxf_model_index: string | null;
+  report_index: number | null;
+  report_page: number | null;
+  coordinate_residual_m: number | null;
+  matching_status: string;
+  confidence: string;
+};
+
+export type LayoutAnalysis = {
+  analysis_id: string;
+  project_revision: number;
+  cad_source_name: string;
+  cad_sha256: string;
+  report_source_name: string;
+  report_sha256: string;
+  report_page_count: number;
+  coordinate_transform: Record<string, unknown> | null;
+  dxf_count: number;
+  report_count: number;
+  model_counts: Record<string, number>;
+  model_parameters: Record<string, Record<string, unknown>>;
+  placements: LuminairePlacement[];
+  checks: Array<Record<string, unknown>>;
+  issues: Array<Record<string, unknown>>;
   warnings: string[];
 };
 
@@ -299,6 +342,7 @@ export type Project = {
   selected_luminaire_ids: string[];
   luminaire_group_assignments: Record<string, string[]>;
   floor_plan: FloorPlan | null;
+  layout_analysis: LayoutAnalysis | null;
   open_questions: string[];
   created_at: string;
   updated_at: string;

@@ -361,6 +361,8 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
     setError(null);
     let uploadedNames: string[] = [];
     let floorPlans: import("@/lib/types").FloorPlan[] = [];
+    let cadAttached = false;
+    let reportAttachment: File | null = null;
     let projectRevision = project.revision;
     try {
       const uploads: Array<{ floorPlan?: import("@/lib/types").FloorPlan; name: string }> = [];
@@ -370,10 +372,12 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
           const floorPlan = imported.floor_plan;
           projectRevision = imported.project.revision;
           onProject(imported.project);
+          cadAttached = true;
           uploads.push({ floorPlan, name: floorPlan.asset.source_name });
           continue;
         }
         const document = await api.uploadProjectDocument(project.project_id, file, "project_document");
+        if (file.name.toLowerCase().endsWith(".pdf")) reportAttachment = file;
         uploads.push({ name: document.source_name });
       }
       uploadedNames = uploads.map((upload) => upload.name);
@@ -394,10 +398,23 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
         : "未识别出可换算边界，未改写任务书几何数据";
       return `已解析并写入项目的 CAD 平面图：${plan.asset.source_name}。单位：${plan.drawing_units}；候选闭合边界：${candidateSummary || "未识别"}。${applied}；请提示用户确认或在后续对话中修正。`;
     });
+    let layoutContext = "";
+    if (reportAttachment && (cadAttached || project.floor_plan)) {
+      try {
+        const analysis = await api.importLayoutAnalysis(project.project_id, projectRevision, reportAttachment);
+        projectRevision = analysis.project.revision;
+        onProject(analysis.project);
+        layoutContext = `已完成灯具坐标阶段1审查：DXF ${analysis.analysis.dxf_count} 套，PDF ${analysis.analysis.report_count} 套，已匹配 ${analysis.matched_count} 套，待复核问题 ${analysis.issue_count} 个。请基于 analysis 结果说明来源、型号和坐标；照明类别仍需确认。`;
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : "灯具坐标审查失败");
+        return;
+      }
+    }
     const content = [
       instruction || "我已上传项目资料，请读取并用于本轮分析。",
       uploadedNames.length ? `已上传文件：${uploadedNames.join("、")}。` : "",
       floorPlanContext.join("\n"),
+      layoutContext,
       uploadedNames.length > floorPlans.length ? "非 CAD 资料已入库，可在需要时检索其内容。" : "",
     ].filter(Boolean).join("\n\n");
     const timestamp = Date.now();
