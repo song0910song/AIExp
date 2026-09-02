@@ -1,4 +1,4 @@
-import type { AgentPlanStep, AgentStepStatus, AgentToolRun, ClarificationRequest, ContextUsage, DesignBrief, FloorPlanImport, Health, Project } from "./types";
+import type { AgentPlanStep, AgentStepStatus, AgentToolRun, ClarificationRequest, ContextUsage, DesignBrief, FloorPlanImport, Health, LayoutAnalysis, Project } from "./types";
 
 const API_ROOT = "/backend";
 
@@ -125,6 +125,13 @@ export const api = {
     data.append("file", file);
     data.append("expected_revision", String(expectedRevision));
     return request<FloorPlanImport>(`/projects/${id}/floor-plan`, { method: "POST", body: data });
+  },
+  importLayoutAnalysis: (id: string, expectedRevision: number, report: File, cad?: File) => {
+    const data = new FormData();
+    data.append("expected_revision", String(expectedRevision));
+    data.append("report_file", report);
+    if (cad) data.append("cad_file", cad);
+    return request<{ analysis: LayoutAnalysis; project: Project; matched_count: number; issue_count: number }>(`/projects/${id}/layout-analysis`, { method: "POST", body: data });
   },
   checkRule: (
     id: string,

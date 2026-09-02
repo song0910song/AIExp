@@ -7,6 +7,7 @@ from .preview import (
     PreviewGeometryError,
     compute_illuminance_preview,
 )
+from .layout import DEFAULT_COORDINATE_TOLERANCE_M, analyze_luminaire_layout
 
 __all__ = [
     "SOLVER_VERSION",
@@ -19,4 +20,6 @@ __all__ = [
     "check_design_rules",
     "compute_illuminance_preview",
     "parse_photometry",
+    "DEFAULT_COORDINATE_TOLERANCE_M",
+    "analyze_luminaire_layout",
 ]

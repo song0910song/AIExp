@@ -3,6 +3,7 @@
 import { ArrowUpRight, Bot, CheckCircle2, ExternalLink, FileText, Lightbulb, Map as MapIcon, Ruler, ShieldCheck } from "lucide-react";
 import type { Project } from "@/lib/types";
 import { PhotometryPreviewCard } from "./PhotometryPreviewCard";
+import { LayoutReviewPanel } from "./LayoutReviewPanel";
 import { BusyButton, EmptyState, Notice, StatusPill, formatNumber } from "./ui";
 
 const questionLabels: Record<string, string> = {
@@ -73,7 +74,7 @@ export function OverviewPanel({ project, onStartAgent }: { project: Project; onS
           </ol>
         </section>
 
-        <section className="overview-section overview-plan">
+      <section className="overview-section overview-plan">
           <header><div><p className="eyebrow">FLOOR PLAN</p><h2>平面图依据</h2></div><MapIcon size={18} /></header>
           {project.floor_plan ? (
             <div className="overview-plan-summary">
@@ -97,6 +98,8 @@ export function OverviewPanel({ project, onStartAgent }: { project: Project; onS
           ) : <EmptyState title="核心输入已经齐备">仍需在 DIALux evo 中确认房间反射比、布灯位置和计算网格。</EmptyState>}
         </section>
       </div>
+
+      <LayoutReviewPanel project={project} />
 
       <PhotometryPreviewCard project={project} />
 
