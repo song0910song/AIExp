@@ -103,8 +103,6 @@ GET /api/projects/{project_id}/dialux-results/{run_id}
 
 有关系统设计与 API 字段，见 [照明设计智能体方案](docs/照明设计智能体方案.md) 和 [DIALux API 文档](docs/DIALux-Luminaire-Finder-API.md)。
 
-灯具坐标审查接口为 `POST /api/projects/{project_id}/layout-analysis`，上传 `report_file`（PDF）；项目尚未导入平面图时，可在同一请求附带 `cad_file`。查询结果使用 `GET /api/projects/{project_id}/layout-analysis`。该结果是位置与身份一致性审查，不是照度或 UGR 合格结论。
-
 ## 验证
 
 ```powershell

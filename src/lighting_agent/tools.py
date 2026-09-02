@@ -12,6 +12,7 @@ from pydantic import Field
 
 from .calculations import calculate_lumen_method, check_design_rules as run_rule_checks
 from .calculations.layout import analyze_luminaire_layout as run_luminaire_layout_analysis
+from .calculations.layout import analyze_luminaire_layout as run_luminaire_layout_analysis
 from . import dialux_protocol
 from .dialux_api import (
     DialuxAPI,
@@ -815,46 +816,6 @@ def generate_design_report(project_id: str, expected_revision: int) -> dict:
         "report": str(target),
         "project_revision": state.revision,
         "rebased": state.revision != expected_revision,
-    }
-
-
-@tool("analyze_luminaire_layout", args_schema=LuminaireLayoutAnalysisInput)
-def analyze_luminaire_layout(
-    project_id: str,
-    expected_revision: int,
-    report_file: str,
-    coordinate_tolerance_m: float = 0.05,
-) -> dict:
-    """Match a project's imported DXF luminaire symbols to a PDF report."""
-
-    state = project_store.get(project_id)
-    if state.floor_plan is None:
-        return {"status": "needs_floor_plan", "message": "请先导入项目 DXF/DWG 平面图。"}
-    report_path = Path(report_file).expanduser()
-    if not report_path.is_absolute():
-        report_path = _project_directory(project_id) / report_path
-    report_path = report_path.resolve()
-    try:
-        report_path.relative_to(_project_directory(project_id).resolve())
-    except ValueError as error:
-        raise ValueError("report_file must be inside the current project workspace") from error
-    try:
-        report = parse_luminaire_report(report_path)
-    except LuminaireReportParseError as error:
-        raise ValueError(str(error)) from error
-    analysis = run_luminaire_layout_analysis(
-        state.floor_plan,
-        report,
-        coordinate_tolerance_m=coordinate_tolerance_m,
-    )
-    updated = project_store.set_layout_analysis(project_id, expected_revision, analysis)
-    return {
-        "status": "ok",
-        "analysis": _data(updated.layout_analysis),
-        "project_revision": updated.revision,
-        "matched_count": sum(1 for item in analysis.placements if item.matching_status == "matched"),
-        "issue_count": len(analysis.issues),
-        "notice": "布局分类仍为未分类；照度和 UGR 不能由坐标一致性审查替代。",
     }
 
 
