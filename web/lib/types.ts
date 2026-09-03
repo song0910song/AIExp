@@ -27,6 +27,8 @@ export type DesignBrief = {
   target_cct_k: number | null;
   min_cri: number | null;
   target_ugr: number | null;
+  target_uniformity_u0: number | null;
+  max_lpd_w_m2: number | null;
   max_power_w: number | null;
   mounting: string | null;
   min_ip_rating: string | null;
@@ -53,6 +55,8 @@ export type LightingGroup = {
   target_cct_k: number | null;
   min_cri: number | null;
   target_ugr: number | null;
+  target_uniformity_u0: number | null;
+  max_lpd_w_m2: number | null;
   utilization_factor: number | null;
   maintenance_factor: number | null;
   luminaire_ids: string[];
@@ -94,6 +98,7 @@ export type Calculation = {
   required_luminous_flux_lm: number;
   luminaire_count: number;
   installed_power_w: number;
+  installed_power_density_w_m2: number;
   assumptions: string[];
   limitations: string[];
   calculated_at: string;
@@ -238,6 +243,7 @@ export type PhotometryPreviewResult = {
   average_illuminance_lx: number;
   minimum_illuminance_lx: number;
   maximum_illuminance_lx: number;
+  uniformity_u0: number;
   installed_flux_lm: number;
   installed_power_w: number | null;
   assumptions: string[];

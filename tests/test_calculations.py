@@ -1,6 +1,3 @@
-import pytest
-from pydantic import ValidationError
-
 from lighting_agent.calculations import calculate_lumen_method, check_design_rules
 from lighting_agent.schemas import CalculationInput, RuleRequirement
 
@@ -24,6 +21,7 @@ def test_lumen_method_is_reproducible() -> None:
     assert result.required_luminous_flux_lm == 15000
     assert result.luminaire_count == 10
     assert result.installed_power_w == 240
+    assert result.installed_power_density_w_m2 == 8.0
     assert "not a point-by-point" in result.limitations[0]
 
 
@@ -41,7 +39,10 @@ def test_rule_checker_preserves_insufficient_data() -> None:
     assert checks[1].status == "insufficient_data"
 
 
-@pytest.mark.parametrize("metric", ["lpd_w_m2", "uniformity_u0"])
-def test_removed_rule_metrics_are_rejected(metric: str) -> None:
-    with pytest.raises(ValidationError):
-        RuleRequirement(metric=metric, operator="min", threshold=0.6)
+def test_rule_checker_supports_uniformity_requirement() -> None:
+    checks = check_design_rules(
+        [RuleRequirement(metric="uniformity_u0", operator="min", threshold=0.6)],
+        {"uniformity_u0": 0.61},
+    )
+
+    assert checks[0].status == "pass"
