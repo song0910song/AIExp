@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import math
 import re
 import tempfile
 from collections import Counter
@@ -18,14 +17,7 @@ from ezdxf.lldxf.const import DXFError
 from ezdxf.math import Vec2
 from shapely import LineString, ops
 
-from .schemas import (
-    CadPoint,
-    FloorPlan,
-    FloorPlanAreaCandidate,
-    FloorPlanAsset,
-    LuminaireFootprint,
-    LuminairePlacement,
-)
+from .schemas import CadPoint, FloorPlan, FloorPlanAreaCandidate, FloorPlanAsset
 
 
 class FloorPlanParseError(RuntimeError):
@@ -75,24 +67,12 @@ def parse_floor_plan(source: Path, *, storage_path: str) -> FloorPlan:
         raise FloorPlanParseError(f"无法解析 CAD 图纸：{error}") from error
 
     unit_name, meters_per_unit = _drawing_unit(document)
-    warnings = list(warnings)
     modelspace = document.modelspace()
     entities = list(modelspace)
     entity_counts = Counter(entity.dxftype() for entity in entities)
-    if _has_dialux_layers(entities):
-        declared_unit_name = unit_name
-        declared_meters_per_unit = meters_per_unit
-        # DIALux exports commonly declare $INSUNITS as inches while their
-        # DLX_* geometry is visibly and semantically expressed in metres.
-        unit_name, meters_per_unit = "m", 1.0
-        if declared_unit_name != "m" or declared_meters_per_unit != 1.0:
-            warnings.append(
-                f"DXF 文件头声明单位为 {declared_unit_name}，但检测到 DIALux DLX_* 图层；布局坐标按米解释。"
-            )
     bounds = _bounds(modelspace)
     text_items = _text_items(entities)
     area_candidates = _area_candidates(entities, meters_per_unit)
-    luminaire_placements = _luminaire_placements(entities, source.name, meters_per_unit)
     room_name = _room_name(text_items)
     if not meters_per_unit:
         warnings.append("图纸未声明可换算的长度单位；面积与尺寸仅能作为原始单位参考。")
@@ -115,7 +95,6 @@ def parse_floor_plan(source: Path, *, storage_path: str) -> FloorPlan:
         text_items=text_items,
         room_name=room_name,
         area_candidates=area_candidates,
-        luminaire_placements=luminaire_placements,
         warnings=list(dict.fromkeys(warnings)),
     )
 
@@ -136,10 +115,6 @@ def _read_document(source: Path) -> tuple[Drawing, bool, list[str]]:
 def _drawing_unit(document: Drawing) -> tuple[str, float | None]:
     unit_code = int(document.header.get("$INSUNITS", 0) or 0)
     return _UNIT_TO_METERS.get(unit_code, (f"unknown:{unit_code}", None))
-
-
-def _has_dialux_layers(entities: list[Any]) -> bool:
-    return any(str(entity.dxf.layer).upper().startswith("DLX_") for entity in entities)
 
 
 def _bounds(modelspace: Any) -> tuple[CadPoint, CadPoint] | None:
@@ -286,170 +261,6 @@ def _segment_points(entity: Any) -> list[Vec2]:
     if entity_type == "POLYLINE":
         return [Vec2(vertex.dxf.location) for vertex in entity.vertices]
     return []
-
-
-def _luminaire_placements(
-    entities: list[Any],
-    source_name: str = "output.dxf",
-    meters_per_unit: float | None = 1.0,
-) -> list[LuminairePlacement]:
-    """Group connected DLX_LUM symbol segments into one placement each.
-
-    DIALux exports this layer as many two-vertex POLYLINE entities instead of
-    INSERT blocks. Components are grouped through rounded endpoint buckets so
-    the algorithm does not depend on the observed 72-segment symbol size.
-    """
-
-    scale = meters_per_unit or 1.0
-    index_texts = [
-        entity
-        for entity in entities
-        if entity.dxftype() == "TEXT"
-        and str(entity.dxf.layer).casefold() == "dlx_lumkey_idx"
-        and str(entity.dxf.text).strip()
-    ]
-    insert_entities = [
-        entity
-        for entity in entities
-        if entity.dxftype() == "INSERT" and str(entity.dxf.layer).casefold() == "dlx_lum"
-    ]
-    if insert_entities:
-        placements: list[LuminairePlacement] = []
-        for number, entity in enumerate(insert_entities, start=1):
-            nearest_index = min(
-                index_texts,
-                key=lambda item: math.hypot(
-                    item.dxf.insert.x - entity.dxf.insert.x,
-                    item.dxf.insert.y - entity.dxf.insert.y,
-                ),
-                default=None,
-            )
-            refs = [f"{source_name}:DLX_LUM:entity-{entity.dxf.handle}"]
-            if nearest_index is not None:
-                refs.append(f"{source_name}:DLX_LUMKEY_IDX:entity-{nearest_index.dxf.handle}")
-            placements.append(
-                LuminairePlacement(
-                    placement_id=f"D-{number:03d}",
-                    luminaire_id=f"dxf-insert-{number:03d}",
-                    model=str(getattr(entity.dxf, "name", "") or "") or None,
-                    x_m=round(float(entity.dxf.insert.x) * scale, 6),
-                    y_m=round(float(entity.dxf.insert.y) * scale, 6),
-                    z_m=round(float(entity.dxf.insert.z) * scale, 6),
-                    rotation_deg=round(float(getattr(entity.dxf, "rotation", 0.0) or 0.0), 6),
-                    footprint=LuminaireFootprint(source="unknown"),
-                    source_refs=refs,
-                    dxf_entity_handles=[str(entity.dxf.handle)],
-                    dxf_model_index=(str(nearest_index.dxf.text).strip() if nearest_index is not None else None),
-                    matching_status="unresolved",
-                    confidence="high",
-                )
-            )
-        return placements
-    luminaire_entities = [
-        entity
-        for entity in entities
-        if str(entity.dxf.layer).casefold() == "dlx_lum"
-        and entity.dxftype() in {"LINE", "LWPOLYLINE", "POLYLINE"}
-    ]
-    if not luminaire_entities:
-        return []
-
-    parent = list(range(len(luminaire_entities)))
-
-    def find(index: int) -> int:
-        while parent[index] != index:
-            parent[index] = parent[parent[index]]
-            index = parent[index]
-        return index
-
-    def union(left: int, right: int) -> None:
-        left_root, right_root = find(left), find(right)
-        if left_root != right_root:
-            parent[right_root] = left_root
-
-    endpoint_buckets: dict[tuple[int, int], list[int]] = {}
-    tolerance = 1e-4
-    for index, entity in enumerate(luminaire_entities):
-        points = _segment_points(entity)
-        for point in (points[0], points[-1]) if len(points) >= 2 else points:
-            bucket = (round(point.x / tolerance), round(point.y / tolerance))
-            for x_bucket in range(bucket[0] - 1, bucket[0] + 2):
-                for y_bucket in range(bucket[1] - 1, bucket[1] + 2):
-                    for other in endpoint_buckets.get((x_bucket, y_bucket), []):
-                        union(index, other)
-            endpoint_buckets.setdefault(bucket, []).append(index)
-
-    components: dict[int, list[Any]] = {}
-    for index, entity in enumerate(luminaire_entities):
-        components.setdefault(find(index), []).append(entity)
-
-    if index_texts:
-        # DIALux's index text is a useful validation anchor, but it is not
-        # always geometrically centred. Some panel symbols contain two
-        # disconnected strokes, so merge connected components with the same
-        # computed centre before consulting the nearest index text.
-        merged: list[tuple[float, float, list[Any]]] = []
-        for component in components.values():
-            points = [point for entity in component for point in _segment_points(entity)]
-            if not points:
-                continue
-            center_x = (min(point.x for point in points) + max(point.x for point in points)) / 2
-            center_y = (min(point.y for point in points) + max(point.y for point in points)) / 2
-            match = next(
-                (
-                    item
-                    for item in merged
-                    if math.hypot(item[0] - center_x, item[1] - center_y) <= 0.005
-                ),
-                None,
-            )
-            if match is None:
-                merged.append((center_x, center_y, list(component)))
-            else:
-                match[2].extend(component)
-        components = {number: values for number, (_, _, values) in enumerate(merged)}
-    placements: list[LuminairePlacement] = []
-    for number, component in enumerate(
-        sorted(components.values(), key=lambda value: min(str(item.dxf.handle) for item in value)),
-        start=1,
-    ):
-        points = [point for entity in component for point in _segment_points(entity)]
-        if not points:
-            continue
-        min_x, max_x = min(point.x for point in points), max(point.x for point in points)
-        min_y, max_y = min(point.y for point in points), max(point.y for point in points)
-        center_x, center_y = (min_x + max_x) / 2, (min_y + max_y) / 2
-        nearest_index = min(
-            index_texts,
-            key=lambda item: math.hypot(item.dxf.insert.x - center_x, item.dxf.insert.y - center_y),
-            default=None,
-        )
-        source_refs = [
-            f"{source_name}:DLX_LUM:entity-{entity.dxf.handle}"
-            for entity in component
-        ]
-        model_index = str(nearest_index.dxf.text).strip() if nearest_index is not None else None
-        if nearest_index is not None:
-            source_refs.append(f"{source_name}:DLX_LUMKEY_IDX:entity-{nearest_index.dxf.handle}")
-        placements.append(
-            LuminairePlacement(
-                placement_id=f"D-{number:03d}",
-                luminaire_id=f"dxf-placement-{number:03d}",
-                x_m=round(center_x * scale, 6),
-                y_m=round(center_y * scale, 6),
-                footprint=LuminaireFootprint(
-                    length_m=round((max_x - min_x) * scale, 6) or None,
-                    width_m=round((max_y - min_y) * scale, 6) or None,
-                    source="cad_symbol",
-                ),
-                source_refs=source_refs,
-                dxf_entity_handles=[str(entity.dxf.handle) for entity in component],
-                dxf_model_index=model_index,
-                matching_status="unresolved",
-                confidence="high" if nearest_index is not None else "medium",
-            )
-        )
-    return placements
 
 
 def _pairs(points: list[Vec2]) -> list[tuple[Vec2, Vec2]]:

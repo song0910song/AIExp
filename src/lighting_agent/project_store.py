@@ -12,7 +12,6 @@ from .config import DATABASE_FILE, PROJECTS_DIRECTORY, ensure_data_directories
 from .schemas import (
     DesignBrief,
     FloorPlan,
-    LayoutAnalysis,
     LuminaireCandidate,
     LuminaireSearchRequest,
     LuminaireBriefValidation,
@@ -154,7 +153,6 @@ class ProjectStore:
                 "selected_luminaire_ids",
                 "luminaire_group_assignments",
                 "floor_plan",
-                "layout_analysis",
                 "simulation_runs",
                 "open_questions",
             ):
@@ -174,10 +172,6 @@ class ProjectStore:
                 state.luminaire_group_assignments = {}
             if update.brief is not None and update.open_questions is None:
                 state.refresh_open_questions()
-            if floor_plan_changed and update.layout_analysis is None:
-                # The old association must never silently describe a newly
-                # uploaded drawing.
-                state.layout_analysis = None
             if brief_changed:
                 state.luminaires = [
                     _with_brief_validation(item, state.brief, state.revision + 1)
@@ -501,27 +495,6 @@ class ProjectStore:
                 floor_plan=stored_floor_plan,
                 brief=state.brief.model_copy(update=brief_updates) if brief_updates else None,
             ),
-        )
-
-    def set_layout_analysis(
-        self,
-        project_id: str,
-        expected_revision: int,
-        analysis: LayoutAnalysis,
-    ) -> ProjectState:
-        """Persist a placement association against one immutable input revision."""
-
-        state = self.get(project_id)
-        if state.revision != expected_revision:
-            raise RevisionConflictError(
-                f"Project revision is {state.revision}, but update expected {expected_revision}"
-            )
-        if state.floor_plan is None or analysis.cad_sha256 != state.floor_plan.asset.sha256:
-            raise ValueError("Layout analysis does not belong to the project's current floor plan")
-        stored = analysis.model_copy(update={"project_revision": expected_revision})
-        return self.update(
-            project_id,
-            ProjectUpdate(expected_revision=expected_revision, layout_analysis=stored),
         )
 
     def revalidate_luminaires(self, project_id: str) -> tuple[ProjectState, int]:

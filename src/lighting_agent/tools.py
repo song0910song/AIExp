@@ -23,7 +23,6 @@ from .dialux_api import (
 from .dialux_protocol import DialuxProtocolError
 from .deliverables import build_design_report, build_dialux_task_archive, build_dialux_task_package
 from .document_loader import load_document
-from .report_parser import LuminaireReportParseError, parse_luminaire_report
 from .project_store import ProjectStore, RevisionConflictError
 from .photometry_assets import PhotometryAssetStore
 from .rag import create_evidence_store, format_evidence
@@ -145,12 +144,6 @@ class DialuxTaskInput(ProjectReference):
 
 class ReportInput(DialuxTaskInput):
     pass
-
-
-class LuminaireLayoutAnalysisInput(ProjectReference):
-    expected_revision: int = Field(ge=0)
-    report_file: str = Field(min_length=1, max_length=500)
-    coordinate_tolerance_m: float = Field(default=0.05, gt=0, le=10)
 
 
 project_store = ProjectStore()
