@@ -37,10 +37,9 @@ MAX_AREA_CANDIDATES = 50
 MAX_CANDIDATE_POINTS = 1_000
 MAX_DRAWING_BYTES = 50 * 1024 * 1024
 SUPPORTED_DRAWING_SUFFIXES = frozenset({".dxf", ".dwg"})
-# 匹配面积（㎡/平方米）与功率密度（W/m² 或 W/㎡），用于剥离房间名附近的测量标注。
+# 匹配面积标注，用于剥离房间名附近的测量标注。
 _MEASUREMENT_PATTERN = re.compile(
-    r"(?:(?<!\d)\d+(?:[.,]\d+)?\s*(?:m²|㎡|平方米|sq\.?\s*m)|"
-    r"\d+(?:[.,]\d+)?\s*W\s*/\s*(?:m²|㎡|m))(?!\w)",
+    r"(?<!\d)\d+(?:[.,]\d+)?\s*(?:m²|㎡|平方米|sq\.?\s*m)(?!\w)",
     re.IGNORECASE,
 )
 _ROOM_NAME_PATTERN = re.compile(r"[\u4e00-\u9fffA-Za-z]{2,}")
@@ -175,10 +174,9 @@ def _text_items(entities: list[Any]) -> list[str]:
 
 def _room_name(text_items: list[str]) -> str | None:
     for value in text_items:
-        # 功率密度/面积标注常与房间名同现，如 "512会议室 (9.01 W/m²)"。
-        # 剥离这些测量信息后再匹配房间名，而不是整段跳过。
+        # 剥离面积测量信息后再匹配房间名，而不是整段跳过。
         candidate = value
-        if "W/m" in candidate or _MEASUREMENT_PATTERN.search(candidate):
+        if _MEASUREMENT_PATTERN.search(candidate):
             candidate = _MEASUREMENT_PATTERN.sub("", candidate)
             candidate = re.sub(r"\(\s*\)", "", candidate).strip()
             if not candidate:

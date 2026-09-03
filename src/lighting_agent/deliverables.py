@@ -113,7 +113,7 @@ def build_dialux_task_package(state: ProjectState) -> dict:
                 else "No final luminaires have been selected; no photometry files were downloaded."
             ),
         },
-        "pending_simulation_metrics": ["maintained illuminance", "uniformity", "UGR", "installed power density"],
+        "pending_simulation_metrics": ["maintained illuminance", "UGR"],
         "limitations": ["This package is a DIALux evo handoff, not an executed simulation result."],
     }
 
@@ -255,7 +255,6 @@ def build_design_report(state: ProjectState) -> str:
         "target_cct_k": "目标色温 (K)",
         "min_cri": "最低显色指数 (Ra)",
         "target_ugr": "目标 UGR",
-        "max_lpd_w_m2": "功率密度上限 (W/m²)",
         "max_power_w": "单灯/方案功率上限 (W)",
         "mounting": "安装方式",
         "min_ip_rating": "最低 IP 等级",
@@ -297,7 +296,6 @@ def build_design_report(state: ProjectState) -> str:
                     f"- 所需光通量：{result.required_luminous_flux_lm:g} lm",
                     f"- 估算灯具数量：{result.luminaire_count}",
                     f"- 装机功率：{result.installed_power_w:g} W",
-                    f"- 装机功率密度：{result.installed_power_density_w_m2:g} W/m²",
                     "- 局限：" + "；".join(result.limitations),
                     "",
                 ]
@@ -422,12 +420,8 @@ def build_design_report(state: ProjectState) -> str:
                 parts = []
                 if metrics.maintained_illuminance_lx is not None:
                     parts.append(f"Ē={metrics.maintained_illuminance_lx:g} lx")
-                if metrics.uniformity_u0 is not None:
-                    parts.append(f"U₀={metrics.uniformity_u0:g}")
                 if metrics.ugr is not None:
                     parts.append(f"UGR={metrics.ugr:g}")
-                if metrics.installed_power_density_w_m2 is not None:
-                    parts.append(f"LPD={metrics.installed_power_density_w_m2:g} W/m²")
                 summary = "，".join(parts) if parts else "已导入"
             status = run.status
             if run.stale_reason:
@@ -446,7 +440,7 @@ def build_design_report(state: ProjectState) -> str:
             "",
             "## 人工复核声明",
             "",
-            "本报告为可审查草稿。Luminaire Finder 结果仅用于候选灯具筛选；维持照度、均匀度、UGR、布灯方式及最终规范符合性，须由有资质人员在 DIALux evo 或等效软件中复核并签发。仿真结果仅在其输入与当前项目版本匹配（matched）时方可视为本项目结论。",
+            "本报告为可审查草稿。Luminaire Finder 结果仅用于候选灯具筛选；维持照度、UGR、布灯方式及最终规范符合性，须由有资质人员在 DIALux evo 或等效软件中复核并签发。仿真结果仅在其输入与当前项目版本匹配（matched）时方可视为本项目结论。",
             "",
         ]
     )

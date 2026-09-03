@@ -28,8 +28,6 @@ LIGHTING_PARAMETER_FIELDS = frozenset(
         "target_cct_k",
         "min_cri",
         "target_ugr",
-        "target_uniformity_u0",
-        "max_lpd_w_m2",
     }
 )
 
@@ -72,8 +70,6 @@ class LightingGroup(StrictModel):
     target_cct_k: int | None = Field(default=None, ge=1_000, le=20_000)
     min_cri: int | None = Field(default=None, ge=0, le=100)
     target_ugr: float | None = Field(default=None, ge=0, le=40)
-    target_uniformity_u0: float | None = Field(default=None, ge=0, le=1)
-    max_lpd_w_m2: float | None = Field(default=None, gt=0, le=1_000)
     utilization_factor: float | None = Field(default=None, gt=0, le=1)
     maintenance_factor: float | None = Field(default=None, gt=0, le=1)
     luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
@@ -105,8 +101,6 @@ class DesignBrief(StrictModel):
     target_cct_k: int | None = Field(default=None, ge=1_000, le=20_000)
     min_cri: int | None = Field(default=None, ge=0, le=100)
     target_ugr: float | None = Field(default=None, ge=0, le=40)
-    target_uniformity_u0: float | None = Field(default=None, ge=0, le=1)
-    max_lpd_w_m2: float | None = Field(default=None, gt=0, le=1_000)
     max_power_w: float | None = Field(default=None, gt=0, le=100_000)
     mounting: str | None = Field(default=None, max_length=100)
     min_ip_rating: str | None = Field(default=None, pattern=r"^IP\d{2}[A-Za-z]?$", max_length=5)
@@ -187,7 +181,6 @@ class CalculationResult(StrictModel):
     required_luminous_flux_lm: float
     luminaire_count: int
     installed_power_w: float
-    installed_power_density_w_m2: float
     assumptions: list[str]
     limitations: list[str]
     calculated_at: datetime = Field(default_factory=utc_now)
@@ -196,7 +189,7 @@ class CalculationResult(StrictModel):
 class RuleRequirement(StrictModel):
     """A deterministic rule with explicit provenance; it is not a hard-coded GB rule."""
 
-    metric: Literal["illuminance_lx", "cri", "lpd_w_m2", "ugr", "uniformity_u0"]
+    metric: Literal["illuminance_lx", "cri", "ugr"]
     operator: Literal["min", "max"]
     threshold: float = Field(ge=0)
     evidence_id: str | None = None
@@ -217,9 +210,7 @@ class SimulationMetrics(StrictModel):
 
     maintained_illuminance_lx: float | None = Field(default=None, ge=0)
     minimum_illuminance_lx: float | None = Field(default=None, ge=0)
-    uniformity_u0: float | None = Field(default=None, ge=0, le=1)
     ugr: float | None = Field(default=None, ge=0, le=40)
-    installed_power_density_w_m2: float | None = Field(default=None, ge=0)
 
 
 class DialuxHandoff(StrictModel):

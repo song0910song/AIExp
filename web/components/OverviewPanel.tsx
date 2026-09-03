@@ -54,7 +54,7 @@ export function OverviewPanel({ project, onStartAgent }: { project: Project; onS
 
       <section className="overview-metrics" aria-label="设计状态">
         <article><span>设计进度</span><strong>{project.open_questions.length ? "待补充" : "可推进"}</strong><p>{project.open_questions.length ? `${project.open_questions.length} 个输入需要确认` : "核心输入已满足下一步工作"}</p></article>
-        <article><span>初算灯具数量</span><strong>{latest?.luminaire_count ?? "--"}<small> 套</small></strong><p>{latest ? `LPD ${formatNumber(latest.installed_power_density_w_m2)} W/m2` : "尚未执行流明法初算"}</p></article>
+        <article><span>初算灯具数量</span><strong>{latest?.luminaire_count ?? "--"}<small> 套</small></strong><p>{latest ? "已完成流明法初算" : "尚未执行流明法初算"}</p></article>
         <article><span>最终选定灯具</span><strong>{project.selected_luminaire_ids.length}<small> 款</small></strong><p>{project.luminaires.length} 款灯具候选已保存在项目中</p></article>
         <article><span>规则校核</span><strong>{passed}<small> 通过</small></strong><p>{failed ? `${failed} 项未通过` : "当前没有未通过项"}</p></article>
       </section>

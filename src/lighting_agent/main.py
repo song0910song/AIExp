@@ -47,7 +47,6 @@ def _add_brief_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--target-cct-k", type=int)
     parser.add_argument("--min-cri", type=int)
     parser.add_argument("--target-ugr", type=float)
-    parser.add_argument("--max-lpd-w-m2", type=float)
     parser.add_argument("--max-power-w", type=float)
     parser.add_argument("--mounting")
     parser.add_argument("--min-ip-rating")
@@ -119,9 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     result.add_argument("--source-kind", choices=["dialux_pdf", "dialux_csv", "dialux_json", "manual_form"], default="manual_form")
     result.add_argument("--maintained-lx", type=float)
     result.add_argument("--minimum-lx", type=float)
-    result.add_argument("--uniformity-u0", type=float)
     result.add_argument("--ugr", type=float)
-    result.add_argument("--lpd-w-m2", type=float)
     result.add_argument("--solver-version")
 
     chat = subcommands.add_parser("chat", help="run the LLM agent; requires LIGHTING_LLM_API_KEY")
@@ -142,7 +139,6 @@ def _brief_from_args(args: argparse.Namespace) -> DesignBrief:
         "target_cct_k": args.target_cct_k,
         "min_cri": args.min_cri,
         "target_ugr": args.target_ugr,
-        "max_lpd_w_m2": args.max_lpd_w_m2,
         "max_power_w": args.max_power_w,
         "mounting": args.mounting,
         "min_ip_rating": args.min_ip_rating,
@@ -256,9 +252,7 @@ def main(argv: list[str] | None = None) -> None:
         metrics = SimulationMetrics(
             maintained_illuminance_lx=args.maintained_lx,
             minimum_illuminance_lx=args.minimum_lx,
-            uniformity_u0=args.uniformity_u0,
             ugr=args.ugr,
-            installed_power_density_w_m2=args.lpd_w_m2,
         )
         status = "matched" if not messages else "mismatch"
         run = SimulationRun(

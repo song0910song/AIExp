@@ -26,14 +26,13 @@ def calculate_lumen_method(inputs: CalculationInput) -> CalculationResult:
         required_luminous_flux_lm=round(required_flux, 2),
         luminaire_count=luminaire_count,
         installed_power_w=round(installed_power, 2),
-        installed_power_density_w_m2=round(installed_power / inputs.area_m2, 3),
         assumptions=[
             "Utilization factor and maintenance factor are confirmed design assumptions.",
             "Luminaires are assumed to be distributed uniformly in the calculation area.",
         ],
         limitations=[
             "This is a lumen-method estimate, not a point-by-point lighting simulation.",
-            "Illuminance uniformity, glare (UGR), reflectance and luminaire layout require DIALux evo or an equivalent calculation.",
+            "Glare (UGR), reflectance and luminaire layout require DIALux evo or an equivalent calculation.",
         ],
     )
 
