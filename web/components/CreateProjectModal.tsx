@@ -16,8 +16,6 @@ type ProjectDraft = {
   target_cct_k: string;
   min_cri: string;
   target_ugr: string;
-  target_uniformity_u0: string;
-  max_lpd_w_m2: string;
 };
 
 const emptyDraft: ProjectDraft = {
@@ -29,8 +27,6 @@ const emptyDraft: ProjectDraft = {
   target_cct_k: "",
   min_cri: "",
   target_ugr: "",
-  target_uniformity_u0: "",
-  max_lpd_w_m2: "",
 };
 
 const templateValueFields = [
@@ -40,8 +36,6 @@ const templateValueFields = [
   "target_cct_k",
   "min_cri",
   "target_ugr",
-  "target_uniformity_u0",
-  "max_lpd_w_m2",
 ] as const;
 
 export function CreateProjectModal({ onClose, onCreated }: { onClose: () => void; onCreated: (project: Project) => void }) {
@@ -100,8 +94,6 @@ export function CreateProjectModal({ onClose, onCreated }: { onClose: () => void
         target_cct_k: toNullableNumber(draft.target_cct_k),
         min_cri: toNullableNumber(draft.min_cri),
         target_ugr: toNullableNumber(draft.target_ugr),
-        target_uniformity_u0: toNullableNumber(draft.target_uniformity_u0),
-        max_lpd_w_m2: toNullableNumber(draft.max_lpd_w_m2),
       };
       const confirmed_fields = Object.entries(values)
         .filter(([key, value]) => key !== "project_name" && value !== null && value !== "")
@@ -141,8 +133,8 @@ export function CreateProjectModal({ onClose, onCreated }: { onClose: () => void
           {selectedTemplate ? (
             <div className="template-reference" aria-live="polite">
               <span>规范初始值</span>
-              <strong>{selectedTemplate.values.target_illuminance_lx} lx · UGR {selectedTemplate.values.target_ugr} · U₀ {selectedTemplate.values.target_uniformity_u0} · Ra {selectedTemplate.values.min_cri} · LPD {selectedTemplate.values.max_lpd_w_m2} W/m²</strong>
-              <small>{selectedTemplate.standardReference}{selectedTemplate.lpdNote ? `；${selectedTemplate.lpdNote}` : ""}</small>
+              <strong>{selectedTemplate.values.target_illuminance_lx} lx · UGR {selectedTemplate.values.target_ugr} · Ra {selectedTemplate.values.min_cri}</strong>
+              <small>{selectedTemplate.standardReference}</small>
             </div>
           ) : null}
           <Field label="项目名称" wide>
@@ -176,12 +168,6 @@ export function CreateProjectModal({ onClose, onCreated }: { onClose: () => void
           </Field>
           <Field label="目标 UGR">
             <input value={draft.target_ugr} onChange={(event) => updateField("target_ugr", event.target.value)} type="number" min="0" max="40" step="1" placeholder="19" />
-          </Field>
-          <Field label="照度均匀度 U₀">
-            <input value={draft.target_uniformity_u0} onChange={(event) => updateField("target_uniformity_u0", event.target.value)} type="number" min="0" max="1" step="0.05" placeholder="0.60" />
-          </Field>
-          <Field label="LPD 上限 / W·m⁻²">
-            <input value={draft.max_lpd_w_m2} onChange={(event) => updateField("max_lpd_w_m2", event.target.value)} type="number" min="0.1" step="0.1" placeholder="6.5" />
           </Field>
         </div>
         {error ? <Notice tone="danger">{error}</Notice> : null}

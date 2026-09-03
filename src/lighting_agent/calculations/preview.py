@@ -62,7 +62,6 @@ class IlluminancePreviewResult(StrictModel):
     average_illuminance_lx: float
     minimum_illuminance_lx: float
     maximum_illuminance_lx: float
-    uniformity_u0: float
     installed_flux_lm: float
     installed_power_w: float | None = None
     assumptions: list[str] = Field(default_factory=list, max_length=20)
@@ -185,7 +184,6 @@ def compute_illuminance_preview(
         average_illuminance_lx=round(average, 2),
         minimum_illuminance_lx=round(minimum, 2),
         maximum_illuminance_lx=round(maximum, 2),
-        uniformity_u0=round(minimum / average, 4) if average > 0 else 0.0,
         installed_flux_lm=round(flux_per_fixture * len(fixtures), 1),
         installed_power_w=(
             round(per_fixture_power * len(fixtures), 2) if per_fixture_power is not None else None

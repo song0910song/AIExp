@@ -105,11 +105,10 @@ def test_floor_plan_rejects_unsupported_file_type(tmp_path) -> None:
 
 
 def test_room_name_strips_measurement_suffix() -> None:
-    """Room name coupled with power density like '512会议室 (9.01 W/m²)' is still found."""
+    """Room name coupled with an area annotation is still found."""
     from lighting_agent.floor_plan import _room_name
 
-    assert _room_name(["512会议室 (9.01 W/m²)"]) == "会议室"
+    assert _room_name(["512会议室 (30 m²)"]) == "会议室"
     assert _room_name(["机房 30 m²"]) == "机房"
     # 纯测量标注没有房间名，不应误报。
-    assert _room_name(["9.01 W/m²"]) is None
-
+    assert _room_name(["30 m²"]) is None

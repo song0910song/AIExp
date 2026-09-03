@@ -157,7 +157,7 @@ export function LuminairePanel({ project, onProject }: { project: Project; onPro
 
   return (
     <div className="content-stack">
-      <div className="section-heading"><div><p className="eyebrow">DIALUX LUMINAIRE FINDER</p><h1>真实灯具候选</h1><p>产品目录用于初筛；项目照度、均匀度和 UGR 必须通过 DIALux evo 核验。</p></div></div>
+      <div className="section-heading"><div><p className="eyebrow">DIALUX LUMINAIRE FINDER</p><h1>真实灯具候选</h1><p>产品目录用于初筛；项目照度和 UGR 必须通过 DIALux evo 核验。</p></div></div>
       <Panel title="选灯条件" eyebrow="SERVER-SIDE FILTER">
         <form onSubmit={search} className="form-grid form-grid-four">
           <Field label="全文关键词" wide hint="支持中文、英文品类词和型号；例如：嵌入式筒灯、recessed LED downlight。"><input name="keyword" required defaultValue="嵌入式筒灯" /></Field>

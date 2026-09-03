@@ -265,7 +265,6 @@ export function PhotometryPreviewCard({ project }: { project: Project }) {
           <div className="photometry-preview-stats">
             <article><span>平均照度</span><strong>{formatNumber(result.average_illuminance_lx)}<small> lx</small></strong></article>
             <article><span>最小 / 最大</span><strong>{formatNumber(result.minimum_illuminance_lx, 0)} / {formatNumber(result.maximum_illuminance_lx, 0)}</strong></article>
-            <article><span>均匀度 U0</span><strong>{formatNumber(result.uniformity_u0, 3)}</strong></article>
             <article><span>装机光通量</span><strong>{formatNumber(result.installed_flux_lm, 0)}<small> lm</small></strong></article>
           </div>
 

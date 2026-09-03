@@ -13,8 +13,6 @@ def test_template_origin_is_preserved_with_editable_brief_values(tmp_path) -> No
         target_cct_k=4000,
         min_cri=80,
         target_ugr=19,
-        target_uniformity_u0=0.6,
-        max_lpd_w_m2=6.5,
         template_origin=BriefTemplateOrigin(
             template_id="video-conference-room",
             template_name="视频会议室",
