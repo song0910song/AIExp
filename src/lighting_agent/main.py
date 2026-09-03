@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 from typing import Any
 
 from .agent import interactive_chat, invoke_agent
 from .calculations import calculate_lumen_method
-from .calculations.layout import analyze_luminaire_layout
 from .dialux_api import DialuxAPI
 from .deliverables import build_design_report, build_dialux_task_archive, read_dialux_task_package
 from .photometry_assets import PhotometryAssetStore
 from .document_loader import load_document
-from .report_parser import parse_luminaire_report
 from .project_store import ProjectStore
 from .rag import create_evidence_store, format_evidence
 from .schemas import (
@@ -104,12 +101,6 @@ def build_parser() -> argparse.ArgumentParser:
     report = subcommands.add_parser("generate-report", help="create a reviewable Markdown design report")
     report.add_argument("project_id")
     report.add_argument("--revision", type=int, required=True)
-
-    layout = subcommands.add_parser("analyze-layout", help="match an imported CAD plan to a PDF luminaire report")
-    layout.add_argument("project_id")
-    layout.add_argument("report_file")
-    layout.add_argument("--revision", type=int, required=True)
-    layout.add_argument("--coordinate-tolerance-m", type=float, default=0.05)
 
     result = subcommands.add_parser("import-dialux-result", help="import a structured DIALux result and verify it against the current handoff")
     result.add_argument("project_id")
@@ -218,21 +209,6 @@ def main(argv: list[str] | None = None) -> None:
             target = store.directory / f"{state.project_id}.design-report.md"
             target.write_text(build_design_report(state), encoding="utf-8")
             _print({"report": str(target), "project_revision": state.revision})
-        return
-    if args.command == "analyze-layout":
-        state = store.get(args.project_id)
-        if state.revision != args.revision:
-            raise ValueError(f"Project revision is {state.revision}, but command expected {args.revision}")
-        if state.floor_plan is None:
-            raise ValueError("Project has no imported floor plan; import a DXF/DWG first")
-        report = parse_luminaire_report(Path(args.report_file))
-        analysis = analyze_luminaire_layout(
-            state.floor_plan,
-            report,
-            coordinate_tolerance_m=args.coordinate_tolerance_m,
-        )
-        updated = store.set_layout_analysis(args.project_id, args.revision, analysis)
-        _print({"analysis": updated.layout_analysis, "project_revision": updated.revision})
         return
     if args.command == "import-dialux-result":
         state = store.get(args.project_id)
