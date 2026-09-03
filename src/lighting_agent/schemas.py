@@ -28,8 +28,6 @@ LIGHTING_PARAMETER_FIELDS = frozenset(
         "target_cct_k",
         "min_cri",
         "target_ugr",
-        "target_uniformity_u0",
-        "max_lpd_w_m2",
     }
 )
 
@@ -72,8 +70,6 @@ class LightingGroup(StrictModel):
     target_cct_k: int | None = Field(default=None, ge=1_000, le=20_000)
     min_cri: int | None = Field(default=None, ge=0, le=100)
     target_ugr: float | None = Field(default=None, ge=0, le=40)
-    target_uniformity_u0: float | None = Field(default=None, ge=0, le=1)
-    max_lpd_w_m2: float | None = Field(default=None, gt=0, le=1_000)
     utilization_factor: float | None = Field(default=None, gt=0, le=1)
     maintenance_factor: float | None = Field(default=None, gt=0, le=1)
     luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
@@ -105,8 +101,6 @@ class DesignBrief(StrictModel):
     target_cct_k: int | None = Field(default=None, ge=1_000, le=20_000)
     min_cri: int | None = Field(default=None, ge=0, le=100)
     target_ugr: float | None = Field(default=None, ge=0, le=40)
-    target_uniformity_u0: float | None = Field(default=None, ge=0, le=1)
-    max_lpd_w_m2: float | None = Field(default=None, gt=0, le=1_000)
     max_power_w: float | None = Field(default=None, gt=0, le=100_000)
     mounting: str | None = Field(default=None, max_length=100)
     min_ip_rating: str | None = Field(default=None, pattern=r"^IP\d{2}[A-Za-z]?$", max_length=5)
@@ -187,7 +181,6 @@ class CalculationResult(StrictModel):
     required_luminous_flux_lm: float
     luminaire_count: int
     installed_power_w: float
-    installed_power_density_w_m2: float
     assumptions: list[str]
     limitations: list[str]
     calculated_at: datetime = Field(default_factory=utc_now)
@@ -196,7 +189,7 @@ class CalculationResult(StrictModel):
 class RuleRequirement(StrictModel):
     """A deterministic rule with explicit provenance; it is not a hard-coded GB rule."""
 
-    metric: Literal["illuminance_lx", "cri", "lpd_w_m2", "ugr", "uniformity_u0"]
+    metric: Literal["illuminance_lx", "cri", "ugr"]
     operator: Literal["min", "max"]
     threshold: float = Field(ge=0)
     evidence_id: str | None = None
@@ -217,9 +210,7 @@ class SimulationMetrics(StrictModel):
 
     maintained_illuminance_lx: float | None = Field(default=None, ge=0)
     minimum_illuminance_lx: float | None = Field(default=None, ge=0)
-    uniformity_u0: float | None = Field(default=None, ge=0, le=1)
     ugr: float | None = Field(default=None, ge=0, le=40)
-    installed_power_density_w_m2: float | None = Field(default=None, ge=0)
 
 
 class DialuxHandoff(StrictModel):
@@ -436,6 +427,141 @@ class FloorPlanAreaCandidate(StrictModel):
     points: list[CadPoint] = Field(min_length=3, max_length=5_000)
 
 
+class LuminaireFootprint(StrictModel):
+    """A footprint whose provenance is explicit because CAD symbols are not products."""
+
+    length_m: float | None = Field(default=None, gt=0, le=100)
+    width_m: float | None = Field(default=None, gt=0, le=100)
+    source: Literal["product", "cad_symbol", "unknown"] = "unknown"
+
+
+class LuminairePlacement(StrictModel):
+    """One reviewable luminaire position with links back to source evidence."""
+
+    placement_id: str = Field(min_length=1, max_length=80)
+    luminaire_id: str = Field(min_length=1, max_length=160)
+    model: str | None = Field(default=None, max_length=200)
+    manufacturer: str | None = Field(default=None, max_length=160)
+    product_code: str | None = Field(default=None, max_length=160)
+    category: Literal["general_candidate", "accent_candidate", "unclassified"] = "unclassified"
+    x_m: float
+    y_m: float
+    z_m: float | None = Field(default=None, ge=0, le=100)
+    rotation_deg: float | None = None
+    footprint: LuminaireFootprint = Field(default_factory=LuminaireFootprint)
+    group_id: str | None = Field(default=None, max_length=64)
+    source_refs: list[str] = Field(default_factory=list, max_length=200)
+    dxf_entity_handles: list[str] = Field(default_factory=list, max_length=200)
+    dxf_model_index: str | None = Field(default=None, max_length=32)
+    report_index: int | None = Field(default=None, ge=1)
+    report_page: int | None = Field(default=None, ge=1)
+    coordinate_residual_m: float | None = Field(default=None, ge=0)
+    matching_status: Literal[
+        "matched",
+        "coordinate_mismatch",
+        "missing_in_dxf",
+        "missing_in_report",
+        "duplicate",
+        "unresolved",
+    ] = "unresolved"
+    confidence: Literal["high", "medium", "low"] = "low"
+
+
+class SimilarityTransform(StrictModel):
+    """Two-dimensional similarity transform used to put CAD and report coordinates together."""
+
+    scale: float = Field(gt=0, le=1000)
+    rotation_deg: float
+    translation_x_m: float
+    translation_y_m: float
+    source_units: str = Field(min_length=1, max_length=32)
+    target_units: str = Field(min_length=1, max_length=32)
+    anchor_count: int = Field(ge=0)
+    rms_residual_m: float | None = Field(default=None, ge=0)
+    max_residual_m: float | None = Field(default=None, ge=0)
+
+
+class LayoutCheck(StrictModel):
+    """A deterministic stage-one consistency check."""
+
+    metric: str = Field(min_length=1, max_length=100)
+    status: Literal["pass", "warning", "fail", "insufficient_data"]
+    observed: float | int | None = None
+    threshold: float | int | None = None
+    unit: str | None = Field(default=None, max_length=32)
+    placement_ids: list[str] = Field(default_factory=list, max_length=200)
+    explanation: str = Field(min_length=1, max_length=1_000)
+    source_refs: list[str] = Field(default_factory=list, max_length=200)
+
+
+class LayoutIssue(StrictModel):
+    """A localized issue for designer review, not a compliance conclusion."""
+
+    issue_id: str = Field(min_length=1, max_length=100)
+    severity: Literal["info", "warning", "error"]
+    kind: Literal[
+        "possible_overlap",
+        "coordinate_mismatch",
+        "missing_in_dxf",
+        "missing_in_report",
+        "model_mismatch",
+        "duplicate",
+        "unresolved",
+    ]
+    placement_ids: list[str] = Field(default_factory=list, max_length=20)
+    location: CadPoint | None = None
+    message: str = Field(min_length=1, max_length=1_000)
+    required_action: str = Field(min_length=1, max_length=1_000)
+    confidence: Literal["high", "medium", "low"] = "low"
+    source_refs: list[str] = Field(default_factory=list, max_length=200)
+    needs_dialux_review: bool = False
+
+
+class LayoutAnalysis(StrictModel):
+    """Versioned DXF/PDF placement association for the current project inputs."""
+
+    analysis_id: str = Field(default_factory=lambda: uuid4().hex, min_length=8, max_length=64)
+    project_revision: int = Field(ge=0)
+    cad_source_name: str = Field(min_length=1, max_length=180)
+    cad_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    report_source_name: str = Field(min_length=1, max_length=180)
+    report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    report_page_count: int = Field(ge=1)
+    coordinate_transform: SimilarityTransform | None = None
+    dxf_count: int = Field(ge=0)
+    report_count: int = Field(ge=0)
+    model_counts: dict[str, int] = Field(default_factory=dict)
+    model_parameters: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    placements: list[LuminairePlacement] = Field(default_factory=list, max_length=2_000)
+    checks: list[LayoutCheck] = Field(default_factory=list, max_length=200)
+    issues: list[LayoutIssue] = Field(default_factory=list, max_length=2_000)
+    warnings: list[str] = Field(default_factory=list, max_length=100)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class LuminaireReportType(StrictModel):
+    """A luminaire type row extracted from a report summary/table."""
+
+    model: str = Field(min_length=1, max_length=200)
+    manufacturer: str | None = Field(default=None, max_length=160)
+    product_code: str | None = Field(default=None, max_length=160)
+    quantity: int | None = Field(default=None, ge=1, le=100_000)
+    power_w: float | None = Field(default=None, gt=0, le=100_000)
+    luminous_flux_lm: float | None = Field(default=None, gt=0, le=10_000_000)
+    source_refs: list[str] = Field(default_factory=list, max_length=50)
+
+
+class LuminaireReport(StrictModel):
+    """Structured, page-aware facts extracted from a DIALux PDF report."""
+
+    source_name: str = Field(min_length=1, max_length=180)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    page_count: int = Field(ge=1)
+    luminaires: list[LuminaireReportType] = Field(default_factory=list, max_length=100)
+    placements: list[LuminairePlacement] = Field(default_factory=list, max_length=2_000)
+    warnings: list[str] = Field(default_factory=list, max_length=100)
+
+
 class FloorPlan(StrictModel):
     """Parsed drawing facts. They are never used for design until applied."""
 
@@ -447,6 +573,7 @@ class FloorPlan(StrictModel):
     text_items: list[str] = Field(default_factory=list, max_length=200)
     room_name: str | None = Field(default=None, max_length=160)
     area_candidates: list[FloorPlanAreaCandidate] = Field(default_factory=list, max_length=50)
+    luminaire_placements: list[LuminairePlacement] = Field(default_factory=list, max_length=2_000)
     selected_area_candidate_index: int | None = Field(default=None, ge=0, le=49)
     warnings: list[str] = Field(default_factory=list, max_length=50)
 
@@ -463,6 +590,7 @@ class ProjectState(StrictModel):
     selected_luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
     luminaire_group_assignments: dict[str, list[str]] = Field(default_factory=dict)
     floor_plan: FloorPlan | None = None
+    layout_analysis: LayoutAnalysis | None = None
     simulation_runs: list[SimulationRun] = Field(default_factory=list)
     workflow_status: Literal[
         "draft",
@@ -567,6 +695,7 @@ class ProjectUpdate(StrictModel):
     selected_luminaire_ids: list[str] | None = None
     luminaire_group_assignments: dict[str, list[str]] | None = None
     floor_plan: FloorPlan | None = None
+    layout_analysis: LayoutAnalysis | None = None
     simulation_runs: list[SimulationRun] | None = None
     open_questions: list[str] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

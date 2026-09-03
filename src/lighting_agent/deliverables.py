@@ -113,7 +113,7 @@ def build_dialux_task_package(state: ProjectState) -> dict:
                 else "No final luminaires have been selected; no photometry files were downloaded."
             ),
         },
-        "pending_simulation_metrics": ["maintained illuminance", "uniformity", "UGR", "installed power density"],
+        "pending_simulation_metrics": ["maintained illuminance", "UGR"],
         "limitations": ["This package is a DIALux evo handoff, not an executed simulation result."],
     }
 
@@ -255,7 +255,6 @@ def build_design_report(state: ProjectState) -> str:
         "target_cct_k": "目标色温 (K)",
         "min_cri": "最低显色指数 (Ra)",
         "target_ugr": "目标 UGR",
-        "max_lpd_w_m2": "功率密度上限 (W/m²)",
         "max_power_w": "单灯/方案功率上限 (W)",
         "mounting": "安装方式",
         "min_ip_rating": "最低 IP 等级",
@@ -297,7 +296,6 @@ def build_design_report(state: ProjectState) -> str:
                     f"- 所需光通量：{result.required_luminous_flux_lm:g} lm",
                     f"- 估算灯具数量：{result.luminaire_count}",
                     f"- 装机功率：{result.installed_power_w:g} W",
-                    f"- 装机功率密度：{result.installed_power_density_w_m2:g} W/m²",
                     "- 局限：" + "；".join(result.limitations),
                     "",
                 ]
@@ -318,6 +316,71 @@ def build_design_report(state: ProjectState) -> str:
         )
         if plan.warnings:
             lines.extend(f"- 注意：{warning}" for warning in plan.warnings)
+
+    lines.extend(["", "## 灯具位置与一致性审查", ""])
+    if state.layout_analysis is None:
+        lines.append("尚未执行 DXF/PDF 灯具位置一致性审查。")
+    else:
+        analysis = state.layout_analysis
+        lines.extend(
+            [
+                f"- CAD 来源：{analysis.cad_source_name}（SHA-256 `{analysis.cad_sha256}`）",
+                f"- 报告来源：{analysis.report_source_name}（第 {analysis.report_page_count} 页，SHA-256 `{analysis.report_sha256}`）",
+                f"- 数量：DXF {analysis.dxf_count}，PDF 位置明细 {analysis.report_count}",
+                "- 照明类别：当前仅保存未分类结果；没有照明用途、回路或目标对象证据时不作通用/重点照明定论。",
+            ]
+        )
+        if analysis.model_parameters:
+            lines.extend(
+                [
+                    "",
+                    "| 型号 | 品牌 | 产品编号 | 数量 | 功率 (W) | 灯具光通量 (lm) |",
+                    "| --- | --- | --- | ---: | ---: | ---: |",
+                ]
+            )
+            for model, parameters in analysis.model_parameters.items():
+                lines.append(
+                    f"| {model} | {_markdown_value(parameters.get('manufacturer'))} | "
+                    f"{_markdown_value(parameters.get('product_code'))} | {_markdown_value(parameters.get('quantity'))} | "
+                    f"{_markdown_value(parameters.get('power_w'))} | {_markdown_value(parameters.get('luminous_flux_lm'))} |"
+                )
+        if analysis.coordinate_transform is not None:
+            transform = analysis.coordinate_transform
+            lines.append(
+                f"- 坐标变换：比例 {transform.scale:g}，旋转 {transform.rotation_deg:g}°，"
+                f"平移 ({transform.translation_x_m:g}, {transform.translation_y_m:g}) m；"
+                f"锚点 {transform.anchor_count}，最大残差 {_markdown_value(transform.max_residual_m)} m。"
+            )
+        lines.extend(
+            [
+                "",
+                "| 编号 | 型号 | 类别 | X (m) | Y (m) | Z (m) | 匹配 | 来源 |",
+                "| --- | --- | --- | ---: | ---: | ---: | --- | --- |",
+            ]
+        )
+        for placement in analysis.placements:
+            source = f"{placement.report_page} 页 / {len(placement.dxf_entity_handles)} 个 DXF 实体" if placement.report_page else f"{len(placement.dxf_entity_handles)} 个 DXF 实体"
+            lines.append(
+                f"| {placement.placement_id} | {_markdown_value(placement.model)} | {placement.category} | "
+                f"{placement.x_m:g} | {placement.y_m:g} | {_markdown_value(placement.z_m)} | "
+                f"{placement.matching_status} | {source} |"
+            )
+        if analysis.checks:
+            lines.extend(["", "### 一致性检查", "", "| 指标 | 状态 | 观测值 | 阈值 | 说明 |", "| --- | --- | ---: | ---: | --- |"])
+            for check in analysis.checks:
+                lines.append(
+                    f"| {check.metric} | {check.status} | {_markdown_value(check.observed)} | "
+                    f"{_markdown_value(check.threshold)} | {check.explanation} |"
+                )
+        if analysis.issues:
+            lines.extend(["", "### 待处理问题", ""])
+            lines.extend(
+                f"- `{issue.severity}` `{issue.kind}`：{issue.message} 建议：{issue.required_action}"
+                for issue in analysis.issues
+            )
+        if analysis.warnings:
+            lines.extend(["", "### 解析注意事项", ""])
+            lines.extend(f"- {warning}" for warning in analysis.warnings)
 
     lines.extend(["## 规则校核", "", "| 指标 | 状态 | 观测值 | 阈值 | 说明 |", "| --- | --- | --- | --- | --- |"])
     if not state.rule_checks:
@@ -357,12 +420,8 @@ def build_design_report(state: ProjectState) -> str:
                 parts = []
                 if metrics.maintained_illuminance_lx is not None:
                     parts.append(f"Ē={metrics.maintained_illuminance_lx:g} lx")
-                if metrics.uniformity_u0 is not None:
-                    parts.append(f"U₀={metrics.uniformity_u0:g}")
                 if metrics.ugr is not None:
                     parts.append(f"UGR={metrics.ugr:g}")
-                if metrics.installed_power_density_w_m2 is not None:
-                    parts.append(f"LPD={metrics.installed_power_density_w_m2:g} W/m²")
                 summary = "，".join(parts) if parts else "已导入"
             status = run.status
             if run.stale_reason:
@@ -381,7 +440,7 @@ def build_design_report(state: ProjectState) -> str:
             "",
             "## 人工复核声明",
             "",
-            "本报告为可审查草稿。Luminaire Finder 结果仅用于候选灯具筛选；维持照度、均匀度、UGR、布灯方式及最终规范符合性，须由有资质人员在 DIALux evo 或等效软件中复核并签发。仿真结果仅在其输入与当前项目版本匹配（matched）时方可视为本项目结论。",
+            "本报告为可审查草稿。Luminaire Finder 结果仅用于候选灯具筛选；维持照度、UGR、布灯方式及最终规范符合性，须由有资质人员在 DIALux evo 或等效软件中复核并签发。仿真结果仅在其输入与当前项目版本匹配（matched）时方可视为本项目结论。",
             "",
         ]
     )

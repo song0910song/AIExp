@@ -36,12 +36,14 @@ from .calculations import (
 )
 from .calculations.photometry import PhotometryParseError, parse_photometry_file
 from .calculations.preview import PreviewGeometryError
+from .calculations.layout import analyze_luminaire_layout as run_luminaire_layout_analysis
 from .config import DATABASE_FILE, Settings, USER_DOCUMENTS_DIRECTORY, ensure_data_directories
 from .deliverables import build_design_report, build_dialux_task_archive, read_dialux_task_package
 from .dialux_api import DialuxAPI, DialuxAPIError, validate_luminaire_search
 from .dialux_protocol import DialuxProtocolError
 from .document_loader import DocumentLoadError, load_document
 from .floor_plan import MAX_DRAWING_BYTES, FloorPlanParseError, parse_floor_plan
+from .report_parser import LuminaireReportParseError, parse_luminaire_report
 from .project_store import ProjectNotFoundError, ProjectStore, RevisionConflictError
 from .photometry_assets import PhotometryAssetStore
 from .rag import EvidenceNotFoundError, create_evidence_store, format_evidence
@@ -340,8 +342,6 @@ def _fallback_clarification(project: ProjectState) -> dict[str, Any]:
         ("target_cct_k", "确认目标色温（K）", "请确认灯具的目标相关色温。", "select", str(brief.target_cct_k) if brief.target_cct_k is not None else None, [{"label": "3000 K", "value": "3000"}, {"label": "3500 K", "value": "3500"}, {"label": "4000 K", "value": "4000"}, {"label": "5000 K", "value": "5000"}]),
         ("min_cri", "确认最低显色指数（Ra）", "请确认设计与灯具筛选采用的最低显色指数。", "select", str(brief.min_cri) if brief.min_cri is not None else None, [{"label": "Ra 80", "value": "80"}, {"label": "Ra 90", "value": "90"}, {"label": "Ra 95", "value": "95"}]),
         ("target_ugr", "确认 UGR 上限", "请确认眩光控制目标。", "number", str(brief.target_ugr) if brief.target_ugr is not None else None, []),
-        ("target_uniformity_u0", "确认最低均匀度 U0", "请确认照度均匀度目标。", "number", str(brief.target_uniformity_u0) if brief.target_uniformity_u0 is not None else None, []),
-        ("max_lpd_w_m2", "确认照明功率密度上限（W/m2）", "如有节能控制要求，请填写项目采用的 LPD 上限。", "number", str(brief.max_lpd_w_m2) if brief.max_lpd_w_m2 is not None else None, []),
     )
     for field_id, label, description, input_type, placeholder, options in suggested_fields:
         if field_id not in brief.confirmed_fields:
@@ -1122,6 +1122,104 @@ def create_app(
             "applied_area_candidate_index": candidate_index,
         }
 
+    @app.get("/api/projects/{project_id}/layout-analysis")
+    def get_layout_analysis(project_id: str) -> dict[str, Any]:
+        state = projects.get(project_id)
+        if state.layout_analysis is None:
+            raise HTTPException(status_code=404, detail="项目尚未执行灯具坐标一致性分析")
+        return state.layout_analysis.model_dump(mode="json")
+
+    @app.post("/api/projects/{project_id}/layout-analysis", status_code=201)
+    async def import_layout_analysis(
+        project_id: str,
+        expected_revision: Annotated[int, Form(ge=0)],
+        report_file: Annotated[UploadFile | None, File()] = None,
+        file: Annotated[UploadFile | None, File()] = None,
+        cad_file: Annotated[UploadFile | None, File()] = None,
+        coordinate_tolerance_m: Annotated[float, Form(gt=0, le=10)] = 0.05,
+    ) -> dict[str, Any]:
+        """Upload a PDF report and associate it with the project's CAD plan.
+
+        ``file`` is accepted as a compact client-side alias for report_file.
+        A missing project plan can be supplied as cad_file in the same request.
+        """
+
+        state = projects.get(project_id)
+        project_root = project_directory(project_id)
+        plans_directory = project_root / f"{project_id}.plans"
+        created_targets: list[Path] = []
+        working_revision = expected_revision
+        if state.floor_plan is None:
+            cad_upload = cad_file
+            if cad_upload is None and file is not None and Path(file.filename or "").suffix.casefold() in {".dxf", ".dwg"}:
+                cad_upload = file
+            if cad_upload is None:
+                raise HTTPException(status_code=422, detail="请先导入平面图，或在本次请求中提供 cad_file")
+            cad_name = _safe_upload_name(cad_upload.filename or "floor-plan.dxf")
+            if Path(cad_name).suffix.casefold() not in {".dxf", ".dwg"}:
+                raise HTTPException(status_code=415, detail="cad_file 仅支持 .dxf 与 .dwg")
+            cad_content = await cad_upload.read()
+            if len(cad_content) > MAX_DRAWING_BYTES:
+                raise HTTPException(status_code=413, detail="平面图文件不能超过 50 MB")
+            cad_target = _unique_upload_target(plans_directory, cad_name)
+            await run_in_threadpool(cad_target.write_bytes, cad_content)
+            created_targets.append(cad_target)
+            try:
+                parsed_plan = await run_in_threadpool(
+                    parse_floor_plan,
+                    cad_target,
+                    storage_path=str(cad_target.relative_to(project_root).as_posix()),
+                )
+                candidate_index = next(
+                    (index for index, candidate in enumerate(parsed_plan.area_candidates) if candidate.area_m2 is not None),
+                    None,
+                )
+                state = projects.set_floor_plan(project_id, working_revision, parsed_plan, candidate_index)
+                working_revision = state.revision
+            except (FloorPlanParseError, IndexError, ValueError) as error:
+                await run_in_threadpool(cad_target.unlink, missing_ok=True)
+                raise HTTPException(status_code=422, detail=str(error)) from error
+        elif state.revision != expected_revision:
+            raise RevisionConflictError(
+                f"Project revision is {state.revision}, but update expected {expected_revision}"
+            )
+
+        report_upload = report_file or file
+        if report_upload is None:
+            raise HTTPException(status_code=422, detail="请提供 report_file PDF 灯具报告")
+        report_name = _safe_upload_name(report_upload.filename or "luminaire-report.pdf")
+        if Path(report_name).suffix.casefold() != ".pdf":
+            raise HTTPException(status_code=415, detail="report_file 仅支持 PDF")
+        report_content = await report_upload.read()
+        if len(report_content) > MAX_DRAWING_BYTES:
+            raise HTTPException(status_code=413, detail="报告文件不能超过 50 MB")
+        report_target = _unique_upload_target(plans_directory, report_name)
+        await run_in_threadpool(report_target.write_bytes, report_content)
+        created_targets.append(report_target)
+        try:
+            report = await run_in_threadpool(parse_luminaire_report, report_target)
+            analysis = await run_in_threadpool(
+                run_luminaire_layout_analysis,
+                state.floor_plan,
+                report,
+                coordinate_tolerance_m=coordinate_tolerance_m,
+            )
+            updated = projects.set_layout_analysis(project_id, working_revision, analysis)
+        except (LuminaireReportParseError, RevisionConflictError, ValueError) as error:
+            for target in created_targets:
+                await run_in_threadpool(target.unlink, missing_ok=True)
+            if isinstance(error, RevisionConflictError):
+                raise
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "analysis": updated.layout_analysis.model_dump(mode="json"),
+            "project": updated.model_dump(mode="json"),
+            "matched_count": sum(
+                1 for item in analysis.placements if item.matching_status == "matched"
+            ),
+            "issue_count": len(analysis.issues),
+        }
+
     @app.post("/api/projects/{project_id}/rule-checks")
     def rules(project_id: str, request: RuleCheckRequest) -> dict[str, Any]:
         checks = check_design_rules(request.requirements, request.observations)
@@ -1162,7 +1260,7 @@ def create_app(
         payload: dict[str, Any] = {
             "candidates": [item.model_dump(mode="json") for item in candidates],
             "search_run": search_run.model_dump(mode="json") if search_run is not None else None,
-            "notice": "候选灯具需在 DIALux evo 中核验照度、均匀度与 UGR。",
+            "notice": "候选灯具需在 DIALux evo 中核验照度与 UGR。",
         }
         if request.save_to_project:
             if request.expected_revision is None:

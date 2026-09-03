@@ -16,7 +16,6 @@ const numericFields = [
   ["target_cct_k", "目标色温 / K", "100"],
   ["min_cri", "最低显色指数 / Ra", "1"],
   ["target_ugr", "目标 UGR", "1"],
-  ["max_lpd_w_m2", "LPD 上限 / W·m⁻²", "0.1"],
   ["max_power_w", "功率上限 / W", "0.1"],
 ] as const;
 
@@ -46,7 +45,6 @@ export function BriefPanel({ project, onProject }: { project: Project; onProject
       group_id: crypto.randomUUID(), region_name: "", group_name: "", purpose: null,
       area_m2: draft.area_m2 ?? 1, mounting_height_m: 0.1, target_illuminance_lx: draft.target_illuminance_lx ?? 1,
       target_cct_k: draft.target_cct_k, min_cri: draft.min_cri, target_ugr: draft.target_ugr,
-      target_uniformity_u0: draft.target_uniformity_u0, max_lpd_w_m2: draft.max_lpd_w_m2,
       utilization_factor: null, maintenance_factor: null, luminaire_ids: [], source_evidence_ids: [], source_references: [], confirmed: false,
     };
     setValue("lighting_groups", [...draft.lighting_groups, group]);
