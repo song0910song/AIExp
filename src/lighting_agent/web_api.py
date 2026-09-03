@@ -340,6 +340,8 @@ def _fallback_clarification(project: ProjectState) -> dict[str, Any]:
         ("target_cct_k", "确认目标色温（K）", "请确认灯具的目标相关色温。", "select", str(brief.target_cct_k) if brief.target_cct_k is not None else None, [{"label": "3000 K", "value": "3000"}, {"label": "3500 K", "value": "3500"}, {"label": "4000 K", "value": "4000"}, {"label": "5000 K", "value": "5000"}]),
         ("min_cri", "确认最低显色指数（Ra）", "请确认设计与灯具筛选采用的最低显色指数。", "select", str(brief.min_cri) if brief.min_cri is not None else None, [{"label": "Ra 80", "value": "80"}, {"label": "Ra 90", "value": "90"}, {"label": "Ra 95", "value": "95"}]),
         ("target_ugr", "确认 UGR 上限", "请确认眩光控制目标。", "number", str(brief.target_ugr) if brief.target_ugr is not None else None, []),
+        ("target_uniformity_u0", "确认最低均匀度 U0", "请确认照度均匀度目标。", "number", str(brief.target_uniformity_u0) if brief.target_uniformity_u0 is not None else None, []),
+        ("max_lpd_w_m2", "确认照明功率密度上限（W/m2）", "如有节能控制要求，请填写项目采用的 LPD 上限。", "number", str(brief.max_lpd_w_m2) if brief.max_lpd_w_m2 is not None else None, []),
     )
     for field_id, label, description, input_type, placeholder, options in suggested_fields:
         if field_id not in brief.confirmed_fields:
@@ -1160,7 +1162,7 @@ def create_app(
         payload: dict[str, Any] = {
             "candidates": [item.model_dump(mode="json") for item in candidates],
             "search_run": search_run.model_dump(mode="json") if search_run is not None else None,
-            "notice": "候选灯具需在 DIALux evo 中核验照度与 UGR。",
+            "notice": "候选灯具需在 DIALux evo 中核验照度、均匀度与 UGR。",
         }
         if request.save_to_project:
             if request.expected_revision is None:

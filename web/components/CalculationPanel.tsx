@@ -57,13 +57,13 @@ export function CalculationPanel({ project, onProject }: { project: Project; onP
           </form>
         </Panel>
         <Panel title="最新计算结果" eyebrow={latest ? new Date(latest.calculated_at).toLocaleString("zh-CN") : "NO RESULT"}>
-          {latest ? <><div className="result-grid"><div><span>灯具数量</span><strong>{latest.luminaire_count}<small> 套</small></strong></div><div><span>装机功率</span><strong>{formatNumber(latest.installed_power_w)}<small> W</small></strong></div><div><span>目标总光通量</span><strong>{formatNumber(latest.required_luminous_flux_lm, 0)}<small> lm</small></strong></div></div><div className="boundary-note"><strong>适用限制</strong>{latest.limitations.map((item) => <p key={item}>{item}</p>)}</div></> : <EmptyState title="尚未计算">填写灯具光通量、功率和两个设计系数后执行流明法。</EmptyState>}
+          {latest ? <><div className="result-grid"><div><span>灯具数量</span><strong>{latest.luminaire_count}<small> 套</small></strong></div><div><span>装机功率</span><strong>{formatNumber(latest.installed_power_w)}<small> W</small></strong></div><div><span>功率密度</span><strong>{formatNumber(latest.installed_power_density_w_m2, 2)}<small> W/m²</small></strong></div><div><span>目标总光通量</span><strong>{formatNumber(latest.required_luminous_flux_lm, 0)}<small> lm</small></strong></div></div><div className="boundary-note"><strong>适用限制</strong>{latest.limitations.map((item) => <p key={item}>{item}</p>)}</div></> : <EmptyState title="尚未计算">填写灯具光通量、功率和两个设计系数后执行流明法。</EmptyState>}
         </Panel>
       </div>
       <div className="split-grid">
         <Panel title="规则校核器" eyebrow="EXPLICIT THRESHOLD">
           <form onSubmit={checkRule} className="form-grid">
-            <Field label="指标"><select name="metric"><option value="illuminance_lx">照度 / lx</option><option value="cri">显色指数 / Ra</option><option value="ugr">UGR</option></select></Field>
+            <Field label="指标"><select name="metric"><option value="illuminance_lx">照度 / lx</option><option value="cri">显色指数 / Ra</option><option value="lpd_w_m2">LPD / W·m⁻²</option><option value="ugr">UGR</option></select></Field>
             <Field label="判定方向"><select name="operator"><option value="min">不低于</option><option value="max">不高于</option></select></Field>
             <Field label="阈值"><input name="threshold" type="number" step="0.1" required /></Field>
             <Field label="观测值"><input name="observed" type="number" step="0.1" required /></Field>
