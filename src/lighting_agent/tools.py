@@ -85,8 +85,6 @@ class RagLightingParameterInput(ProjectReference):
     target_cct_k: int | None = Field(default=None, ge=1_000, le=20_000)
     min_cri: int | None = Field(default=None, ge=0, le=100)
     target_ugr: float | None = Field(default=None, ge=0, le=40)
-    target_uniformity_u0: float | None = Field(default=None, ge=0, le=1)
-    max_lpd_w_m2: float | None = Field(default=None, gt=0, le=1_000)
 
 
 class ProjectCalculationInput(ProjectReference):
@@ -271,8 +269,6 @@ def apply_rag_lighting_parameters(
     target_cct_k: int | None = None,
     min_cri: int | None = None,
     target_ugr: float | None = None,
-    target_uniformity_u0: float | None = None,
-    max_lpd_w_m2: float | None = None,
 ) -> dict:
     """Persist RAG-derived lighting targets with field-level evidence provenance.
 
@@ -289,8 +285,6 @@ def apply_rag_lighting_parameters(
             "target_cct_k": target_cct_k,
             "min_cri": min_cri,
             "target_ugr": target_ugr,
-            "target_uniformity_u0": target_uniformity_u0,
-            "max_lpd_w_m2": max_lpd_w_m2,
         }.items()
         if value is not None
     }
@@ -659,7 +653,7 @@ def search_luminaires(
         "status": "ok",
         "candidates": [candidate_summary(item) for item in candidates],
         "search_run": _data(search_run),
-        "notice": "候选灯具需在 DIALux evo 结合空间、反射比、安装高度和布灯方式核验照度、均匀度及 UGR。",
+        "notice": "候选灯具需在 DIALux evo 结合空间、反射比、安装高度和布灯方式核验照度及 UGR。",
     }
     if project_id is not None:
         updated, saved_count, rebased = project_store.append_luminaires(
@@ -860,7 +854,7 @@ def analyze_luminaire_layout(
         "project_revision": updated.revision,
         "matched_count": sum(1 for item in analysis.placements if item.matching_status == "matched"),
         "issue_count": len(analysis.issues),
-        "notice": "布局分类仍为未分类；照度、均匀度和 UGR 不能由坐标一致性审查替代。",
+        "notice": "布局分类仍为未分类；照度和 UGR 不能由坐标一致性审查替代。",
     }
 
 

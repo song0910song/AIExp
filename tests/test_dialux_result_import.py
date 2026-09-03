@@ -79,9 +79,7 @@ def _matching_run(revision: int = 0) -> SimulationRun:
         metrics=SimulationMetrics(
             maintained_illuminance_lx=750.0,
             minimum_illuminance_lx=450.0,
-            uniformity_u0=0.60,
             ugr=19.0,
-            installed_power_density_w_m2=9.0,
         ),
         verification_status="matched",
         source_kind="manual_form",
@@ -97,7 +95,6 @@ def test_simulation_run_json_round_trip_and_legacy_drop() -> None:
     assert restored.run_id == run.run_id
     assert restored.verification_status == "matched"
     assert restored.metrics is not None
-    assert restored.metrics.uniformity_u0 == 0.60
 
     legacy = {**payload, "input_scene_revision": 3}
     legacy_restored = SimulationRun.model_validate(legacy)
@@ -230,9 +227,7 @@ def test_dialux_result_import_matches_current_handoff(tmp_path) -> None:
             "metrics": {
                 "maintained_illuminance_lx": 750.0,
                 "minimum_illuminance_lx": 450.0,
-                "uniformity_u0": 0.60,
                 "ugr": 19.0,
-                "installed_power_density_w_m2": 9.0,
             },
         },
     )
@@ -377,8 +372,6 @@ def test_cli_import_dialux_result_verifies_handoff(tmp_path, monkeypatch, capsys
             package["handoff_id"],
             "--maintained-lx",
             "750",
-            "--uniformity-u0",
-            "0.6",
         ]
     )
     response = json.loads(capsys.readouterr().out)

@@ -42,7 +42,7 @@ uv run python main.py search-evidence "会议室 照度 显色指数"
 uv run python main.py calculate <project_id> --revision 0 --group-id general-01 --region-name "会议室" --group-name "基础照明" --mounting-height-m 2.7 --area-m2 30 --target-lx 500 --lumens 3200 --power-w 24 --utilization-factor 0.6 --maintenance-factor 0.8
 uv run python main.py search-luminaires "嵌入式 LED 筒灯" --target-cct-k 4000 --min-cri 80 --max-power-w 25
 uv run python main.py create-dialux-task <project_id> --revision 1
-uv run python main.py import-dialux-result <project_id> --revision 1 --handoff-id <handoff_id> --maintained-lx 750 --uniformity-u0 0.6
+uv run python main.py import-dialux-result <project_id> --revision 1 --handoff-id <handoff_id> --maintained-lx 750
 uv run python main.py generate-report <project_id> --revision 1
 uv run python main.py analyze-layout <project_id> .\report.pdf --revision 1
 uv run python main.py chat "为刚才的会议室建立选灯条件"
@@ -76,7 +76,7 @@ npm run dev
 
 基本搜索接口稳定支持关键词、分页、品牌筛选；搜索条件以目标照度、色温、显色指数（Ra）和 UGR 为主（从已确认任务书自动采用），功率、IP、品牌等其它条件仅在用户明确说明时加入。色温、显色指数、UGR 等条件会在详情数据可用时参与匹配，缺少字段的候选会标记为 `incomplete`，不会被描述为“符合要求”。应避免空关键词，因为 DIALux 会返回随机结果。
 
-Luminaire Finder 是产品目录，不是项目仿真服务。搜索得到的型号只是候选；在 Chat 或 Agent 中确认最终型号后（房间通常由多款灯具组合，最终选定不限于单款），智能体会调用 `select_luminaires` 一次性写入全部最终型号。只有这些最终选定灯具的 ULD/配光文件和详情链接会被装入 DIALux 交接包，未选定的搜索候选不会下载。系统不会直接向本机 DIALux 导入灯具；维持照度、均匀度、UGR、反射比和布灯方案仍须在 DIALux evo 或等效软件中手动完成核验。
+Luminaire Finder 是产品目录，不是项目仿真服务。搜索得到的型号只是候选；在 Chat 或 Agent 中确认最终型号后（房间通常由多款灯具组合，最终选定不限于单款），智能体会调用 `select_luminaires` 一次性写入全部最终型号。只有这些最终选定灯具的 ULD/配光文件和详情链接会被装入 DIALux 交接包，未选定的搜索候选不会下载。系统不会直接向本机 DIALux 导入灯具；维持照度、UGR、反射比和布灯方案仍须在 DIALux evo 或等效软件中手动完成核验。
 
 ## DIALux 结果回灌（第一阶段）
 
@@ -90,7 +90,7 @@ POST /api/projects/{project_id}/dialux-results
   "input_snapshot_sha256": "...",
   "source_kind": "manual_form",
   "metrics": { "maintained_illuminance_lx": 750, "minimum_illuminance_lx": 450,
-               "uniformity_u0": 0.6, "ugr": 19, "installed_power_density_w_m2": 9 }
+               "ugr": 19 }
 }
 ```
 
@@ -103,7 +103,7 @@ GET /api/projects/{project_id}/dialux-results/{run_id}
 
 有关系统设计与 API 字段，见 [照明设计智能体方案](docs/照明设计智能体方案.md) 和 [DIALux API 文档](docs/DIALux-Luminaire-Finder-API.md)。
 
-灯具坐标审查接口为 `POST /api/projects/{project_id}/layout-analysis`，上传 `report_file`（PDF）；项目尚未导入平面图时，可在同一请求附带 `cad_file`。查询结果使用 `GET /api/projects/{project_id}/layout-analysis`。该结果是位置与身份一致性审查，不是照度、均匀度或 UGR 合格结论。
+灯具坐标审查接口为 `POST /api/projects/{project_id}/layout-analysis`，上传 `report_file`（PDF）；项目尚未导入平面图时，可在同一请求附带 `cad_file`。查询结果使用 `GET /api/projects/{project_id}/layout-analysis`。该结果是位置与身份一致性审查，不是照度或 UGR 合格结论。
 
 ## 验证
 

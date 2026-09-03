@@ -219,7 +219,6 @@ def test_preview_point_below_centre_matches_inverse_square() -> None:
     assert result.maximum_illuminance_lx <= expected_centre + 1e-6
     assert centre_value == pytest.approx(expected_centre, rel=0.35)
     assert result.average_illuminance_lx > 0
-    assert 0 < result.uniformity_u0 < 1
     assert result.calibration_scale == 1.0
     assert any("直射分量" in note for note in result.assumptions)
 
