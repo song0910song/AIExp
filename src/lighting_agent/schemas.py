@@ -22,6 +22,19 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+def _drop_removed_metric_fields(values: Any, fields: frozenset[str]) -> Any:
+    """Discard fields removed from the public model while reading old payloads."""
+
+    if not isinstance(values, dict):
+        return values
+    return {key: value for key, value in values.items() if key not in fields}
+
+
+_REMOVED_BRIEF_METRIC_FIELDS = frozenset({"target_uniformity_u0", "max_lpd_w_m2"})
+_REMOVED_CALCULATION_METRIC_FIELDS = frozenset({"installed_power_density_w_m2"})
+_REMOVED_SIMULATION_METRIC_FIELDS = frozenset({"uniformity_u0", "installed_power_density_w_m2"})
+
+
 LIGHTING_PARAMETER_FIELDS = frozenset(
     {
         "target_illuminance_lx",
@@ -77,6 +90,11 @@ class LightingGroup(StrictModel):
     source_references: list[str] = Field(default_factory=list, max_length=20)
     confirmed: bool = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def drop_removed_metrics(cls, values: Any) -> Any:
+        return _drop_removed_metric_fields(values, _REMOVED_BRIEF_METRIC_FIELDS)
+
     @field_validator("luminaire_ids", "source_evidence_ids", "source_references")
     @classmethod
     def unique_values(cls, values: list[str]) -> list[str]:
@@ -110,6 +128,25 @@ class DesignBrief(StrictModel):
     lighting_parameter_sources: dict[str, LightingParameterSource] = Field(default_factory=dict)
     template_origin: BriefTemplateOrigin | None = None
     lighting_groups: list[LightingGroup] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_removed_metrics(cls, values: Any) -> Any:
+        cleaned = _drop_removed_metric_fields(values, _REMOVED_BRIEF_METRIC_FIELDS)
+        if not isinstance(cleaned, dict):
+            return cleaned
+
+        confirmed_fields = cleaned.get("confirmed_fields")
+        if isinstance(confirmed_fields, (list, set, tuple)):
+            cleaned["confirmed_fields"] = [
+                field for field in confirmed_fields if field not in _REMOVED_BRIEF_METRIC_FIELDS
+            ]
+        sources = cleaned.get("lighting_parameter_sources")
+        if isinstance(sources, dict):
+            cleaned["lighting_parameter_sources"] = _drop_removed_metric_fields(
+                sources, _REMOVED_BRIEF_METRIC_FIELDS
+            )
+        return cleaned
 
     @field_validator("preferred_brands")
     @classmethod
@@ -185,6 +222,11 @@ class CalculationResult(StrictModel):
     limitations: list[str]
     calculated_at: datetime = Field(default_factory=utc_now)
 
+    @model_validator(mode="before")
+    @classmethod
+    def drop_removed_metrics(cls, values: Any) -> Any:
+        return _drop_removed_metric_fields(values, _REMOVED_CALCULATION_METRIC_FIELDS)
+
 
 class RuleRequirement(StrictModel):
     """A deterministic rule with explicit provenance; it is not a hard-coded GB rule."""
@@ -211,6 +253,11 @@ class SimulationMetrics(StrictModel):
     maintained_illuminance_lx: float | None = Field(default=None, ge=0)
     minimum_illuminance_lx: float | None = Field(default=None, ge=0)
     ugr: float | None = Field(default=None, ge=0, le=40)
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_removed_metrics(cls, values: Any) -> Any:
+        return _drop_removed_metric_fields(values, _REMOVED_SIMULATION_METRIC_FIELDS)
 
 
 class DialuxHandoff(StrictModel):

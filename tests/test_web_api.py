@@ -217,6 +217,39 @@ def test_web_project_calculation_and_luminaire_flow(tmp_path) -> None:
     assert luminaires.json()["candidates"][0]["cri"] == 90
 
 
+def test_web_accepts_legacy_removed_brief_metrics_without_persisting_them(tmp_path) -> None:
+    client = make_client(tmp_path)
+    response = client.post(
+        "/api/projects",
+        json={
+            "project_name": "Legacy metrics",
+            "space_type": "Office",
+            "target_uniformity_u0": 0.6,
+            "max_lpd_w_m2": 6.5,
+            "lighting_groups": [
+                {
+                    "group_id": "group-a-1",
+                    "region_name": "Open office",
+                    "group_name": "General lighting",
+                    "area_m2": 30,
+                    "mounting_height_m": 2.7,
+                    "target_illuminance_lx": 500,
+                    "target_uniformity_u0": 0.6,
+                    "max_lpd_w_m2": None,
+                    "confirmed": True,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert "target_uniformity_u0" not in payload["brief"]
+    assert "max_lpd_w_m2" not in payload["brief"]
+    assert "target_uniformity_u0" not in payload["brief"]["lighting_groups"][0]
+    assert "max_lpd_w_m2" not in payload["brief"]["lighting_groups"][0]
+
+
 def test_web_revision_conflict_and_health(tmp_path) -> None:
     client = make_client(tmp_path)
     project = client.post("/api/projects", json={"project_name": "冲突测试"}).json()

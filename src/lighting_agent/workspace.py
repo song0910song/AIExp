@@ -179,6 +179,29 @@ class WorkspaceProjectStore:
                 continue
         return states
 
+    def count(self) -> int:
+        """Count registered projects without loading their JSON state."""
+
+        count = 0
+        for record in self.registry.list():
+            database_path = record.directory / "lighting_design.sqlite3"
+            if not record.directory.is_dir() or not self._is_workspace_database(database_path):
+                continue
+            uri = f"file:{database_path.resolve().as_posix()}?mode=ro"
+            try:
+                connection = sqlite3.connect(uri, uri=True)
+                try:
+                    row = connection.execute(
+                        "SELECT 1 FROM projects WHERE project_id = ?",
+                        (record.project_id,),
+                    ).fetchone()
+                finally:
+                    connection.close()
+            except (OSError, sqlite3.DatabaseError):
+                continue
+            count += int(row is not None)
+        return count
+
     def directory_for(self, project_id: str) -> Path:
         return self._store(project_id).directory
 

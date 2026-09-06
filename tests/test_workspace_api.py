@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import sqlite3
+
 from fastapi.testclient import TestClient
 
 from lighting_agent.rag import LocalEvidenceStore
@@ -91,6 +94,38 @@ def test_selecting_an_existing_workspace_reopens_its_single_project(tmp_path) ->
     assert reopened.json()["project_id"] == original["project_id"]
     assert reopened.json()["brief"]["project_name"] == "Original project"
     assert len(client.get("/api/projects").json()) == 1
+
+
+def test_health_does_not_deserialize_project_state(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    client = make_client(tmp_path, lambda: workspace)
+
+    selection = select_directory(client)
+    created = client.post(
+        "/api/projects",
+        json={"project_name": "Health check", "workspace_selection_id": selection["selection_id"]},
+    )
+    assert created.status_code == 201
+    project_id = created.json()["project_id"]
+
+    database = workspace / "lighting_design.sqlite3"
+    with sqlite3.connect(database) as connection:
+        state = connection.execute(
+            "SELECT state_json FROM projects WHERE project_id = ?", (project_id,)
+        ).fetchone()[0]
+        payload = json.loads(state)
+        payload["calculations"] = [{"removed_metric": 1}]
+        connection.execute(
+            "UPDATE projects SET state_json = ? WHERE project_id = ?",
+            (json.dumps(payload), project_id),
+        )
+        connection.commit()
+
+    health = client.get("/api/health")
+
+    assert health.status_code == 200, health.text
+    assert health.json()["project_count"] == 1
 
 
 def test_workspace_creation_requires_native_directory_selection(tmp_path) -> None:

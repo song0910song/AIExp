@@ -765,13 +765,15 @@ def create_app(
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
+        count_projects = getattr(projects, "count", None)
+        project_count = count_projects() if callable(count_projects) else len(projects.list())
         return {
             "status": "ok",
             "llm_configured": bool(settings.llm_api_key),
             "llm_model": settings.llm_model,
             "rag_backend": settings.rag_backend,
             "llm_context_window_tokens": max(1, settings.llm_context_window_tokens),
-            "project_count": len(projects.list()),
+            "project_count": project_count,
         }
 
     @app.get("/api/projects")
