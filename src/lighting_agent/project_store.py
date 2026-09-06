@@ -603,6 +603,16 @@ class ProjectStore:
             connection.close()
         return [ProjectState.model_validate_json(str(row["state_json"])) for row in rows]
 
+    def count(self) -> int:
+        """Count persisted projects without deserializing their state."""
+
+        connection = self.database.connect()
+        try:
+            row = connection.execute("SELECT COUNT(*) AS count FROM projects").fetchone()
+        finally:
+            connection.close()
+        return int(row["count"] if row is not None else 0)
+
     def revisions(self, project_id: str) -> list[ProjectState]:
         """Return immutable project snapshots in revision order."""
 

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable
+from math import isclose
 from pathlib import Path
 
 # langchain_core.tools 的 tool 与 langchain.tools 等价，但导入快约 25 倍：
 # langchain.tools 会级联拉起 langgraph.prebuilt → sentence_transformers → torch。
 from langchain_core.tools import tool
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .calculations import calculate_lumen_method, check_design_rules as run_rule_checks
 from .calculations.layout import analyze_luminaire_layout as run_luminaire_layout_analysis
@@ -87,9 +90,240 @@ class RagLightingParameterInput(ProjectReference):
     target_ugr: float | None = Field(default=None, ge=0, le=40)
 
 
+_CALCULATION_INPUT_ALIASES = {
+    "lighting_group_id": "group_id",
+    "region": "region_name",
+    "zone_name": "region_name",
+    "lighting_group_name": "group_name",
+    "group": "group_name",
+    "mounting_height": "mounting_height_m",
+    "mounting_point_height_m": "mounting_height_m",
+    "area": "area_m2",
+    "target_lx": "target_illuminance_lx",
+    "target_lux": "target_illuminance_lx",
+    "illuminance_lx": "target_illuminance_lx",
+    "lumens": "luminaire_luminous_flux_lm",
+    "luminous_flux_lm": "luminaire_luminous_flux_lm",
+    "luminaire_flux_lm": "luminaire_luminous_flux_lm",
+    "flux_lm": "luminaire_luminous_flux_lm",
+    "power": "luminaire_power_w",
+    "power_w": "luminaire_power_w",
+    "luminaire_power": "luminaire_power_w",
+    "uf": "utilization_factor",
+    "utilisation_factor": "utilization_factor",
+    "utilization": "utilization_factor",
+    "mf": "maintenance_factor",
+    "maintenance": "maintenance_factor",
+    "maintenance_coefficient": "maintenance_factor",
+    "selected_luminaire_id": "luminaire_id",
+}
+_CALCULATION_NUMERIC_FIELDS = frozenset(
+    {
+        "mounting_height_m",
+        "area_m2",
+        "target_illuminance_lx",
+        "luminaire_luminous_flux_lm",
+        "luminaire_power_w",
+        "utilization_factor",
+        "maintenance_factor",
+    }
+)
+_CALCULATION_REMOVED_FIELDS = frozenset(
+    {"target_uniformity_u0", "max_lpd_w_m2", "installed_power_density_w_m2"}
+)
+_CALCULATION_CANONICAL_FIELDS = frozenset(
+    {
+        "group_id",
+        "region_name",
+        "group_name",
+        "mounting_height_m",
+        "area_m2",
+        "target_illuminance_lx",
+        "luminaire_luminous_flux_lm",
+        "luminaire_power_w",
+        "utilization_factor",
+        "maintenance_factor",
+        "luminaire_id",
+    }
+)
+_NESTED_GROUP_ALIASES = {
+    "id": "group_id",
+    "name": "group_name",
+    "region": "region_name",
+    "zone": "region_name",
+    "area": "area_m2",
+    "mounting_height": "mounting_height_m",
+    "mounting_point_height_m": "mounting_height_m",
+    "target_lx": "target_illuminance_lx",
+    "target_lux": "target_illuminance_lx",
+}
+_NESTED_LUMINAIRE_ALIASES = {
+    "id": "luminaire_id",
+    "lumens": "luminaire_luminous_flux_lm",
+    "luminous_flux": "luminaire_luminous_flux_lm",
+    "luminous_flux_lm": "luminaire_luminous_flux_lm",
+    "flux": "luminaire_luminous_flux_lm",
+    "flux_lm": "luminaire_luminous_flux_lm",
+    "power": "luminaire_power_w",
+    "power_w": "luminaire_power_w",
+    "wattage": "luminaire_power_w",
+}
+_NUMBER_PATTERN = re.compile(r"[-+]?(?:\d+(?:[.,]\d*)?|[.,]\d+)")
+
+
+def _calculation_number(value: object) -> object:
+    """Accept provider values such as ``"1200 lm"`` without weakening bounds."""
+
+    if isinstance(value, bool) or not isinstance(value, str):
+        return value
+    text = value.strip().replace("，", ",")
+    # Treat a single comma followed by one or two digits as a decimal comma;
+    # commas in larger numbers are thousands separators.
+    normalized = text.replace(",", ".") if re.search(r"\d,[0-9]{1,2}(?:\D|$)", text) else text.replace(",", "")
+    match = _NUMBER_PATTERN.search(normalized)
+    if match is None:
+        return value
+    try:
+        return float(match.group().replace(",", "."))
+    except ValueError:
+        return value
+
+
+def _merge_nested_calculation_fields(
+    source: dict[object, object],
+    target: dict[str, object],
+    aliases: dict[str, str],
+) -> None:
+    """Extract calculation fields from provider objects and ignore metadata."""
+
+    for raw_key, value in source.items():
+        key = str(raw_key)
+        normalized = aliases.get(key, key)
+        if normalized in _CALCULATION_CANONICAL_FIELDS or normalized in _CALCULATION_INPUT_ALIASES:
+            target.setdefault(normalized, value)
+
+
+class CalculationToolInput(StrictModel):
+    """Provider-facing calculation input with backwards-compatible aliases.
+
+    The persisted/domain ``CalculationInput`` remains strict. This adapter is
+    intentionally permissive because model providers commonly omit values that
+    are already present in the confirmed group or selected luminaire.
+    """
+
+    group_id: str = Field(default="unassigned", min_length=1, max_length=64)
+    region_name: str = Field(default="Unassigned region", min_length=1, max_length=160)
+    group_name: str = Field(default="Unassigned group", min_length=1, max_length=160)
+    mounting_height_m: float | None = Field(default=None, gt=0, le=100)
+    area_m2: float | None = Field(default=None, gt=0, description="Confirmed group area in m2.")
+    target_illuminance_lx: float | None = Field(default=None, gt=0, description="Confirmed target illuminance in lx.")
+    luminaire_luminous_flux_lm: float | None = Field(
+        default=None, gt=0, description="Luminaire flux in lm; may be read from the selected candidate."
+    )
+    luminaire_power_w: float | None = Field(
+        default=None, gt=0, description="Luminaire power in W; may be read from the selected candidate."
+    )
+    utilization_factor: float | None = Field(default=None, gt=0, le=1)
+    maintenance_factor: float | None = Field(default=None, gt=0, le=1)
+    luminaire_id: str | None = Field(
+        default=None, min_length=1, max_length=200, description="Saved project luminaire candidate ID."
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_provider_values(cls, values: object) -> object:
+        if hasattr(values, "model_dump"):
+            return values.model_dump(mode="json")
+        if not isinstance(values, dict):
+            return values
+        cleaned = dict(values)
+        for field in _CALCULATION_REMOVED_FIELDS:
+            cleaned.pop(field, None)
+
+        nested_group = cleaned.pop("group", None)
+        if isinstance(nested_group, dict):
+            _merge_nested_calculation_fields(nested_group, cleaned, _NESTED_GROUP_ALIASES)
+        elif isinstance(nested_group, str):
+            cleaned.setdefault("group_name", nested_group)
+
+        nested = cleaned.pop("luminaire", None)
+        if isinstance(nested, dict):
+            _merge_nested_calculation_fields(nested, cleaned, _NESTED_LUMINAIRE_ALIASES)
+        elif isinstance(nested, str) and "luminaire_id" not in cleaned:
+            cleaned["luminaire_id"] = nested
+
+        for alias, field in _CALCULATION_INPUT_ALIASES.items():
+            if alias in cleaned:
+                cleaned.setdefault(field, cleaned[alias])
+                cleaned.pop(alias, None)
+        for field in _CALCULATION_NUMERIC_FIELDS:
+            if field not in cleaned:
+                continue
+            original = cleaned[field]
+            value = _calculation_number(original)
+            if (
+                field in {"utilization_factor", "maintenance_factor"}
+                and isinstance(original, str)
+                and "%" in original
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and value > 1
+            ):
+                value /= 100
+            # Providers sometimes use zero as an unknown optional value. Let
+            # the project/group resolver fill it from confirmed data.
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value <= 0:
+                value = None
+            cleaned[field] = value
+        return cleaned
+
+
 class ProjectCalculationInput(ProjectReference):
     expected_revision: int = Field(ge=0)
-    inputs: CalculationInput | list[CalculationInput]
+    inputs: CalculationToolInput | list[CalculationToolInput]
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_provider_shape(cls, values: object) -> object:
+        if not isinstance(values, dict):
+            return values
+        cleaned = dict(values)
+        for field in _CALCULATION_REMOVED_FIELDS:
+            cleaned.pop(field, None)
+        raw = cleaned.pop("inputs", None)
+        if raw is None:
+            for key in ("calculations", "calculation", "calculation_input", "input"):
+                if key in cleaned:
+                    raw = cleaned.pop(key)
+                    break
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+        if hasattr(raw, "model_dump"):
+            raw = raw.model_dump(mode="json")
+        elif isinstance(raw, list):
+            raw = [item.model_dump(mode="json") if hasattr(item, "model_dump") else item for item in raw]
+        if isinstance(raw, dict):
+            for key in ("calculation", "calculation_input", "parameters"):
+                nested = raw.get(key)
+                if isinstance(nested, (dict, list)) and len(raw) == 1:
+                    raw = nested
+                    break
+        if raw is not None:
+            cleaned["inputs"] = raw
+        else:
+            calculation_fields = {
+                key: cleaned.pop(key)
+                for key in list(cleaned)
+                if key in _CALCULATION_INPUT_ALIASES
+                or key in _CALCULATION_NUMERIC_FIELDS
+                or key in {"group_id", "region_name", "group_name", "luminaire_id", "luminaire"}
+            }
+            if calculation_fields:
+                cleaned["inputs"] = calculation_fields
+        return cleaned
 
 
 class RuleCheckInput(ProjectReference):
@@ -402,36 +636,223 @@ def add_document(file_path: str, source_type: str = "project_document", project_
     }
 
 
+_PLACEHOLDER_GROUP_IDS = frozenset({"", "unassigned", "default", "general", "general_lighting"})
+_PLACEHOLDER_GROUP_NAMES = frozenset({"", "unassigned region", "unassigned group"})
+
+
+def _text_key(value: object) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _resolve_calculation_group(
+    item: CalculationToolInput, groups: dict[str, LightingGroup]
+) -> LightingGroup | None:
+    """Resolve provider-friendly group references without guessing between groups."""
+
+    if not groups:
+        # Projects created before lighting groups were introduced keep the
+        # original flat calculation workflow. They are still valid for the
+        # lumen-method estimate, which does not use geometry or mounting height.
+        if _text_key(item.group_id) not in _PLACEHOLDER_GROUP_IDS:
+            raise ValueError(
+                "Calculation inputs reference unknown lighting groups: " + item.group_id
+            )
+        return None
+
+    exact = groups.get(item.group_id)
+    if exact is not None:
+        return exact
+
+    requested_region = _text_key(item.region_name)
+    requested_group = _text_key(item.group_name)
+    candidates = [
+        group
+        for group in groups.values()
+        if (
+            requested_region not in _PLACEHOLDER_GROUP_NAMES
+            and requested_region == _text_key(group.region_name)
+        )
+        or (
+            requested_group not in _PLACEHOLDER_GROUP_NAMES
+            and requested_group == _text_key(group.group_name)
+        )
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise ValueError(
+            "Calculation input matches more than one lighting group; use the exact group_id"
+        )
+    if _text_key(item.group_id) in _PLACEHOLDER_GROUP_IDS and len(groups) == 1:
+        return next(iter(groups.values()))
+    raise ValueError(
+        "Calculation inputs reference unknown lighting groups: "
+        + (item.group_id or "(empty)")
+    )
+
+
+def _candidate_values_for_calculation(
+    item: CalculationToolInput,
+    state: ProjectState,
+    group: LightingGroup | None,
+) -> list[tuple[float | None, float | None]]:
+    """Return saved candidate flux/power pairs relevant to one calculation."""
+
+    ids: list[str] = []
+    if item.luminaire_id:
+        ids.append(item.luminaire_id)
+    if group is not None:
+        ids.extend(group.luminaire_ids)
+        ids.extend(state.luminaire_group_assignments.get(group.group_id, []))
+    ids.extend(state.selected_luminaire_ids)
+    ids = list(dict.fromkeys(ids))
+    candidates = {candidate.luminaire_id: candidate for candidate in state.luminaires}
+    return [
+        (candidates[luminaire_id].luminous_flux_lm, candidates[luminaire_id].power_w)
+        for luminaire_id in ids
+        if luminaire_id in candidates
+    ]
+
+
+def _prepare_calculation_input(
+    item: CalculationToolInput | CalculationInput,
+    *,
+    state: ProjectState,
+    groups: dict[str, LightingGroup],
+) -> CalculationInput:
+    """Fill omitted provider fields from confirmed groups and saved luminaires."""
+
+    if not isinstance(item, CalculationToolInput):
+        item = CalculationToolInput.model_validate(
+            item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+        )
+    group = _resolve_calculation_group(item, groups)
+    if group is not None and not group.confirmed:
+        raise ValueError(
+            "Lighting groups must be user-confirmed before calculation: " + group.group_id
+        )
+
+    group_label = group.group_id if group is not None else item.group_id
+    region_name = (
+        group.region_name
+        if group is not None and _text_key(item.region_name) in _PLACEHOLDER_GROUP_NAMES
+        else item.region_name
+    )
+    group_name = (
+        group.group_name
+        if group is not None and _text_key(item.group_name) in _PLACEHOLDER_GROUP_NAMES
+        else item.group_name
+    )
+    mounting_height = item.mounting_height_m
+    if group is not None:
+        if mounting_height is None:
+            mounting_height = group.mounting_height_m
+        elif not isclose(mounting_height, group.mounting_height_m, rel_tol=0, abs_tol=1e-6):
+            raise ValueError(
+                "Calculation mounting point height must match the confirmed lighting group: "
+                + group.group_id
+            )
+
+    area = item.area_m2 if item.area_m2 is not None else group.area_m2 if group is not None else state.brief.area_m2
+    target = (
+        item.target_illuminance_lx
+        if item.target_illuminance_lx is not None
+        else group.target_illuminance_lx
+        if group is not None
+        else state.brief.target_illuminance_lx
+    )
+    utilization = (
+        item.utilization_factor
+        if item.utilization_factor is not None
+        else group.utilization_factor
+        if group is not None
+        else None
+    )
+    maintenance = (
+        item.maintenance_factor
+        if item.maintenance_factor is not None
+        else group.maintenance_factor
+        if group is not None
+        else None
+    )
+    flux = item.luminaire_luminous_flux_lm
+    power = item.luminaire_power_w
+    candidate_values = _candidate_values_for_calculation(item, state, group)
+    usable_values = [
+        (float(candidate_flux), float(candidate_power))
+        for candidate_flux, candidate_power in candidate_values
+        if candidate_flux is not None
+        and candidate_power is not None
+        and candidate_flux > 0
+        and candidate_power > 0
+    ]
+    if usable_values:
+        distinct_values = list(dict.fromkeys(usable_values))
+        if len(distinct_values) == 1 or len(usable_values) == 1:
+            candidate_flux, candidate_power = distinct_values[0]
+            flux = flux if flux is not None else candidate_flux
+            power = power if power is not None else candidate_power
+
+    missing = [
+        name
+        for name, value in (
+            ("area_m2", area),
+            ("target_illuminance_lx", target),
+            ("luminaire_luminous_flux_lm", flux),
+            ("luminaire_power_w", power),
+            ("utilization_factor", utilization),
+            ("maintenance_factor", maintenance),
+        )
+        if value is None
+    ]
+    if missing:
+        raise ValueError(
+            f"Calculation input for lighting group {group_label} is incomplete; "
+            "provide or confirm: "
+            + ", ".join(missing)
+        )
+    return CalculationInput(
+        group_id=group_label,
+        region_name=region_name,
+        group_name=group_name,
+        mounting_height_m=mounting_height,
+        area_m2=area,
+        target_illuminance_lx=target,
+        luminaire_luminous_flux_lm=flux,
+        luminaire_power_w=power,
+        utilization_factor=utilization,
+        maintenance_factor=maintenance,
+    )
+
+
 @tool("calculate_preliminary_lighting", args_schema=ProjectCalculationInput)
 def calculate_preliminary_lighting(
-    project_id: str, expected_revision: int, inputs: CalculationInput | list[CalculationInput]
+    project_id: str,
+    expected_revision: int,
+    inputs: CalculationToolInput | list[CalculationToolInput],
 ) -> dict:
-    """Run the reproducible lumen-method calculation and save its inputs, outputs and limitations."""
+    """Run and persist a reproducible lumen-method calculation.
 
-    if isinstance(inputs, CalculationInput):
+    Inputs may reference a confirmed lighting group by ID and a saved
+    luminaire by ID. Omitted group metadata and luminaire flux/power are filled
+    only when the project contains an unambiguous confirmed source; no design
+    values are guessed.
+    """
+
+    if isinstance(inputs, (CalculationInput, CalculationToolInput)):
         normalized_inputs = [inputs]
     else:
         normalized_inputs = list(inputs)
+    if not normalized_inputs:
+        raise ValueError("At least one lighting-group calculation input is required")
+
     state = project_store.get(project_id)
     groups = {group.group_id: group for group in state.brief.lighting_groups}
-    unknown_groups = [item.group_id for item in normalized_inputs if item.group_id not in groups]
-    if unknown_groups:
-        raise ValueError("Calculation inputs reference unknown lighting groups: " + ", ".join(dict.fromkeys(unknown_groups)))
-    unconfirmed = [item.group_id for item in normalized_inputs if item.group_id in groups and not groups[item.group_id].confirmed]
-    if unconfirmed:
-        raise ValueError("Lighting groups must be user-confirmed before calculation: " + ", ".join(dict.fromkeys(unconfirmed)))
-    mismatched_height = [
-        item.group_id
+    prepared_inputs = [
+        _prepare_calculation_input(item, state=state, groups=groups)
         for item in normalized_inputs
-        if item.group_id in groups
-        and (item.mounting_height_m is None or item.mounting_height_m != groups[item.group_id].mounting_height_m)
     ]
-    if mismatched_height:
-        raise ValueError(
-            "Calculation mounting point height must match the confirmed lighting group: "
-            + ", ".join(dict.fromkeys(mismatched_height))
-        )
-    results = [calculate_lumen_method(item) for item in normalized_inputs]
+    results = [calculate_lumen_method(item) for item in prepared_inputs]
     updated, rebased = _update_at_latest_revision(
         project_id,
         expected_revision,
