@@ -1,8 +1,8 @@
 "use client";
 
-import { ArrowUp, FileText, Paperclip, X } from "lucide-react";
+import { ArrowUp, Brain, FileText, Paperclip, X } from "lucide-react";
 import { useId, useRef } from "react";
-import type { ContextUsage } from "@/lib/types";
+import type { ContextUsage, ReasoningEffort, ReasoningEffortOption } from "@/lib/types";
 import { BusyButton } from "./ui";
 import { ContextWindowUsage } from "./ContextWindowUsage";
 
@@ -15,8 +15,11 @@ export function ChatComposer({
   disabled,
   usage,
   model,
+  reasoningEffort,
+  reasoningOptions,
   placeholder,
   onDraftChange,
+  onReasoningEffortChange,
   onAttachmentsChange,
   onRemoveAttachment,
   onSubmit,
@@ -27,8 +30,11 @@ export function ChatComposer({
   disabled: boolean;
   usage: ContextUsage;
   model?: string;
+  reasoningEffort: ReasoningEffort;
+  reasoningOptions: ReasoningEffortOption[];
   placeholder: string;
   onDraftChange: (value: string) => void;
+  onReasoningEffortChange: (value: ReasoningEffort) => void;
   onAttachmentsChange: (files: File[]) => void;
   onRemoveAttachment: (file: File) => void;
   onSubmit: () => void;
@@ -80,6 +86,25 @@ export function ChatComposer({
           <div className="composer-actions">
             <ContextWindowUsage usage={usage} />
             <span className="composer-model" title={`当前模型：${model ?? "未配置"}`}><i aria-hidden="true" />{model ?? "未配置模型"}</span>
+            {reasoningOptions.length ? (
+              <label
+                className={`composer-reasoning ${disabled ? "is-disabled" : ""}`}
+                title={reasoningOptions.find((option) => option.value === reasoningEffort)?.description ?? "选择思考强度"}
+              >
+                <Brain size={14} aria-hidden="true" />
+                <span className="composer-reasoning-label">思考强度</span>
+                <select
+                  aria-label="思考强度"
+                  value={reasoningEffort}
+                  onChange={(event) => onReasoningEffortChange(event.target.value as ReasoningEffort)}
+                  disabled={disabled}
+                >
+                  {reasoningOptions.map((option) => (
+                    <option key={option.value} value={option.value} title={option.description}>{option.label}</option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             <BusyButton className="composer-submit" busy={busy} disabled={!canSubmit} type="submit" title={actionLabel} aria-label={actionLabel}>{!busy ? <ArrowUp size={17} /> : null}</BusyButton>
           </div>
         </div>

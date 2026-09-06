@@ -640,6 +640,19 @@ _PLACEHOLDER_GROUP_IDS = frozenset({"", "unassigned", "default", "general", "gen
 _PLACEHOLDER_GROUP_NAMES = frozenset({"", "unassigned region", "unassigned group"})
 
 
+class CalculationInputIncompleteError(ValueError):
+    """A recoverable calculation request that needs user/project data."""
+
+    def __init__(self, group_id: str, missing_fields: list[str]) -> None:
+        self.group_id = group_id
+        self.missing_fields = tuple(missing_fields)
+        super().__init__(
+            f"Calculation input for lighting group {group_id} is incomplete; "
+            "provide or confirm: "
+            + ", ".join(missing_fields)
+        )
+
+
 def _text_key(value: object) -> str:
     return str(value or "").strip().casefold()
 
@@ -696,15 +709,27 @@ def _candidate_values_for_calculation(
     state: ProjectState,
     group: LightingGroup | None,
 ) -> list[tuple[float | None, float | None]]:
-    """Return saved candidate flux/power pairs relevant to one calculation."""
+    """Return saved candidate flux/power pairs relevant to one calculation.
+
+    A group assignment is authoritative.  Falling back to every selected
+    luminaire when an assignment exists makes a multi-group project appear
+    ambiguous even though each group has a single, explicit fixture.
+    """
 
     ids: list[str] = []
     if item.luminaire_id:
         ids.append(item.luminaire_id)
-    if group is not None:
-        ids.extend(group.luminaire_ids)
-        ids.extend(state.luminaire_group_assignments.get(group.group_id, []))
-    ids.extend(state.selected_luminaire_ids)
+    elif group is not None:
+        assigned_ids = [
+            *group.luminaire_ids,
+            *state.luminaire_group_assignments.get(group.group_id, []),
+        ]
+        # An explicit assignment narrows the calculation to this group.  The
+        # project-wide selection is only a fallback for legacy/single-group
+        # projects that predate group assignments.
+        ids.extend(assigned_ids or state.selected_luminaire_ids)
+    else:
+        ids.extend(state.selected_luminaire_ids)
     ids = list(dict.fromkeys(ids))
     candidates = {candidate.luminaire_id: candidate for candidate in state.luminaires}
     return [
@@ -806,11 +831,7 @@ def _prepare_calculation_input(
         if value is None
     ]
     if missing:
-        raise ValueError(
-            f"Calculation input for lighting group {group_label} is incomplete; "
-            "provide or confirm: "
-            + ", ".join(missing)
-        )
+        raise CalculationInputIncompleteError(group_label, missing)
     return CalculationInput(
         group_id=group_label,
         region_name=region_name,
@@ -848,10 +869,22 @@ def calculate_preliminary_lighting(
 
     state = project_store.get(project_id)
     groups = {group.group_id: group for group in state.brief.lighting_groups}
-    prepared_inputs = [
-        _prepare_calculation_input(item, state=state, groups=groups)
-        for item in normalized_inputs
-    ]
+    try:
+        prepared_inputs = [
+            _prepare_calculation_input(item, state=state, groups=groups) for item in normalized_inputs
+        ]
+    except CalculationInputIncompleteError as error:
+        return {
+            "status": "needs_clarification",
+            "group_id": error.group_id,
+            "missing_fields": list(error.missing_fields),
+            "project_revision": state.revision,
+            "message": (
+                "The calculation was not run because these confirmed inputs are missing. "
+                "Do not guess them. Ask the user to provide or confirm the listed values, "
+                "or select a saved luminaire with complete flux and power data."
+            ),
+        }
     results = [calculate_lumen_method(item) for item in prepared_inputs]
     updated, rebased = _update_at_latest_revision(
         project_id,

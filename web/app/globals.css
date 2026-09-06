@@ -1635,7 +1635,8 @@ textarea:focus {
 
 .composer-attach-button,
 .composer-file-chip,
-.composer-model {
+.composer-model,
+.composer-reasoning {
   display: inline-flex;
   min-height: 28px;
   flex: 0 0 auto;
@@ -1687,6 +1688,7 @@ textarea:focus {
 
 .composer-actions {
   flex: 0 0 auto;
+  flex-wrap: wrap;
   justify-content: flex-end;
 }
 
@@ -1763,6 +1765,52 @@ textarea:focus {
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--success);
+}
+
+.composer-reasoning {
+  max-width: 156px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  color: var(--ink-muted);
+  background: var(--surface-subtle);
+}
+
+.composer-reasoning > svg {
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+
+.composer-reasoning-label {
+  color: var(--ink-muted);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.composer-reasoning select {
+  width: auto;
+  height: 24px;
+  min-width: 42px;
+  max-width: 54px;
+  padding: 0 1px;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  box-shadow: none;
+  color: var(--ink-soft);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.composer-reasoning select:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.composer-reasoning.is-disabled {
+  opacity: 0.55;
 }
 
 .composer-submit {
@@ -2406,6 +2454,8 @@ textarea:focus {
   .chat-message { gap: 9px; margin-bottom: 19px; }
   .chat-composer { padding: 13px 14px 15px; }
   .composer-model { display: none; }
+  .composer-reasoning { max-width: 116px; }
+  .composer-reasoning-label { display: none; }
   .context-window-usage { min-width: auto; }
   .context-window-copy { display: none; }
   .composer-attach-button span { display: none; }

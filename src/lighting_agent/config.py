@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -21,6 +21,30 @@ WORKSPACE_REGISTRY_FILE = DATA_DIRECTORY / "workspace_registry.sqlite3"
 # Load local .env before Settings defaults are evaluated (dataclass defaults run
 # at class definition time); existing environment variables take precedence.
 load_dotenv(PROJECT_ROOT / ".env")
+
+
+# The configured New API gateway accepts this set for agnes-2.5-flash.  Keep
+# the list configurable because an OpenAI-compatible gateway does not expose
+# a reliable, machine-readable reasoning capability document.
+REASONING_EFFORT_VALUES: tuple[str, ...] = ("none", "low", "medium", "high")
+REASONING_EFFORT_METADATA: dict[str, dict[str, str]] = {
+    "none": {
+        "label": "关闭",
+        "description": "不启用额外推理，响应最快",
+    },
+    "low": {
+        "label": "低",
+        "description": "快速分析，适合简单问题",
+    },
+    "medium": {
+        "label": "中",
+        "description": "速度与准确性平衡，推荐",
+    },
+    "high": {
+        "label": "高",
+        "description": "更深分析，通常更慢且消耗更多 token",
+    },
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +95,40 @@ class Settings:
     paddleocr_poll_interval_seconds: float = float(os.getenv("PADDLEOCR_POLL_INTERVAL_SECONDS", "5"))
     chat_session_ttl_hours: int = int(os.getenv("LIGHTING_CHAT_SESSION_TTL_HOURS", "168"))
     chat_session_max_messages: int = int(os.getenv("LIGHTING_CHAT_SESSION_MAX_MESSAGES", "80"))
+    # Comma-separated values let deployments adapt this UI to another model
+    # without changing code.  The default matches the configured gateway.
+    llm_reasoning_efforts: str = os.getenv(
+        "LIGHTING_LLM_REASONING_EFFORTS", ",".join(REASONING_EFFORT_VALUES)
+    )
+    llm_reasoning_effort_default: str = os.getenv(
+        "LIGHTING_LLM_REASONING_EFFORT_DEFAULT", "medium"
+    )
+    # Per-request override.  ``None`` preserves the provider's own default for
+    # API clients that do not send a selector.
+    llm_reasoning_effort: str | None = None
+
+    def supported_reasoning_efforts(self) -> tuple[str, ...]:
+        """Return normalized reasoning efforts exposed by this deployment."""
+
+        configured = tuple(
+            value.strip().casefold()
+            for value in self.llm_reasoning_efforts.split(",")
+            if value.strip()
+        )
+        values = tuple(dict.fromkeys(value for value in configured if value in REASONING_EFFORT_VALUES))
+        return values or REASONING_EFFORT_VALUES
+
+    def default_reasoning_effort(self) -> str:
+        """Return a valid default even when an environment override is stale."""
+
+        requested = self.llm_reasoning_effort_default.strip().casefold()
+        supported = self.supported_reasoning_efforts()
+        return requested if requested in supported else supported[0]
+
+    def with_reasoning_effort(self, effort: str | None) -> "Settings":
+        """Create request-scoped settings without mutating frozen global config."""
+
+        return replace(self, llm_reasoning_effort=effort)
 
     def validate_for_agent(self) -> None:
         if not self.llm_api_key:
