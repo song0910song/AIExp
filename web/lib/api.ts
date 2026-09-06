@@ -1,8 +1,8 @@
-import type { AgentPlanStep, AgentStepStatus, AgentToolRun, ClarificationRequest, ContextUsage, DesignBrief, FloorPlanImport, Health, LayoutAnalysis, Project } from "./types";
+import type { AgentPlanStep, AgentStepStatus, AgentToolRun, ClarificationRequest, ContextUsage, DesignBrief, FloorPlanImport, Health, LayoutAnalysis, Project, ReasoningEffort } from "./types";
 
 const API_ROOT = "/backend";
 
-type ChatPayload = { message: string; session_id?: string; project_id?: string; debug?: boolean };
+export type ChatPayload = { message: string; session_id?: string; project_id?: string; debug?: boolean; reasoning_effort?: ReasoningEffort };
 type ChatStreamEvent =
   | { type: "start"; session_id: string }
   | { type: "plan"; steps: AgentPlanStep[] }

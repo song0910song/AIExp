@@ -1,9 +1,21 @@
+export type ReasoningEffort = "none" | "low" | "medium" | "high";
+
+export type ReasoningEffortOption = {
+  value: ReasoningEffort;
+  label: string;
+  description: string;
+};
+
 export type Health = {
   status: string;
   llm_configured: boolean;
   llm_model: string;
   rag_backend: string;
   llm_context_window_tokens: number;
+  llm_reasoning_efforts?: ReasoningEffort[];
+  llm_reasoning_effort_options?: ReasoningEffortOption[];
+  llm_reasoning_effort_default?: ReasoningEffort;
+  llm_reasoning_effort_source?: "configured" | "fallback";
   project_count: number;
 };
 
@@ -342,7 +354,7 @@ export type Project = {
   updated_at: string;
 };
 
-export type Section = "overview" | "chat" | "knowledge";
+export type Section = "overview" | "chat" | "luminaires" | "knowledge";
 
 export type AgentStepStatus = "pending" | "active" | "done" | "failed" | "skipped";
 

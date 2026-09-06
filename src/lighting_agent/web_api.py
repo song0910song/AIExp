@@ -37,7 +37,13 @@ from .calculations import (
 from .calculations.photometry import PhotometryParseError, parse_photometry_file
 from .calculations.preview import PreviewGeometryError
 from .calculations.layout import analyze_luminaire_layout as run_luminaire_layout_analysis
-from .config import DATABASE_FILE, Settings, USER_DOCUMENTS_DIRECTORY, ensure_data_directories
+from .config import (
+    DATABASE_FILE,
+    REASONING_EFFORT_METADATA,
+    Settings,
+    USER_DOCUMENTS_DIRECTORY,
+    ensure_data_directories,
+)
 from .deliverables import build_design_report, build_dialux_task_archive, read_dialux_task_package
 from .dialux_api import DialuxAPI, DialuxAPIError, validate_luminaire_search
 from .dialux_protocol import DialuxProtocolError
@@ -128,6 +134,7 @@ class ChatRequest(StrictModel):
     session_id: str | None = Field(default=None, min_length=8, max_length=64)
     project_id: str | None = Field(default=None, min_length=8, max_length=64)
     debug: bool = False
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
     # Retained for existing API clients.
     mode: Literal["chat", "agent"] = "chat"
 
@@ -719,6 +726,7 @@ def create_app(
     workspace_selections: dict[str, Path] = {}
     workspace_selection_lock = Lock()
     agent_holder: dict[str, Any] = {}
+    agent_lock = Lock()
 
     # Agent tools are module-level LangChain callables. Bind them to the same
     # workspace-aware stores used by this application instance.
@@ -737,6 +745,28 @@ def create_app(
 
     def project_photometry(project_id: str) -> PhotometryAssetStore:
         return PhotometryAssetStore(project_directory(project_id), dialux)
+
+    def chat_agent(request: ChatRequest, runtime_settings: Settings) -> Any:
+        """Return an agent configured for the requested reasoning effort.
+
+        Agents are cached per effort so switching the selector cannot reuse a
+        model instance that still carries the previous request parameters.
+        """
+
+        effort = request.reasoning_effort
+        supported = runtime_settings.supported_reasoning_efforts()
+        if effort is not None and effort not in supported:
+            choices = ", ".join(supported)
+            raise HTTPException(
+                status_code=422,
+                detail=f"reasoning_effort '{effort}' is not enabled for this model; choose one of: {choices}",
+            )
+
+        cache_key = effort or "__provider_default__"
+        with agent_lock:
+            if cache_key not in agent_holder:
+                agent_holder[cache_key] = build_agent(runtime_settings.with_reasoning_effort(effort))
+            return agent_holder[cache_key]
 
     app = FastAPI(
         title="照明设计智能体 API",
@@ -767,12 +797,23 @@ def create_app(
     def health() -> dict[str, Any]:
         count_projects = getattr(projects, "count", None)
         project_count = count_projects() if callable(count_projects) else len(projects.list())
+        reasoning_efforts = settings.supported_reasoning_efforts()
         return {
             "status": "ok",
             "llm_configured": bool(settings.llm_api_key),
             "llm_model": settings.llm_model,
             "rag_backend": settings.rag_backend,
             "llm_context_window_tokens": max(1, settings.llm_context_window_tokens),
+            "llm_reasoning_efforts": list(reasoning_efforts),
+            "llm_reasoning_effort_options": [
+                {
+                    "value": effort,
+                    **REASONING_EFFORT_METADATA[effort],
+                }
+                for effort in reasoning_efforts
+            ],
+            "llm_reasoning_effort_default": settings.default_reasoning_effort(),
+            "llm_reasoning_effort_source": "configured",
             "project_count": project_count,
         }
 
@@ -1699,9 +1740,8 @@ def create_app(
                 f"请先用 get_project 读取项目。\n\n用户问题：{request.message}"
             )
             content = _project_chat_content(request.message, request.project_id, project.revision)
-        if "agent" not in agent_holder:
-            agent_holder["agent"] = build_agent(settings)
-        result = agent_holder["agent"].invoke(
+        agent = chat_agent(request, settings)
+        result = agent.invoke(
             {"messages": [*messages, {"role": "user", "content": content}]}
         )
         output_messages = list(result["messages"])
@@ -1734,9 +1774,7 @@ def create_app(
                 f"当前 project_id 是 {request.project_id}，revision 是 {project.revision}。"
                 f"请先用 get_project 读取项目。\n\n用户问题：{request.message}"
             )
-        if "agent" not in agent_holder:
-            agent_holder["agent"] = build_agent(settings)
-        agent = agent_holder["agent"]
+        agent = chat_agent(request, settings)
         if request.project_id:
             project = projects.get(request.project_id)
             content = _project_chat_content(request.message, request.project_id, project.revision)

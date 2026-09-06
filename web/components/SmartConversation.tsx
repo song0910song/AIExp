@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
   Bug,
@@ -17,6 +17,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "@/lib/api";
 import { unavailableContextUsage } from "@/lib/context-usage";
+import { defaultReasoningEffort, reasoningOptionsForHealth } from "@/lib/reasoning";
 import type {
   AgentPlanStep,
   AgentStepStatus,
@@ -26,6 +27,7 @@ import type {
   ContextUsage,
   Health,
   Project,
+  ReasoningEffort,
 } from "@/lib/types";
 import { ChatComposer } from "./ChatComposer";
 import { Notice } from "./ui";
@@ -273,6 +275,13 @@ function ClarificationCard({
 }
 
 export function SmartConversation({ project, health, onProject }: { project: Project; health: Health | null; onProject: (project: Project) => void }) {
+  const reasoningOptions = useMemo(() => reasoningOptionsForHealth(health), [
+    health?.llm_reasoning_effort_options,
+    health?.llm_reasoning_efforts,
+  ]);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(() => (
+    defaultReasoningEffort(health, reasoningOptions)
+  ));
   const [messages, setMessages] = useState<Message[]>([]);
   const [sessionId, setSessionId] = useState<string | undefined>();
   const [draft, setDraft] = useState("");
@@ -290,6 +299,15 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
   const transcriptRef = useRef<HTMLDivElement>(null);
   const sessionStorageKey = `lighting-smart-session:${project.project_id}`;
   const clarificationStorageKey = `lighting-clarification:${project.project_id}`;
+  const reasoningStorageKey = `lighting-reasoning-effort:${health?.llm_model ?? "default"}`;
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(reasoningStorageKey) as ReasoningEffort | null;
+    const fallback = defaultReasoningEffort(health, reasoningOptions);
+    const selected = stored && reasoningOptions.some((option) => option.value === stored) ? stored : fallback;
+    setReasoningEffort(selected);
+    if (selected !== stored) window.localStorage.setItem(reasoningStorageKey, selected);
+  }, [health, reasoningOptions, reasoningStorageKey]);
 
   useEffect(() => {
     let active = true;
@@ -351,6 +369,12 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
       window.localStorage.setItem("lighting-debug-open", String(next));
       return next;
     });
+  }
+
+  function updateReasoningEffort(value: ReasoningEffort) {
+    if (!reasoningOptions.some((option) => option.value === value)) return;
+    setReasoningEffort(value);
+    window.localStorage.setItem(reasoningStorageKey, value);
   }
 
   async function send(providedContent?: string) {
@@ -440,6 +464,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
         session_id: sessionId,
         project_id: project.project_id,
         debug: debugOpen,
+        reasoning_effort: reasoningEffort,
       }, {
         onStart: (newSessionId) => { setSessionId(newSessionId); window.localStorage.setItem(sessionStorageKey, newSessionId); },
         onPlan: (nextSteps) => {
@@ -554,8 +579,11 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
             disabled={!health?.llm_configured || restoring || busy || uploading || Boolean(clarification)}
             usage={contextUsage}
             model={health?.llm_model}
+            reasoningEffort={reasoningEffort}
+            reasoningOptions={reasoningOptions}
             placeholder={clarification ? "请先完成上方问询，再继续。" : "给照明设计助手发送消息"}
             onDraftChange={setDraft}
+            onReasoningEffortChange={updateReasoningEffort}
             onAttachmentsChange={setAttachments}
             onRemoveAttachment={(file) => setAttachments((current) => current.filter((item) => item !== file))}
             onSubmit={() => void send()}

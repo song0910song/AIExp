@@ -8,7 +8,7 @@
 - 资料入库与检索：使用 Chroma 向量数据库管理 `.md`、`.txt`、`.docx`、`.pdf` 的语义检索；扫描 PDF 会提交给已配置的 PaddleOCR 作业端点。保留原文片段及定位信息。
 - 确定性预计算：流明法 `N = E × A / (Φ × UF × MF)`，输出输入条件、假设与局限；规则校核只比较显式、带证据来源的阈值。
 - CAD 平面图：支持上传 `.dxf`，并在本机安装 ODA File Converter 时支持 `.dwg`；提取单位、边界、文字标注、闭合房间边界与 `DLX_LUM` 灯具符号候选。经确认的边界会将面积、长宽写入版本化任务书，供后续计算与选型使用。
-- 灯具坐标阶段 1：上传 PDF DIALux 报告后，系统读取报告明确打印的 X/Y/Z/安装高度，与 DXF 灯具符号按型号索引和坐标匹配，保存逐灯来源、二维相似变换、数量/型号一致性和坐标残差；结果可在概览页查看平面叠加和位置表。未提供照明用途或回路证据时，类别保持未分类。
+- 灯具坐标阶段 1：上传 PDF DIALux 报告后，系统读取报告明确打印的 X/Y/Z/安装高度，与 DXF 灯具符号按型号索引和坐标匹配，保存逐灯来源、二维相似变换、数量/型号一致性和坐标残差；结果可在工作区的“灯具信息”页查看平面叠加和位置表。未提供照明用途或回路证据时，类别保持未分类。
 - DIALux Luminaire Finder：搜索 JSON 列表、补取产品详情页、标准化型号/品牌/功率/IP/详情链接/ULD 与配光下载标记，并声明字段缺失。
 - 交付草稿：可生成包含证据、输入、计算、规则状态、候选灯具、待确认事项与人工复核声明的 Markdown 报告，以及 DIALux evo 仿真交接包；任务包和配光文件只使用项目中明确确认的最终灯具。
 - `create_agent`：提供项目、检索、计算、校核、灯具查询和 DIALux 交接包工具。没有 `LIGHTING_LLM_API_KEY` 时，离线命令仍可正常使用。
@@ -30,7 +30,9 @@ $env:LIGHTING_LLM_MODEL = "deepseek-v4-flash"  # 可选
 `$env:LIGHTING_EMBEDDING_LOCAL_FILES_ONLY = "false"`。默认缓存目录为项目根目录的
 `.model-cache`，可用 `LIGHTING_EMBEDDING_CACHE_FOLDER` 覆盖。
 
-可选配置项：`LIGHTING_LLM_BASE_URL`、`LIGHTING_LLM_TEMPERATURE`、`LIGHTING_LLM_CONTEXT_WINDOW_TOKENS`（默认 `1000000`，用于模型实际返回 token 的窗口占用比例）、`DIALUX_BASE_URL`、`DIALUX_TIMEOUT_SECONDS`、`PADDLEOCR_API_URL`、`PADDLEOCR_MODEL`、`PADDLEOCR_TIMEOUT_SECONDS`。聊天流会请求模型返回 usage；若所用网关不支持该字段，界面会明确显示“模型未返回用量”，不会显示估算值。
+可选配置项：`LIGHTING_LLM_BASE_URL`、`LIGHTING_LLM_TEMPERATURE`、`LIGHTING_LLM_CONTEXT_WINDOW_TOKENS`（默认 `1000000`，用于模型实际返回 token 的窗口占用比例）、`LIGHTING_LLM_REASONING_EFFORTS`（默认 `none,low,medium,high`）和 `LIGHTING_LLM_REASONING_EFFORT_DEFAULT`（默认 `medium`），以及 `DIALUX_BASE_URL`、`DIALUX_TIMEOUT_SECONDS`、`PADDLEOCR_API_URL`、`PADDLEOCR_MODEL`、`PADDLEOCR_TIMEOUT_SECONDS`。聊天流会请求模型返回 usage；若所用网关不支持该字段，界面会明确显示“模型未返回用量”，不会显示估算值。
+
+当前 `agnes-2.5-flash` 网关实测接受 `none`、`low`、`medium`、`high` 四档，拒绝 `minimal` 和 `xhigh`。前端的“思考强度”选择会将所选档位透传为 `reasoning_effort`；较高档位通常会消耗更多推理 token，但不会把模型内部思维内容展示给浏览器。更换模型或网关时，请按其兼容协议覆盖上述两个环境变量。
 
 ## 快速开始
 
@@ -58,6 +60,8 @@ npm run dev        # 自动拉起后端并等待 /api/health 就绪后再启动�
 ```
 
 点击“新建照明项目”后，先选择项目文件夹，再填写项目条件并创建。选择已有内容的文件夹是允许的；若该文件夹已经是本系统的工作区，将直接重新打开其中的项目而不会覆盖任务书。
+
+进入项目的“智能对话”页后，输入区右侧的“思考强度”菜单可切换当前模型支持的推理档位；选择会按模型保存在浏览器中，并随下一轮请求发送。
 
 也可手动先启动后端（脚本检测到后端已就绪会直接复用）：
 

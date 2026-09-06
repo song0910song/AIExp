@@ -56,6 +56,7 @@ SYSTEM_PROMPT = """你是室内照明设计顾问与流程编排者。
 SYSTEM_PROMPT += "\nEvidence scope: when a current project_id is available, pass it to search_evidence so results combine global knowledge with that project's private documents. Never expose one project's documents to another project.\n"
 SYSTEM_PROMPT += """
 Lighting groups are mandatory. Divide the design by concrete rooms, zones, or functional regions. Every group must carry a region name, group name, area, mounting-point height above finished floor, target illuminance, and confirmation status. The mounting-point height is the height to the luminaire mounting or suspension point, not a guessed room height. Extract candidate values only from user chat, approved project documents/PDF/Word evidence, or explicit CAD/DXF text/layer/block metadata. Never infer an unmentioned height from common practice. When height or region evidence conflicts or is missing, call ask_user. Save only user-confirmed groups with update_lighting_groups. Run calculate_preliminary_lighting with one CalculationInput per confirmed group, including group_id and mounting_height_m. Search luminaires with lighting_group_id so each search is tied to one group. Assign final luminaires with group_assignments when calling select_luminaires.
+If calculate_preliminary_lighting returns status=needs_clarification, do not retry it with guessed values and do not present the raw tool error. Call ask_user with the returned missing_fields (especially luminaire luminous flux in lm and power in W), or first select/read a saved luminaire with complete values, then stop and wait for confirmation.
 """
 # Module-level hook so the shared agent can report SDK-level model retries
 # (429 / 5xx / connection errors) back to the active request. LangChain runs
@@ -108,6 +109,7 @@ def build_agent(settings: Settings | None = None) -> Any:
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
         temperature=settings.llm_temperature,
+        reasoning_effort=settings.llm_reasoning_effort,
         timeout=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,
         stream_usage=True,
