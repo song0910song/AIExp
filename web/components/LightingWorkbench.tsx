@@ -7,7 +7,6 @@ import {
   Database,
   FileText,
   FolderOpen,
-  Lightbulb,
   LayoutDashboard,
   Menu,
   MessageSquareText,
@@ -20,7 +19,6 @@ import { api } from "@/lib/api";
 import type { Health, Project, Section } from "@/lib/types";
 import { ConversationPanel } from "./ConversationPanel";
 import { CreateProjectModal } from "./CreateProjectModal";
-import { LayoutReviewPanel } from "./LayoutReviewPanel";
 import { OverviewPanel } from "./OverviewPanel";
 import { KnowledgeBasePanel } from "./KnowledgeBasePanel";
 import { BusyButton, Modal, Notice } from "./ui";
@@ -28,7 +26,6 @@ import { BusyButton, Modal, Notice } from "./ui";
 const navigation: Array<{ section: Section; label: string; icon: typeof LayoutDashboard }> = [
   { section: "chat", label: "智能对话", icon: MessageSquareText },
   { section: "overview", label: "项目概览", icon: LayoutDashboard },
-  { section: "luminaires", label: "灯具信息", icon: Lightbulb },
   { section: "knowledge", label: "资料入库", icon: FileText },
 ];
 
@@ -245,8 +242,6 @@ export function LightingWorkbench() {
             </section>
           ) : section === "overview" ? (
             <OverviewPanel project={project} onStartAgent={() => navigate("chat")} />
-          ) : section === "luminaires" ? (
-            <LayoutReviewPanel project={project} />
           ) : (
             <ConversationPanel key={project.project_id} project={project} health={health} onProject={acceptProject} />
           )}

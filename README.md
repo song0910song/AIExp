@@ -7,8 +7,7 @@
 - 版本化 `ProjectState`：设计任务书、证据、计算、规则校核、候选灯具与待确认事项存放在 `data/projects/`，写入时进行 revision 冲突检查。
 - 资料入库与检索：使用 Chroma 向量数据库管理 `.md`、`.txt`、`.docx`、`.pdf` 的语义检索；扫描 PDF 会提交给已配置的 PaddleOCR 作业端点。保留原文片段及定位信息。
 - 确定性预计算：流明法 `N = E × A / (Φ × UF × MF)`，输出输入条件、假设与局限；规则校核只比较显式、带证据来源的阈值。
-- CAD 平面图：支持上传 `.dxf`，并在本机安装 ODA File Converter 时支持 `.dwg`；提取单位、边界、文字标注、闭合房间边界与 `DLX_LUM` 灯具符号候选。经确认的边界会将面积、长宽写入版本化任务书，供后续计算与选型使用。
-- 灯具坐标阶段 1：上传 PDF DIALux 报告后，系统读取报告明确打印的 X/Y/Z/安装高度，与 DXF 灯具符号按型号索引和坐标匹配，保存逐灯来源、二维相似变换、数量/型号一致性和坐标残差；结果可在工作区的“灯具信息”页查看平面叠加和位置表。未提供照明用途或回路证据时，类别保持未分类。
+- CAD 平面图：支持上传 `.dxf`，并在本机安装 ODA File Converter 时支持 `.dwg`；提取单位、边界、文字标注和闭合房间边界。经确认的边界会将面积、长宽写入版本化任务书，供后续计算与选型使用。
 - DIALux Luminaire Finder：搜索 JSON 列表、补取产品详情页、标准化型号/品牌/功率/IP/详情链接/ULD 与配光下载标记，并声明字段缺失。
 - 交付草稿：可生成包含证据、输入、计算、规则状态、候选灯具、待确认事项与人工复核声明的 Markdown 报告，以及 DIALux evo 仿真交接包；任务包和配光文件只使用项目中明确确认的最终灯具。
 - `create_agent`：提供项目、检索、计算、校核、灯具查询和 DIALux 交接包工具。没有 `LIGHTING_LLM_API_KEY` 时，离线命令仍可正常使用。
@@ -46,7 +45,6 @@ uv run python main.py search-luminaires "嵌入式 LED 筒灯" --target-cct-k 40
 uv run python main.py create-dialux-task <project_id> --revision 1
 uv run python main.py import-dialux-result <project_id> --revision 1 --handoff-id <handoff_id> --maintained-lx 750
 uv run python main.py generate-report <project_id> --revision 1
-uv run python main.py analyze-layout <project_id> .\report.pdf --revision 1
 uv run python main.py chat "为刚才的会议室建立选灯条件"
 uv run python main.py chat --interactive
 ```
@@ -106,8 +104,6 @@ GET /api/projects/{project_id}/dialux-results/{run_id}
 ```
 
 有关系统设计与 API 字段，见 [照明设计智能体方案](docs/照明设计智能体方案.md) 和 [DIALux API 文档](docs/DIALux-Luminaire-Finder-API.md)。
-
-灯具坐标审查接口为 `POST /api/projects/{project_id}/layout-analysis`，上传 `report_file`（PDF）；项目尚未导入平面图时，可在同一请求附带 `cad_file`。查询结果使用 `GET /api/projects/{project_id}/layout-analysis`。该结果是位置与身份一致性审查，不是照度或 UGR 合格结论。
 
 ## 验证
 

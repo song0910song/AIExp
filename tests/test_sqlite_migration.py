@@ -24,6 +24,33 @@ def test_project_store_imports_legacy_json_and_keeps_revision_history(tmp_path) 
     assert (tmp_path / "lighting_design.sqlite3").exists()
 
 
+def test_project_state_ignores_removed_layout_fields_in_legacy_payload() -> None:
+    legacy = {
+        "project_id": "b" * 32,
+        "revision": 3,
+        "brief": {"project_name": "Legacy layout project"},
+        "floor_plan": {
+            "asset": {
+                "source_name": "legacy.dxf",
+                "source_type": "dxf",
+                "storage_path": "plans/legacy.dxf",
+                "sha256": "0" * 64,
+                "size_bytes": 0,
+            },
+            "drawing_units": "m",
+            "meters_per_drawing_unit": 1.0,
+            "luminaire_placements": [{"placement_id": "L-001"}],
+        },
+        "layout_analysis": {"analysis_id": "legacy-analysis"},
+    }
+
+    state = ProjectState.model_validate(legacy)
+
+    payload = state.model_dump(mode="json")
+    assert "layout_analysis" not in payload
+    assert "luminaire_placements" not in payload["floor_plan"]
+
+
 def test_rag_imports_legacy_json_with_stable_evidence_ids(tmp_path) -> None:
     legacy_index = tmp_path / "index.json"
     legacy_index.write_text(
