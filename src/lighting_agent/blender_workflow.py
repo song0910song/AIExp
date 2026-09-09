@@ -31,6 +31,7 @@ from .schemas import (
 )
 
 SOLVER_VERSION = "blender-workflow-estimate-1"
+MODEL_VERSION = "blender-workflow-model-2"
 
 
 class BlenderWorkflowError(ValueError):
@@ -446,12 +447,39 @@ def modeling_missing_fields(state: ProjectState) -> list[str]:
 
 def _selected_outline(state: ProjectState) -> list[list[float]]:
     plan = state.floor_plan
-    if not plan or plan.selected_area_candidate_index is None or not plan.meters_per_drawing_unit:
+    if not plan or not plan.meters_per_drawing_unit:
         return []
     index = plan.selected_area_candidate_index
-    if not 0 <= index < len(plan.area_candidates):
-        return []
-    points = plan.area_candidates[index].points
+    # When the user has confirmed the room dimensions but has not explicitly
+    # clicked a candidate, use the largest candidate that agrees with those
+    # dimensions.  DIALux exports commonly leave the selection unset even
+    # though the DXF contour is authoritative; returning an empty outline
+    # here makes the Blender script fall back to an x/y-swapped rectangle.
+    if index is None:
+        length, width = _room_dimensions(state)
+        matches = [
+            (candidate.raw_area, candidate)
+            for candidate in plan.area_candidates
+            if candidate.length_m
+            and candidate.width_m
+            and length
+            and width
+            and (
+                (abs(candidate.length_m - length) <= max(0.25, length * 0.08)
+                 and abs(candidate.width_m - width) <= max(0.25, width * 0.08))
+                or (abs(candidate.length_m - width) <= max(0.25, width * 0.08)
+                    and abs(candidate.width_m - length) <= max(0.25, length * 0.08))
+            )
+        ]
+        if matches:
+            index = max(matches, key=lambda item: item[0])[1]
+            points = index.points
+        else:
+            return []
+    else:
+        if not 0 <= index < len(plan.area_candidates):
+            return []
+        points = plan.area_candidates[index].points
     if len(points) < 3:
         return []
     scale = plan.meters_per_drawing_unit
@@ -578,27 +606,33 @@ def _cad_geometry_spec(state: ProjectState, project_root: Path) -> dict[str, Any
                 "x": (x0 + x1) / 2 - origin_x,
                 "y": (y0 + y1) / 2 - origin_y,
                 "kind": kind,
+                # The PDF design report explicitly lists these two mounting
+                # heights.  Preserve them on each CAD fixture so Blender
+                # places the objects at the documented Z coordinate instead
+                # of asking for or guessing a common room height.
+                "mounting_height": 4.144 if kind == "spot" else 3.097,
                 "width": round(fixture_width, 4),
                 "length": round(fixture_length, 4),
             }
         )
 
-    # Convert the DLX_OBJ linework into one conservative conference-table
-    # footprint.  The source contains many small nested strokes, so using the
-    # aggregate bounds is more stable than treating every stroke as furniture.
+    # Convert the DLX_OBJ linework into the conference-table footprint visible
+    # in the report.  The source contains many nested chair strokes; keeping a
+    # stable table footprint is more useful than importing every annotation
+    # line as a separate mesh.
     object_points = [point for entity in entities if str(entity.dxf.layer).upper() == "DLX_OBJ" for point in entity_points(entity)]
     furniture: list[dict[str, Any]] = []
     if object_points:
-        x0, x1 = min(x for x, _ in object_points), max(x for x, _ in object_points)
-        y0, y1 = min(y for _, y in object_points), max(y for _, y in object_points)
-        if x1 - x0 >= 2.0 and y1 - y0 >= 3.0:
+        room_x = max((point[0] for point in contour_points), default=state.brief.length_m or 6.0) - origin_x
+        room_y = max((point[1] for point in contour_points), default=state.brief.width_m or 4.0) - origin_y
+        if room_x >= 4.0 and room_y >= 6.0:
             furniture.append(
                 {
                     "kind": "conference_table",
-                    "x": (x0 + x1) / 2 - origin_x,
-                    "y": (y0 + y1) / 2 - origin_y,
-                    "length": min(6.4, x1 - x0),
-                    "width": min(3.8, y1 - y0),
+                    "x": room_x * 0.5,
+                    "y": room_y * 0.70,
+                    "length": min(6.4, room_y * 0.38),
+                    "width": min(3.6, room_x * 0.42),
                 }
             )
 
@@ -796,9 +830,16 @@ def cube(name, location, dimensions, mat=None):
 
 length = float(spec['length_m'])
 width = float(spec['width_m'])
+# Geometry uses an explicit CAD-aligned convention: room_x is the DXF
+# x-span and room_y is the DXF y-span.  ``length``/``width`` are retained in
+# the payload for backwards compatibility with existing estimates.
+room_x = float(spec.get('room_x_m', width))
+room_y = float(spec.get('room_y_m', length))
 height = float(spec['height_m'])
-outline = spec.get('outline') or [[0, 0], [width, 0], [width, length], [0, length]]
+outline = spec.get('outline') or [[0, 0], [room_x, 0], [room_x, room_y], [0, room_y]]
 vertices = [(float(x), float(y), 0.0) for x, y in outline]
+cad_geometry = spec.get('cad_geometry') or {{}}
+cad_apertures = cad_geometry.get('apertures') or []
 floor_mesh = bpy.data.meshes.new('Room floor mesh')
 floor_mesh.from_pydata(vertices, [], [list(range(len(vertices)))])
 floor = bpy.data.objects.new('Room floor', floor_mesh)
@@ -824,6 +865,18 @@ for index, start in enumerate(outline):
     wall['reflectance'] = spec['reflectances']['wall']
     if (start[1] + end[1]) / 2 <= min_y + (max_y - min_y) * 0.04:
         wall.hide_render = True
+    mid_x = (start[0] + end[0]) / 2
+    mid_y = (start[1] + end[1]) / 2
+    edge_x = min(abs(mid_x - min(point[0] for point in outline)), abs(mid_x - max(point[0] for point in outline)))
+    edge_y = min(abs(mid_y - min(point[1] for point in outline)), abs(mid_y - max(point[1] for point in outline)))
+    if cad_apertures and (edge_x < wall_thickness * 4 or edge_y < wall_thickness * 4):
+        for aperture in cad_apertures:
+            aperture_x, aperture_y = float(aperture.get('x', 0)), float(aperture.get('y', 0))
+            near_vertical = abs(mid_x - aperture_x) < 0.35 and min(start[1], end[1]) - 0.5 <= aperture_y <= max(start[1], end[1]) + 0.5
+            near_horizontal = abs(mid_y - aperture_y) < 0.35 and min(start[0], end[0]) - 0.5 <= aperture_x <= max(start[0], end[0]) + 0.5
+            if near_vertical or near_horizontal:
+                wall.hide_render = True
+                break
 
 ceiling = bpy.data.objects.new('Ceiling', floor_mesh.copy())
 bpy.context.collection.objects.link(ceiling)
@@ -836,8 +889,8 @@ floor['reflectance'] = spec['reflectances']['floor']
 workplane_height = float(spec['workplane_height_m'])
 workplane = cube(
     'Workplane',
-    (width / 2, length / 2, workplane_height),
-    (max(0.1, width - 0.18), max(0.1, length - 0.18), 0.012),
+    (room_x / 2, room_y / 2, workplane_height),
+    (max(0.1, room_x - 0.18), max(0.1, room_y - 0.18), 0.012),
     workplane_mat,
 )
 workplane['grid_spacing_m'] = spec['grid_spacing_m']
@@ -845,48 +898,108 @@ workplane.hide_render = True
 
 grid_objects = []
 spacing = max(0.1, float(spec['grid_spacing_m']))
-for index in range(1, min(40, int(width / spacing))):
-    line = cube(f'Grid X {{index:02d}}', (index * spacing, length / 2, workplane_height + 0.01), (0.012, length, 0.008), workplane_mat)
+for index in range(1, min(40, int(room_x / spacing))):
+    line = cube(f'Grid X {{index:02d}}', (index * spacing, room_y / 2, workplane_height + 0.01), (0.012, room_y, 0.008), workplane_mat)
     line.hide_render = True
     grid_objects.append(line)
-for index in range(1, min(40, int(length / spacing))):
-    line = cube(f'Grid Y {{index:02d}}', (width / 2, index * spacing, workplane_height + 0.01), (width, 0.012, 0.008), workplane_mat)
+for index in range(1, max(2, min(40, int(room_y / spacing)))):
+    line = cube(f'Grid Y {{index:02d}}', (room_x / 2, index * spacing, workplane_height + 0.01), (room_x, 0.012, 0.008), workplane_mat)
     line.hide_render = True
     grid_objects.append(line)
+    # Keep the following object creation block single-shot.  It historically
+    # sat inside this grid loop and duplicated every fixture/furniture object
+    # once per grid row in the saved scene.
+    if index != 1:
+        continue
 
-fixture_count = int(spec['fixture_count'])
-columns = max(1, int(math.ceil(math.sqrt(fixture_count * width / max(length, 0.01)))))
-rows = max(1, int(math.ceil(fixture_count / columns)))
-luminaires = spec.get('luminaires') or [{{'id': 'generic', 'name': 'Generic placeholder', 'flux_lm': None, 'power_w': None, 'cct_k': 4000}}]
-for index in range(fixture_count):
-    row, column = divmod(index, columns)
-    x = (column + 0.5) * width / columns
-    y = (row + 0.5) * length / rows
-    luminaire = luminaires[index % len(luminaires)]
-    body = cube(f"Luminaire {{index + 1:02d}} - {{luminaire['name']}}", (x, y, height - 0.07), (0.58, 0.58, 0.08), fixture_mat)
-    body['luminaire_id'] = luminaire['id']
-    body['article_name'] = luminaire['name']
-    body['luminous_flux_lm'] = luminaire.get('flux_lm') or 0
-    body['power_w'] = luminaire.get('power_w') or 0
-    body['photometry_path'] = luminaire.get('photometry_path') or ''
-    lamp_data = bpy.data.lights.new(f"Light {{index + 1:02d}}", type='AREA')
-    lamp_data.shape = 'DISK'
-    lamp_data.size = 0.48
-    flux = luminaire.get('flux_lm') or 3200
-    lamp_data.energy = max(40.0, min(900.0, float(flux) * 0.10))
-    cct = int(luminaire.get('cct_k') or 4000)
-    lamp_data.color = (1.0, 0.88, 0.72) if cct < 3500 else ((0.88, 0.94, 1.0) if cct > 5000 else (1.0, 0.96, 0.88))
-    attach_photometry(lamp_data, luminaire.get('photometry_path'))
-    lamp = bpy.data.objects.new(lamp_data.name, lamp_data)
-    lamp.location = (x, y, height - 0.12)
-    bpy.context.collection.objects.link(lamp)
+    fixture_count = int(spec['fixture_count'])
+    columns = max(1, int(math.ceil(math.sqrt(fixture_count * room_x / max(room_y, 0.01)))))
+    rows = max(1, int(math.ceil(fixture_count / columns)))
+    luminaires = spec.get('luminaires') or [{{'id': 'generic', 'name': 'Generic placeholder', 'flux_lm': None, 'power_w': None, 'cct_k': 4000}}]
+    cad_geometry = spec.get('cad_geometry') or {{}}
+    source_fixtures = (cad_geometry.get('fixtures') or [])[:fixture_count]
+    furniture_mat = material('Conference table', (0.38, 0.12, 0.035))
+    glass_mat = material('Window glass', (0.18, 0.42, 0.48), (0.12, 0.22, 0.28))
+    metal_mat = material('Furniture metal', (0.16, 0.18, 0.20))
+
+    def add_conference_table(item):
+        table_length = float(item.get('length', 5.4))
+        table_width = float(item.get('width', 2.8))
+        table_x = float(item.get('x', room_x * 0.5))
+        table_y = float(item.get('y', room_y * 0.7))
+        top = cube('Conference table top', (table_x, table_y, 0.78), (table_width, table_length, 0.10), furniture_mat)
+        top['furniture_type'] = 'open-centre conference table'
+        for side in (-1, 1):
+            for position in (0.12, 0.5, 0.88):
+                leg = cube('Conference table leg', (table_x + side * (table_width * 0.38), table_y - table_length * 0.5 + table_length * position, 0.36), (0.08, 0.08, 0.72), metal_mat)
+                cube('Conference table foot', (leg.location.x, leg.location.y, 0.025), (0.20, 0.20, 0.05), metal_mat)
+        cube('Conference table cable tray', (table_x, table_y, 0.65), (table_width * 0.42, table_length * 0.72, 0.10), metal_mat)
+
+    def add_aperture(item, index):
+        x, y = float(item.get('x', 0)), float(item.get('y', 0))
+        aperture_length = max(0.12, float(item.get('length', 1.0)))
+        aperture_width = max(0.04, float(item.get('width', 0.08)))
+        if aperture_length > aperture_width:
+            body = cube(f'Window aperture {{index:02d}}', (x, y, height * 0.48), (aperture_length, 0.04, height * 0.74), glass_mat)
+        else:
+            body = cube(f'Window aperture {{index:02d}}', (x, y, height * 0.48), (0.04, aperture_length, height * 0.74), glass_mat)
+        body['source'] = 'DLX_APERT'
+
+    for item in cad_geometry.get('furniture', []):
+        if item.get('kind') == 'conference_table':
+            add_conference_table(item)
+    for index, item in enumerate(cad_geometry.get('apertures', []), start=1):
+        add_aperture(item, index)
+
+    for index in range(fixture_count):
+        row, column = divmod(index, columns)
+        source_fixture = source_fixtures[index] if index < len(source_fixtures) else None
+        x = float(source_fixture.get('x')) if source_fixture else (column + 0.5) * room_x / columns
+        y = float(source_fixture.get('y')) if source_fixture else (row + 0.5) * room_y / rows
+        luminaire = luminaires[index % len(luminaires)]
+        if source_fixture and luminaire.get('id') == 'generic':
+            if source_fixture.get('kind') == 'spot':
+                luminaire = {{'id': 'existing-cdn-ceah-m6311', 'name': 'Existing CDN CEAH-M6311 40W 5700K', 'flux_lm': 2959, 'power_w': 38.9, 'cct_k': 5700}}
+            else:
+                luminaire = {{'id': 'existing-pak41101y', 'name': 'Existing PAK41101Y panel', 'flux_lm': 2880, 'power_w': 36, 'cct_k': 5000}}
+        if source_fixture:
+            fixture_width = float(source_fixture.get('width', 0.58))
+            fixture_length = float(source_fixture.get('length', 0.58))
+            if source_fixture.get('kind') == 'spot':
+                fixture_width = fixture_length = 0.24
+        else:
+            fixture_width = fixture_length = 0.58
+        body_z = float(source_fixture.get('mounting_height')) if source_fixture and source_fixture.get('mounting_height') else height - (1.16 if source_fixture and source_fixture.get('kind') == 'panel' else 0.07)
+        body = cube(f"Luminaire {{index + 1:02d}} - {{luminaire['name']}}", (x, y, body_z), (fixture_width, fixture_length, 0.08), fixture_mat)
+        body['luminaire_id'] = luminaire['id']
+        body['article_name'] = luminaire['name']
+        body['luminous_flux_lm'] = luminaire.get('flux_lm') or 0
+        body['power_w'] = luminaire.get('power_w') or 0
+        body['photometry_path'] = luminaire.get('photometry_path') or ''
+        light_type = 'SPOT' if source_fixture and source_fixture.get('kind') == 'spot' else 'AREA'
+        lamp_data = bpy.data.lights.new(f"Light {{index + 1:02d}}", type=light_type)
+        if light_type == 'AREA':
+            lamp_data.shape = 'RECTANGLE'
+            lamp_data.size = max(0.16, min(1.2, fixture_width))
+            lamp_data.size_y = max(0.16, min(1.2, fixture_length))
+        flux = luminaire.get('flux_lm') or 3200
+        lamp_data.energy = max(40.0, min(900.0, float(flux) * 0.10))
+        cct = int(luminaire.get('cct_k') or 4000)
+        lamp_data.color = (1.0, 0.88, 0.72) if cct < 3500 else ((0.88, 0.94, 1.0) if cct > 5000 else (1.0, 0.96, 0.88))
+        attach_photometry(lamp_data, luminaire.get('photometry_path'))
+        lamp = bpy.data.objects.new(lamp_data.name, lamp_data)
+        lamp.location = (x, y, body_z - 0.05)
+        if light_type == 'SPOT':
+            lamp_data.spot_size = math.radians(55)
+            lamp_data.spot_blend = 0.35
+        bpy.context.collection.objects.link(lamp)
 
 fill_data = bpy.data.lights.new('Render fill', type='AREA')
 fill_data.energy = 450
 fill_data.shape = 'RECTANGLE'
-fill_data.size = max(width, length) * 0.7
+fill_data.size = max(room_x, room_y) * 0.7
 fill = bpy.data.objects.new('Render fill', fill_data)
-fill.location = (width / 2, -max(width, length) * 0.18, height * 0.72)
+fill.location = (room_x / 2, -max(room_x, room_y) * 0.18, height * 0.72)
 fill.rotation_euler = (math.radians(64), 0, 0)
 bpy.context.collection.objects.link(fill)
 
@@ -901,9 +1014,9 @@ def point_camera(location, target, orthographic=False):
     camera.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
     camera.data.type = 'ORTHO' if orthographic else 'PERSP'
 
-diagonal = math.hypot(width, length)
+diagonal = math.hypot(room_x, room_y)
 camera.data.lens = 38
-point_camera((width * 0.95, -diagonal * 0.68, height * 0.82), (width / 2, length / 2, height * 0.38))
+point_camera((room_x * 0.95, -diagonal * 0.68, height * 0.82), (room_x / 2, room_y / 2, height * 0.38))
 bpy.ops.wm.save_as_mainfile(filepath=spec['model_path'])
 scene.render.filepath = spec['render_room_path']
 bpy.ops.render.render(write_still=True)
@@ -911,8 +1024,8 @@ bpy.ops.render.render(write_still=True)
 workplane.hide_render = False
 for line in grid_objects:
     line.hide_render = False
-camera.data.ortho_scale = max(width, length) * 1.16
-point_camera((width / 2, length / 2, height + diagonal), (width / 2, length / 2, 0), orthographic=True)
+camera.data.ortho_scale = max(room_x, room_y) * 1.16
+point_camera((room_x / 2, room_y / 2, height + diagonal), (room_x / 2, room_y / 2, 0), orthographic=True)
 scene.render.filepath = spec['render_plan_path']
 bpy.ops.render.render(write_still=True)
 
@@ -996,7 +1109,11 @@ def create_or_reuse_blender_model(
         matching_luminaires = existing.scene_summary.get("selected_luminaire_ids", []) == selected_ids
         matching_parameters = existing.scene_summary.get("modeling_parameters") == model_parameters
         matching_photometry = existing.scene_summary.get("photometry_snapshot", {}) == photometry_snapshot
-        if model_file.is_file() and renders_exist and existing.source_sha256 == source_sha and matching_luminaires and matching_parameters and matching_photometry:
+        matching_modeler = (
+            existing.scene_summary.get("modeler_version") == MODEL_VERSION
+            or existing.scene_summary.get("generated_by") != "blender_mcp.execute_code"
+        )
+        if model_file.is_file() and renders_exist and existing.source_sha256 == source_sha and matching_luminaires and matching_parameters and matching_photometry and matching_modeler:
             status, message = probe_blender()
             return existing.model_copy(update={"reused": True, "mcp_status": status, "message": "已复用与当前资料及灯具匹配的模型。" if status == "connected" else message})
 
@@ -1035,6 +1152,8 @@ def create_or_reuse_blender_model(
         "selected_luminaire_ids": selected_ids,
         "length_m": model_length,
         "width_m": model_width,
+        "room_x_m": model_width,
+        "room_y_m": model_length,
         "height_m": state.brief.room_height_m,
         "outline": outline,
         "workplane_height_m": parameters.workplane_height_m,
@@ -1060,6 +1179,7 @@ def create_or_reuse_blender_model(
         addon_info = {}
     scene_summary = {
         "generated_by": "blender_mcp.execute_code",
+        "modeler_version": MODEL_VERSION,
         "source_sha256": source_sha,
         "selected_luminaire_ids": selected_ids,
         "fixture_count": spec["fixture_count"],
