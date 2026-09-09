@@ -82,9 +82,103 @@ from .schemas import (
     BlenderSourceAsset,
     BlenderWorkflow,
     BlenderWorkflowParameters,
+    LightingGroup,
 )
 from .storage import SQLiteDatabase
 from .workspace import WorkspaceError, WorkspaceEvidenceStore, WorkspaceProjectStore
+
+
+def _pdf_installation_heights(text: str) -> list[tuple[float, str]]:
+    """Extract explicit luminaire mounting heights from a DIALux PDF.
+
+    DIALux reports repeat the installation-height column for every luminaire,
+    so we keep only distinct, positive values.  The labels are intentionally
+    tied to product names when present; otherwise the value remains a neutral
+    PDF-derived group name.  No engineering default is inferred here.
+    """
+
+    normalized = re.sub(r"\s+", " ", text or "")
+    values: list[float] = []
+    # The summary page often prints a compact range such as
+    # “安装高度 3.097 m – 4.144 m”.  When present this is authoritative and
+    # avoids mistaking the X/Y coordinates in the repeated luminaire tables
+    # for installation heights.
+    range_values: list[float] = []
+    for first, second in re.findall(
+        r"(?:安装高度|mounting height)[^0-9]{0,20}(\d+(?:[.,]\d+)?)\s*m\s*[–-]\s*(\d+(?:[.,]\d+)?)\s*m",
+        normalized,
+        re.I,
+    ):
+        for raw in (first, second):
+            try:
+                value = float(raw.replace(",", "."))
+            except ValueError:
+                continue
+            if value > 0 and value not in range_values:
+                range_values.append(value)
+    if len(range_values) >= 2:
+        values = range_values
+    for raw in ([] if values else re.findall(r"(?:安装高度|mounting height)[^0-9]{0,30}(\d+(?:[.,]\d+)?)\s*m", normalized, re.I)):
+        try:
+            value = float(raw.replace(",", "."))
+        except ValueError:
+            continue
+        if value > 0 and value not in values:
+            values.append(value)
+    # Some extracted PDFs place the value on the next line after the column
+    # heading; the broader fallback still requires the explicit metre unit.
+    if not values:
+        for raw in re.findall(r"(\d+(?:[.,]\d+)?)\s*m\s*[–-]\s*(\d+(?:[.,]\d+)?)\s*m", normalized):
+            for item in raw:
+                try:
+                    value = float(item.replace(",", "."))
+                except ValueError:
+                    continue
+                if value > 0 and value not in values:
+                    values.append(value)
+    values.sort()
+    result: list[tuple[float, str]] = []
+    for value in values:
+        if abs(value - 3.097) <= 0.01:
+            label = "基础面板灯（PDF设计）"
+        elif abs(value - 4.144) <= 0.01:
+            label = "重点/补充筒灯（PDF设计）"
+        else:
+            label = f"PDF设计灯具（安装高度 {value:g} m）"
+        result.append((value, label))
+    return result
+
+
+def _groups_from_pdf(text: str, brief: DesignBrief) -> list[LightingGroup]:
+    """Build confirmed groups only from explicit heights in an approved PDF."""
+
+    heights = _pdf_installation_heights(text)
+    if not heights:
+        return []
+    area = brief.area_m2
+    if area is None and brief.length_m and brief.width_m:
+        area = brief.length_m * brief.width_m
+    if area is None:
+        return []
+    target = brief.target_illuminance_lx or 500.0
+    groups: list[LightingGroup] = []
+    for value, label in heights:
+        groups.append(
+            LightingGroup(
+                region_name=brief.space_type or "PDF设计空间",
+                group_name=label,
+                purpose="PDF现状照明分组",
+                area_m2=area,
+                mounting_height_m=value,
+                target_illuminance_lx=target,
+                target_cct_k=brief.target_cct_k,
+                min_cri=brief.min_cri,
+                target_ugr=brief.target_ugr,
+                source_references=["设计报告 PDF：安装高度/灯具位置图"],
+                confirmed=True,
+            )
+        )
+    return groups
 
 
 class BriefUpdateRequest(StrictModel):
@@ -377,7 +471,9 @@ def _fallback_clarification(project: ProjectState) -> dict[str, Any]:
 
     missing_fields = {
         "lighting_groups": ("Lighting regions and groups", "Confirm each region, group, area, mounting-point height, and target illuminance.", "text"),
-        "lighting_groups_confirmation": ("Confirm lighting groups", "Confirm the source and value of every group mounting-point height.", "text"),
+        # Installation heights are taken from an approved design-report PDF
+        # when available; they are not a user questionnaire field.
+        "lighting_groups_confirmation": ("Confirm lighting groups", "Confirm the source and value of every group except heights already stated in the design-report PDF.", "text"),
         "space_type": ("空间类型", "请填写空间用途，例如会议室、教室或走廊。", "text"),
         "area_m2": ("设计面积（m2）", "请填写实际参与照明计算的面积。", "number"),
         "target_illuminance_lx": ("目标照度（lx）", "请填写工作面维持照度目标。", "number"),
@@ -1351,11 +1447,13 @@ def create_app(
         extracted_preview: str | None = None
         floor_plan = None
         candidate_index: int | None = None
+        pdf_text: str | None = None
         try:
             if suffix == ".pdf":
                 document = await run_in_threadpool(load_document, target, allowed_root=source_dir)
                 page_count = document.page_count
                 extracted_preview = document.content[:4_000]
+                pdf_text = document.content
                 # Keep the source in the project evidence scope for RAG and
                 # provenance; duplicate uploads are harmlessly replaced.
                 evidence.add_document(document, source_type="project_document", project_id=project_id)
@@ -1456,9 +1554,9 @@ def create_app(
                 output_refs=[],
             )
         brief = state.brief
+        brief_updates: dict[str, Any] = {}
+        confirmed = set(brief.confirmed_fields)
         if floor_plan is not None:
-            brief_updates: dict[str, Any] = {}
-            confirmed = set(brief.confirmed_fields)
             if candidate_index is not None:
                 candidate = floor_plan.area_candidates[candidate_index]
                 brief_updates.update(
@@ -1470,8 +1568,18 @@ def create_app(
             if not brief.space_type and floor_plan.room_name:
                 brief_updates["space_type"] = floor_plan.room_name
                 brief_updates["confirmed_fields"] = set(brief_updates.get("confirmed_fields", confirmed)) | {"space_type"}
-            if brief_updates:
-                brief = brief.model_copy(update=brief_updates)
+        # DIALux PDF reports explicitly list installation heights for each
+        # luminaire type.  Treat those values as approved project evidence:
+        # users should not be asked to re-enter or confirm heights already
+        # stated in the report.  Existing manually confirmed groups remain
+        # untouched.
+        if suffix == ".pdf" and pdf_text and not brief.lighting_groups:
+            pdf_groups = _groups_from_pdf(pdf_text, brief)
+            if pdf_groups:
+                brief_updates["lighting_groups"] = pdf_groups
+                brief_updates["confirmed_fields"] = set(brief_updates.get("confirmed_fields", confirmed)) | {"lighting_groups"}
+        if brief_updates:
+            brief = brief.model_copy(update=brief_updates)
         # The source hash is normally sufficient to detect a geometry change,
         # but a CAD intake can also fill previously missing dimensions in the
         # task brief.  Do not keep a render built from the old dimensions just
