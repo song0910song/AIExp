@@ -246,6 +246,30 @@ def test_preview_calibration_matches_lumen_method_average() -> None:
     assert result.installed_power_w is None
 
 
+def test_preview_can_limit_a_partially_filled_fixture_array() -> None:
+    distribution = parse_photometry(build_rotationally_symmetric_ies(), "ies")
+    request = IlluminancePreviewRequest(
+        luminaire_id="fixture-1",
+        room_length_m=6.0,
+        room_width_m=4.0,
+        workplane_height_m=0.75,
+        mounting_height_m=2.8,
+        maintenance_factor=0.8,
+        utilization_factor=0.55,
+        total_flux_lm=2600.0,
+        fixture_rows=2,
+        fixture_columns=3,
+        fixture_count=5,
+    )
+
+    result = compute_illuminance_preview(distribution, request)
+
+    assert len(result.fixture_positions_m) == 5
+    lumen_target = 2600.0 * 5 * 0.55 * 0.8 / (6.0 * 4.0)
+    assert result.average_illuminance_lx == pytest.approx(lumen_target, rel=0.02)
+    assert result.installed_flux_lm == 13_000
+
+
 def test_preview_rejects_impossible_geometry() -> None:
     distribution = parse_photometry(build_rotationally_symmetric_ies(), "ies")
     request = IlluminancePreviewRequest(

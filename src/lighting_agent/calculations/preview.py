@@ -37,6 +37,9 @@ class IlluminancePreviewRequest(StrictModel):
     lighting_group_id: str | None = Field(default=None, min_length=8, max_length=64)
     fixture_rows: int = Field(default=2, ge=1, le=24)
     fixture_columns: int = Field(default=3, ge=1, le=24)
+    # Optional exact count for non-rectangular arrays.  Existing callers that
+    # only provide rows/columns retain the historical full-grid behavior.
+    fixture_count: int | None = Field(default=None, ge=1, le=576)
     room_length_m: float | None = Field(default=None, gt=0, le=1_000)
     room_width_m: float | None = Field(default=None, gt=0, le=1_000)
     workplane_height_m: float | None = Field(default=None, ge=0, le=10)
@@ -119,7 +122,13 @@ def compute_illuminance_preview(
             "配光数据仅覆盖部分水平角，方位插值按最近平面处理；横向不对称趋势可能失真。"
         )
 
-    fixtures = _fixture_positions(length, width, request.fixture_rows, request.fixture_columns)
+    fixtures = _fixture_positions(
+        length,
+        width,
+        request.fixture_rows,
+        request.fixture_columns,
+        request.fixture_count,
+    )
     grid_columns, xs = _evaluation_axis(width)
     grid_rows, ys = _evaluation_axis(length)
 
@@ -194,7 +203,11 @@ def compute_illuminance_preview(
 
 
 def _fixture_positions(
-    length: float, width: float, rows: int, columns: int
+    length: float,
+    width: float,
+    rows: int,
+    columns: int,
+    fixture_count: int | None = None,
 ) -> list[tuple[float, float]]:
     """Evenly distributed fixture centres avoiding wall-adjacent placement."""
 
@@ -204,7 +217,7 @@ def _fixture_positions(
         for c in range(columns):
             x = (c + 0.5) * width / columns
             positions.append((x, y))
-    return positions
+    return positions[:fixture_count] if fixture_count is not None else positions
 
 
 def _evaluation_axis(room_size: float) -> tuple[int, list[float]]:

@@ -25,6 +25,7 @@ dependencies = [
     "ezdxf>=1.4",
     "matplotlib>=3.11.1",
     "shapely>=2.1.2",
+    "reportlab>=5.0.1",
 ]
 
 [project.scripts]

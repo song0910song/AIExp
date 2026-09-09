@@ -508,6 +508,47 @@ def test_web_chat_stream_exposes_model_reported_context_usage(tmp_path, monkeypa
     } in events
 
 
+def test_context_usage_exposes_prompt_cache_read_and_write_tokens() -> None:
+    chunk = AIMessageChunk(
+        content="",
+        usage_metadata={
+            "input_tokens": 1000,
+            "output_tokens": 25,
+            "total_tokens": 1025,
+            "input_token_details": {"cache_read": 800, "cache_creation": 200},
+        },
+    )
+
+    assert web_api._context_usage_from_chunk(chunk, 1000000) == {
+        "input_tokens": 1000,
+        "output_tokens": 25,
+        "total_tokens": 1025,
+        "cached_input_tokens": 800,
+        "cache_creation_input_tokens": 200,
+        "cache_hit_ratio": 0.8,
+        "context_window_tokens": 1000000,
+        "source": "reported",
+    }
+
+
+def test_context_usage_accepts_openai_prompt_tokens_details() -> None:
+    chunk = AIMessageChunk(
+        content="",
+        response_metadata={
+            "token_usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 10,
+                "prompt_tokens_details": {"cached_tokens": 250},
+            }
+        },
+    )
+
+    usage = web_api._context_usage_from_chunk(chunk, 1000)
+    assert usage is not None
+    assert usage["cached_input_tokens"] == 250
+    assert usage["cache_hit_ratio"] == 0.5
+
+
 def test_visible_chat_chunk_accepts_provider_final_message() -> None:
     assert web_api._visible_chat_chunk(AIMessage(content="完整回答")) == "完整回答"
 

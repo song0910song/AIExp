@@ -23,6 +23,9 @@ export type ContextUsage = {
   input_tokens: number | null;
   output_tokens: number | null;
   total_tokens: number | null;
+  cached_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_hit_ratio?: number;
   context_window_tokens: number;
   source: "reported" | "unavailable";
 };
@@ -229,6 +232,7 @@ export type PhotometryPreviewRequest = {
   lighting_group_id?: string | null;
   fixture_rows: number;
   fixture_columns: number;
+  fixture_count?: number;
   room_length_m?: number | null;
   room_width_m?: number | null;
   workplane_height_m?: number | null;
@@ -305,8 +309,95 @@ export type Project = {
   selected_luminaire_ids: string[];
   luminaire_group_assignments: Record<string, string[]>;
   floor_plan: FloorPlan | null;
+  blender_workflow: BlenderWorkflow;
   open_questions: string[];
   created_at: string;
+  updated_at: string;
+};
+
+export type BlenderWorkflowNode = {
+  node_id: "source" | "model" | "photometry" | "parameters" | "estimate" | "report";
+  title: string;
+  description: string;
+  status: "pending" | "running" | "succeeded" | "blocked" | "failed";
+  message: string | null;
+  output_refs: string[];
+  updated_at: string;
+};
+
+export type BlenderSourceAsset = {
+  source_name: string;
+  source_type: "pdf" | "dxf" | "dwg";
+  storage_path: string;
+  sha256: string;
+  size_bytes: number;
+  page_count: number | null;
+  extracted_text_preview: string | null;
+  preview_paths: string[];
+  imported_at: string;
+};
+
+export type BlenderModelAsset = {
+  model_path: string;
+  source_sha256: string | null;
+  model_sha256: string | null;
+  status: "pending" | "ready" | "missing" | "failed";
+  reused: boolean;
+  blender_version: string | null;
+  mcp_status: "connected" | "unavailable" | "unknown";
+  render_paths: string[];
+  scene_summary: Record<string, unknown>;
+  message: string | null;
+  created_at: string;
+};
+
+export type BlenderWorkflowParameters = {
+  workplane_height_m: number;
+  grid_spacing_m: number;
+  grid_margin_m: number;
+  maintenance_factor: number | null;
+  utilization_factor: number | null;
+  floor_reflectance: number | null;
+  wall_reflectance: number | null;
+  ceiling_reflectance: number | null;
+  total_flux_lm: number | null;
+  selected_luminaire_ids: string[];
+  confirmed_fields: string[];
+  questions: string[];
+};
+
+export type BlenderEstimate = {
+  solver_version: string;
+  status: "succeeded" | "blocked" | "failed";
+  input_project_revision: number;
+  area_m2: number | null;
+  grid_rows: number;
+  grid_columns: number;
+  grid_x_coordinates_m: number[];
+  grid_y_coordinates_m: number[];
+  illuminance_lx: number[][];
+  average_illuminance_lx: number | null;
+  minimum_illuminance_lx: number | null;
+  maximum_illuminance_lx: number | null;
+  uniformity_u0: number | null;
+  heatmap_path: string | null;
+  assumptions: string[];
+  limitations: string[];
+  message: string | null;
+  created_at: string;
+};
+
+export type BlenderWorkflow = {
+  source_assets: BlenderSourceAsset[];
+  model: BlenderModelAsset | null;
+  nodes: BlenderWorkflowNode[];
+  parameters: BlenderWorkflowParameters;
+  estimate: BlenderEstimate | null;
+  report_markdown_path: string | null;
+  report_pdf_path: string | null;
+  report_render_paths: string[];
+  blender_status: "connected" | "unavailable" | "unknown";
+  messages: string[];
   updated_at: string;
 };
 
