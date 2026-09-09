@@ -15,6 +15,17 @@ from pydantic import Field, model_validator
 
 from .calculations import calculate_lumen_method, check_design_rules as run_rule_checks
 from . import dialux_protocol
+from .blender_workflow import (
+    BlenderConnectionError,
+    BlenderWorkflowError,
+    build_workflow_report_markdown,
+    create_or_reuse_blender_model,
+    estimate_workplane,
+    modeling_missing_fields,
+    render_workflow_report_pdf,
+    update_node,
+    workflow_root,
+)
 from .dialux_api import (
     DialuxAPI,
     DialuxAPIError,
@@ -29,6 +40,7 @@ from .photometry_assets import PhotometryAssetStore
 from .rag import create_evidence_store, format_evidence
 from .schemas import (
     CalculationInput,
+    BlenderWorkflowParameters,
     DesignBrief,
     LightingGroup,
     LightingParameterSource,
@@ -378,16 +390,57 @@ class ReportInput(DialuxTaskInput):
     pass
 
 
+class BlenderModelInput(ProjectReference):
+    expected_revision: int = Field(ge=0)
+    force_rebuild: bool = False
+
+
+class BlenderParametersInput(ProjectReference):
+    expected_revision: int = Field(ge=0)
+    workplane_height_m: float | None = Field(default=None, ge=0, le=10)
+    grid_spacing_m: float | None = Field(default=None, gt=0.05, le=10)
+    grid_margin_m: float | None = Field(default=None, ge=0, le=20)
+    maintenance_factor: float | None = Field(default=None, gt=0, le=1)
+    utilization_factor: float | None = Field(default=None, gt=0, le=1)
+    floor_reflectance: float | None = Field(default=None, ge=0, le=1)
+    wall_reflectance: float | None = Field(default=None, ge=0, le=1)
+    ceiling_reflectance: float | None = Field(default=None, ge=0, le=1)
+    total_flux_lm: float | None = Field(default=None, gt=0, le=100_000_000)
+
+
+class BlenderEstimateInput(ProjectReference):
+    expected_revision: int = Field(ge=0)
+
+
 project_store = ProjectStore()
 evidence_store = create_evidence_store()
+# ``None`` means use a lazily-created default client.  Keeping the default
+# lazy is important for embedders/tests that replace ``DialuxAPI`` at runtime;
+# the web app passes an explicit instance so each app still gets its own
+# session/cache.
+_DEFAULT_DIALUX_CLASS = DialuxAPI
+dialux_service = None
 
 
-def configure_runtime_services(*, projects, evidence) -> None:
+def configure_runtime_services(*, projects, evidence, dialux=None) -> None:
     """Bind browser requests to their active persistence services."""
 
-    global project_store, evidence_store
+    global project_store, evidence_store, dialux_service
     project_store = projects
     evidence_store = evidence
+    dialux_service = dialux
+
+
+def _dialux_client():
+    """Return the app-bound DIALux client or a current default instance."""
+
+    # Test harnesses and host applications may replace the exported
+    # ``DialuxAPI`` symbol after an app has been configured.  Honour that
+    # explicit replacement instead of accidentally retaining another app's
+    # client from the module-level binding.
+    if DialuxAPI is not _DEFAULT_DIALUX_CLASS:
+        return DialuxAPI()
+    return dialux_service if dialux_service is not None else DialuxAPI()
 
 
 def _project_directory(project_id: str) -> Path:
@@ -1070,7 +1123,7 @@ def search_luminaires(
         }
     if project_id is not None and expected_revision is None:
         raise ValueError("expected_revision is required when saving candidates to a project")
-    client = DialuxAPI()
+    client = _dialux_client()
     try:
         search_with_run = getattr(client, "search_with_run", None)
         if callable(search_with_run):
@@ -1179,7 +1232,7 @@ def send_luminaire_to_dialux(project_id: str, luminaire_id: str) -> dict:
             "message": "该灯具不在本项目的已保存候选中，请先调用 search_luminaires。",
         }
     try:
-        dial_url = DialuxAPI().resolve_send_to_dialux_url(candidate.detail_url)
+        dial_url = _dialux_client().resolve_send_to_dialux_url(candidate.detail_url)
     except DialuxAPIError as error:
         return {"status": "vendor_error", "vendor_error": error.as_dict()}
     try:
@@ -1231,6 +1284,384 @@ def ask_user(title: str, question: str, fields: list[ClarificationField]) -> dic
     }
 
 
+def _blender_parameter_questions(parameters: BlenderWorkflowParameters) -> list[str]:
+    labels = {
+        "maintenance_factor": "维护系数 MF",
+        "utilization_factor": "利用系数 UF",
+        "floor_reflectance": "地面反射率",
+        "wall_reflectance": "墙面反射率",
+        "ceiling_reflectance": "顶棚反射率",
+    }
+    return [f"请确认{label}" for field, label in labels.items() if getattr(parameters, field) is None]
+
+
+@tool("get_blender_workflow", args_schema=ProjectReference)
+def get_blender_workflow(project_id: str) -> dict:
+    """Read uploaded sources, saved model, image artifacts and preliminary-result status."""
+
+    state = project_store.get(project_id)
+    return {
+        "project_revision": state.revision,
+        "workflow": _data(state.blender_workflow),
+        "modeling_missing_fields": modeling_missing_fields(state),
+    }
+
+
+@tool("build_blender_model", args_schema=BlenderModelInput)
+def build_blender_model(project_id: str, expected_revision: int, force_rebuild: bool = False) -> dict:
+    """Use the local Blender MCP add-on to build, render and save the evidence-backed room model."""
+
+    state = project_store.get(project_id)
+    missing = modeling_missing_fields(state)
+    if missing:
+        return {
+            "status": "needs_clarification",
+            "missing_fields": missing,
+            "message": "上传资料后仍缺少经确认的三维几何，请先检索项目资料；仍无法确定时调用 ask_user。",
+            "project_revision": state.revision,
+        }
+    try:
+        model = create_or_reuse_blender_model(
+            state,
+            project_root=_project_directory(project_id),
+            project_id=project_id,
+            force=force_rebuild,
+        )
+    except BlenderConnectionError as error:
+        return {
+            "status": "blender_unavailable",
+            "message": f"{error} 请让用户自行打开 Blender 并在 Blender MCP 面板中点击 Connect 后重试。",
+            "project_revision": state.revision,
+        }
+    except BlenderWorkflowError as error:
+        return {"status": "failed", "message": str(error), "project_revision": state.revision}
+    workflow = state.blender_workflow.model_copy(update={"model": model, "blender_status": model.mcp_status})
+    workflow = update_node(
+        workflow,
+        "model",
+        status="succeeded",
+        message=model.message,
+        output_refs=[model.model_path, *model.render_paths],
+    )
+    updated = project_store.update(
+        project_id,
+        ProjectUpdate(expected_revision=state.revision, blender_workflow=workflow),
+    )
+    return {
+        "status": "reused" if model.reused else "created",
+        "model": _data(model),
+        "project_revision": updated.revision,
+        "rebased": state.revision != expected_revision,
+    }
+
+
+@tool("update_blender_parameters", args_schema=BlenderParametersInput)
+def update_blender_parameters(
+    project_id: str,
+    expected_revision: int,
+    workplane_height_m: float | None = None,
+    grid_spacing_m: float | None = None,
+    grid_margin_m: float | None = None,
+    maintenance_factor: float | None = None,
+    utilization_factor: float | None = None,
+    floor_reflectance: float | None = None,
+    wall_reflectance: float | None = None,
+    ceiling_reflectance: float | None = None,
+    total_flux_lm: float | None = None,
+) -> dict:
+    """Persist user/evidence-confirmed work-plane, maintenance and reflectance inputs."""
+
+    state = project_store.get(project_id)
+    values = {
+        "workplane_height_m": workplane_height_m,
+        "grid_spacing_m": grid_spacing_m,
+        "grid_margin_m": grid_margin_m,
+        "maintenance_factor": maintenance_factor,
+        "utilization_factor": utilization_factor,
+        "floor_reflectance": floor_reflectance,
+        "wall_reflectance": wall_reflectance,
+        "ceiling_reflectance": ceiling_reflectance,
+        "total_flux_lm": total_flux_lm,
+    }
+    changes = {field: value for field, value in values.items() if value is not None}
+    confirmed = set(state.blender_workflow.parameters.confirmed_fields) | set(changes)
+    parameters = state.blender_workflow.parameters.model_copy(update={**changes, "confirmed_fields": confirmed})
+    questions = _blender_parameter_questions(parameters)
+    parameters = parameters.model_copy(update={"questions": questions})
+    model_fields = {
+        "workplane_height_m",
+        "grid_spacing_m",
+        "floor_reflectance",
+        "wall_reflectance",
+        "ceiling_reflectance",
+    }
+    model = state.blender_workflow.model
+    if model is not None and model_fields.intersection(changes):
+        model = model.model_copy(
+            update={"status": "missing", "reused": False, "message": "参数已变化，等待同步 Blender 模型。"}
+        )
+    workflow = state.blender_workflow.model_copy(
+        update={
+            "parameters": parameters,
+            "model": model,
+            "estimate": None,
+            "report_markdown_path": None,
+            "report_pdf_path": None,
+            "report_render_paths": [],
+        }
+    )
+    workflow = update_node(
+        workflow,
+        "parameters",
+        status="blocked" if questions else "succeeded",
+        message="仍有参数待确认" if questions else "计算参数已确认",
+    )
+    workflow = update_node(workflow, "estimate", status="pending", message="参数已更新，等待初算", output_refs=[])
+    workflow = update_node(workflow, "report", status="pending", message="参数已更新，等待重新生成方案", output_refs=[])
+    updated = project_store.update(
+        project_id,
+        ProjectUpdate(expected_revision=state.revision, blender_workflow=workflow),
+    )
+    return {
+        "status": "needs_clarification" if questions else "ready",
+        "questions": questions,
+        "parameters": _data(parameters),
+        "project_revision": updated.revision,
+        "rebased": state.revision != expected_revision,
+    }
+
+
+@tool("sync_luminaires_to_blender", args_schema=BlenderModelInput)
+def sync_luminaires_to_blender(project_id: str, expected_revision: int, force_rebuild: bool = False) -> dict:
+    """Download final IES/LDT/ULD files and replace placeholder fixtures in the saved 3D model."""
+
+    state = project_store.get(project_id)
+    if not state.selected_luminaire_ids:
+        return {
+            "status": "needs_luminaire_selection",
+            "message": "请先搜索、比较并用 select_luminaires 保存最终灯具，再同步到 Blender。",
+            "project_revision": state.revision,
+        }
+    assets = PhotometryAssetStore(_project_directory(project_id), _dialux_client()).ensure_task_assets(state)
+    downloaded = [asset for asset in assets if asset.status == "downloaded"]
+    unavailable = [asset for asset in assets if asset.status != "downloaded"]
+    parameters = state.blender_workflow.parameters.model_copy(
+        update={"selected_luminaire_ids": list(state.selected_luminaire_ids)}
+    )
+    workflow = state.blender_workflow.model_copy(
+        update={
+            "parameters": parameters,
+            "estimate": None,
+            "report_markdown_path": None,
+            "report_pdf_path": None,
+            "report_render_paths": [],
+        }
+    )
+    workflow = update_node(
+        workflow,
+        "photometry",
+        status="succeeded" if not unavailable else "blocked",
+        message=(
+            f"已核验并保存 {len(downloaded)} 款最终灯具的配光文件"
+            if not unavailable
+            else f"已保存 {len(downloaded)} 款配光文件；{len(unavailable)} 款缺失或下载失败"
+        ),
+        output_refs=[
+            extracted.relative_path
+            for asset in downloaded
+            for extracted in asset.extracted_files
+        ],
+    )
+    staged = state.model_copy(update={"blender_workflow": workflow})
+    try:
+        model = create_or_reuse_blender_model(
+            staged,
+            project_root=_project_directory(project_id),
+            project_id=project_id,
+            force=force_rebuild,
+        )
+    except BlenderConnectionError as error:
+        workflow = update_node(workflow, "model", status="blocked", message=str(error), output_refs=[])
+        updated = project_store.update(
+            project_id,
+            ProjectUpdate(expected_revision=state.revision, blender_workflow=workflow),
+        )
+        return {
+            "status": "blender_unavailable",
+            "message": str(error),
+            "photometry": [_data(asset) for asset in assets],
+            "project_revision": updated.revision,
+        }
+    except BlenderWorkflowError as error:
+        return {"status": "failed", "message": str(error), "project_revision": state.revision}
+    workflow = workflow.model_copy(update={"model": model, "blender_status": model.mcp_status})
+    workflow = update_node(
+        workflow,
+        "model",
+        status="succeeded",
+        message="最终灯具已写入 Blender 模型并重新渲染",
+        output_refs=[model.model_path, *model.render_paths],
+    )
+    workflow = update_node(workflow, "estimate", status="pending", message="灯具已替换，等待照度初算", output_refs=[])
+    workflow = update_node(workflow, "report", status="pending", message="灯具已替换，等待最终优化方案", output_refs=[])
+    updated = project_store.update(
+        project_id,
+        ProjectUpdate(expected_revision=state.revision, blender_workflow=workflow),
+    )
+    return {
+        "status": "synchronized" if not unavailable else "synchronized_with_photometry_warnings",
+        "model": _data(model),
+        "photometry": [_data(asset) for asset in assets],
+        "project_revision": updated.revision,
+        "rebased": state.revision != expected_revision,
+    }
+
+
+@tool("calculate_blender_illuminance", args_schema=BlenderEstimateInput)
+def calculate_blender_illuminance(project_id: str, expected_revision: int) -> dict:
+    """Generate the preliminary work-plane grid and heatmap for the synchronized 3D scheme."""
+
+    state = project_store.get(project_id)
+    parameters = state.blender_workflow.parameters
+    missing = [
+        field
+        for field in (
+            "maintenance_factor",
+            "utilization_factor",
+            "floor_reflectance",
+            "wall_reflectance",
+            "ceiling_reflectance",
+        )
+        if getattr(parameters, field) is None
+    ]
+    if missing:
+        return {
+            "status": "needs_clarification",
+            "missing_fields": missing,
+            "message": "请先从设计报告提取这些参数；资料没有明确值时调用 ask_user。",
+            "project_revision": state.revision,
+        }
+    if not state.selected_luminaire_ids:
+        return {
+            "status": "needs_luminaire_selection",
+            "message": "照度初算前必须先确认最终灯具并同步到 Blender。",
+            "project_revision": state.revision,
+        }
+    current_model = state.blender_workflow.model
+    if current_model is None or current_model.status != "ready":
+        return {
+            "status": "needs_model",
+            "message": "照度初算前必须先完成并保存当前 Blender 模型，请先调用 build_blender_model。",
+            "project_revision": state.revision,
+        }
+    if current_model.scene_summary.get("selected_luminaire_ids") != state.selected_luminaire_ids:
+        return {
+            "status": "needs_luminaire_sync",
+            "message": "最终灯具尚未写入当前 Blender 模型，请先调用 sync_luminaires_to_blender。",
+            "project_revision": state.revision,
+        }
+    if parameters.selected_luminaire_ids != state.selected_luminaire_ids:
+        return {
+            "status": "needs_luminaire_sync",
+            "message": "当前模型参数尚未记录最终灯具，请先调用 sync_luminaires_to_blender。",
+            "project_revision": state.revision,
+        }
+    try:
+        model = create_or_reuse_blender_model(
+            state,
+            project_root=_project_directory(project_id),
+            project_id=project_id,
+        )
+        staged_workflow = state.blender_workflow.model_copy(update={"model": model})
+        staged = state.model_copy(update={"blender_workflow": staged_workflow})
+        estimate = estimate_workplane(
+            staged,
+            parameters,
+            project_root=_project_directory(project_id),
+            project_id=project_id,
+            allow_provisional=False,
+        )
+    except BlenderConnectionError as error:
+        return {"status": "blender_unavailable", "message": str(error), "project_revision": state.revision}
+    except BlenderWorkflowError as error:
+        return {"status": "failed", "message": str(error), "project_revision": state.revision}
+    workflow = staged_workflow.model_copy(
+        update={
+            "estimate": estimate,
+            "report_markdown_path": None,
+            "report_pdf_path": None,
+            "report_render_paths": [],
+        }
+    )
+    workflow = update_node(
+        workflow,
+        "estimate",
+        status="succeeded" if estimate.status == "succeeded" else "blocked",
+        message=estimate.message or "已生成方案级工作面照度热力图",
+        output_refs=[estimate.heatmap_path] if estimate.heatmap_path else [],
+    )
+    workflow = update_node(workflow, "report", status="pending", message="照度结果已更新，等待最终优化方案", output_refs=[])
+    updated = project_store.update(
+        project_id,
+        ProjectUpdate(expected_revision=state.revision, blender_workflow=workflow),
+    )
+    return {
+        "status": estimate.status,
+        "estimate": _data(estimate),
+        "model_render_paths": model.render_paths,
+        "project_revision": updated.revision,
+        "rebased": state.revision != expected_revision,
+    }
+
+
+@tool("generate_blender_optimization_report", args_schema=ReportInput)
+def generate_blender_optimization_report(project_id: str, expected_revision: int) -> dict:
+    """Create the final optimized-scheme PDF with real Blender renders and an illuminance heatmap."""
+
+    state = project_store.get(project_id)
+    root = _project_directory(project_id)
+    reports = workflow_root(root, project_id) / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    markdown_target = reports / f"{project_id}-optimized-lighting-scheme.md"
+    pdf_target = reports / f"{project_id}-optimized-lighting-scheme.pdf"
+    try:
+        render_paths = render_workflow_report_pdf(state, root, pdf_target)
+    except BlenderWorkflowError as error:
+        return {
+            "status": "blocked",
+            "message": str(error),
+            "project_revision": state.revision,
+        }
+    workflow = state.blender_workflow.model_copy(
+        update={
+            "report_markdown_path": markdown_target.relative_to(root).as_posix(),
+            "report_pdf_path": pdf_target.relative_to(root).as_posix(),
+            "report_render_paths": render_paths,
+        }
+    )
+    workflow = update_node(
+        workflow,
+        "report",
+        status="succeeded",
+        message="已生成包含真实三维渲染与照度热力图的优化方案",
+        output_refs=[workflow.report_markdown_path, workflow.report_pdf_path, *render_paths],
+    )
+    report_state = state.model_copy(update={"blender_workflow": workflow})
+    markdown_target.write_text(build_workflow_report_markdown(report_state, root), encoding="utf-8")
+    updated = project_store.update(
+        project_id,
+        ProjectUpdate(expected_revision=state.revision, blender_workflow=workflow),
+    )
+    return {
+        "status": "created",
+        "report_pdf": str(pdf_target),
+        "report_markdown": str(markdown_target),
+        "image_paths": render_paths,
+        "project_revision": updated.revision,
+        "rebased": state.revision != expected_revision,
+    }
+
+
 @tool("create_dialux_task_package", args_schema=DialuxTaskInput)
 def create_dialux_task_package(project_id: str, expected_revision: int) -> dict:
     """Create a ZIP handoff with the task manifest and named photometry ZIP files."""
@@ -1241,7 +1672,7 @@ def create_dialux_task_package(project_id: str, expected_revision: int) -> dict:
             f"Project revision is {state.revision}, but request expected {expected_revision}"
         )
     target = _artifact_path(project_id, ".dialux-task.zip")
-    target.write_bytes(build_dialux_task_archive(state, PhotometryAssetStore(_project_directory(project_id), DialuxAPI())))
+    target.write_bytes(build_dialux_task_archive(state, PhotometryAssetStore(_project_directory(project_id), _dialux_client())))
     return {
         "task_package": str(target),
         "handoff": build_dialux_task_package(state),

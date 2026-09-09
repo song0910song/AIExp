@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -21,6 +22,22 @@ WORKSPACE_REGISTRY_FILE = DATA_DIRECTORY / "workspace_registry.sqlite3"
 # Load local .env before Settings defaults are evaluated (dataclass defaults run
 # at class definition time); existing environment variables take precedence.
 load_dotenv(PROJECT_ROOT / ".env")
+
+
+def _env_optional_bool(name: str) -> bool | None:
+    """Read an optional, forgiving boolean environment setting."""
+
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _model_supports_prompt_cache(model: str | None) -> bool:
+    """Return whether the configured model is in the GPT-5.6+ family."""
+
+    match = re.match(r"^gpt-(\d+)\.(\d+)", (model or "").strip().casefold())
+    return bool(match) and (int(match.group(1)), int(match.group(2))) >= (5, 6)
 
 
 # The configured New API gateway accepts this set for agnes-2.5-flash.  Keep
@@ -59,6 +76,18 @@ class Settings:
     # Codex-style: SDK retries transient model failures (429/5xx/connection) up to 5 times with exponential backoff + jitter.
     llm_max_retries: int = int(os.getenv("LIGHTING_LLM_MAX_RETRIES", "5"))
     llm_context_window_tokens: int = int(os.getenv("LIGHTING_LLM_CONTEXT_WINDOW_TOKENS", "1000000"))
+    # Keep this key stable across projects and sessions so the provider can
+    # route requests with the same system prompt to an existing cache.
+    # None selects the safe model-aware default: GPT-5.6+ is enabled,
+    # while another OpenAI-compatible gateway must opt in explicitly.
+    llm_prompt_cache_enabled: bool | None = _env_optional_bool(
+        "LIGHTING_LLM_PROMPT_CACHE_ENABLED"
+    )
+    llm_prompt_cache_key: str = os.getenv(
+        "LIGHTING_LLM_PROMPT_CACHE_KEY", "lighting-design-agent-v1"
+    ).strip() or "lighting-design-agent-v1"
+    # The current OpenAI-compatible schema accepts 30m as the cache TTL.
+    llm_prompt_cache_ttl: str = os.getenv("LIGHTING_LLM_PROMPT_CACHE_TTL", "30m").strip()
     agent_max_steps: int = int(os.getenv("LIGHTING_AGENT_MAX_STEPS", "50"))
     chat_stream_heartbeat_seconds: float = float(
         os.getenv("LIGHTING_CHAT_STREAM_HEARTBEAT_SECONDS", "5")
@@ -129,6 +158,15 @@ class Settings:
         """Create request-scoped settings without mutating frozen global config."""
 
         return replace(self, llm_reasoning_effort=effort)
+
+    def prompt_cache_options(self) -> dict[str, str] | None:
+        """Return provider cache options, normalizing unsupported TTL values."""
+
+        enabled = self.llm_prompt_cache_enabled
+        if enabled is False or (enabled is None and not _model_supports_prompt_cache(self.llm_model)):
+            return None
+        ttl = self.llm_prompt_cache_ttl if self.llm_prompt_cache_ttl == "30m" else "30m"
+        return {"mode": "implicit", "ttl": ttl}
 
     def validate_for_agent(self) -> None:
         if not self.llm_api_key:

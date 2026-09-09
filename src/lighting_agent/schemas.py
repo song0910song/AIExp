@@ -499,6 +499,121 @@ class FloorPlan(StrictModel):
     warnings: list[str] = Field(default_factory=list, max_length=50)
 
 
+class BlenderWorkflowNode(StrictModel):
+    """One observable node in the drawing-to-estimate workflow."""
+
+    node_id: Literal["source", "model", "photometry", "parameters", "estimate", "report"]
+    title: str = Field(min_length=1, max_length=120)
+    description: str = Field(min_length=1, max_length=500)
+    status: Literal["pending", "running", "succeeded", "blocked", "failed"] = "pending"
+    message: str | None = Field(default=None, max_length=2_000)
+    output_refs: list[str] = Field(default_factory=list, max_length=20)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class BlenderSourceAsset(StrictModel):
+    """An uploaded drawing/report used as the immutable Blender workflow source."""
+
+    source_name: str = Field(min_length=1, max_length=180)
+    source_type: Literal["pdf", "dxf", "dwg"]
+    storage_path: str = Field(min_length=1, max_length=500)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(ge=0, le=200 * 1024 * 1024)
+    page_count: int | None = Field(default=None, ge=1)
+    extracted_text_preview: str | None = Field(default=None, max_length=4_000)
+    preview_paths: list[str] = Field(default_factory=list, max_length=8)
+    imported_at: datetime = Field(default_factory=utc_now)
+
+
+class BlenderModelAsset(StrictModel):
+    """A saved/reusable .blend asset and its optional rendered snapshots."""
+
+    model_path: str = Field(min_length=1, max_length=500)
+    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    model_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    status: Literal["pending", "ready", "missing", "failed"] = "pending"
+    reused: bool = False
+    blender_version: str | None = Field(default=None, max_length=80)
+    mcp_status: Literal["connected", "unavailable", "unknown"] = "unknown"
+    render_paths: list[str] = Field(default_factory=list, max_length=20)
+    scene_summary: dict[str, Any] = Field(default_factory=dict)
+    message: str | None = Field(default=None, max_length=2_000)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class BlenderWorkflowParameters(StrictModel):
+    """Explicit assumptions needed for a preliminary work-plane estimate."""
+
+    workplane_height_m: float = Field(default=0.75, ge=0, le=10)
+    grid_spacing_m: float = Field(default=1.0, gt=0.05, le=10)
+    grid_margin_m: float = Field(default=0.5, ge=0, le=20)
+    maintenance_factor: float | None = Field(default=None, gt=0, le=1)
+    utilization_factor: float | None = Field(default=None, gt=0, le=1)
+    floor_reflectance: float | None = Field(default=None, ge=0, le=1)
+    wall_reflectance: float | None = Field(default=None, ge=0, le=1)
+    ceiling_reflectance: float | None = Field(default=None, ge=0, le=1)
+    total_flux_lm: float | None = Field(default=None, gt=0, le=100_000_000)
+    selected_luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
+    confirmed_fields: set[str] = Field(default_factory=set)
+    questions: list[str] = Field(default_factory=list, max_length=30)
+
+
+class BlenderEstimate(StrictModel):
+    """Deterministic, explicitly approximate work-plane estimate."""
+
+    solver_version: str = Field(min_length=1, max_length=80)
+    status: Literal["succeeded", "blocked", "failed"] = "succeeded"
+    input_project_revision: int = Field(ge=0)
+    area_m2: float | None = Field(default=None, ge=0)
+    grid_rows: int = Field(default=0, ge=0, le=200)
+    grid_columns: int = Field(default=0, ge=0, le=200)
+    grid_x_coordinates_m: list[float] = Field(default_factory=list, max_length=40_000)
+    grid_y_coordinates_m: list[float] = Field(default_factory=list, max_length=40_000)
+    illuminance_lx: list[list[float]] = Field(default_factory=list, max_length=200)
+    average_illuminance_lx: float | None = Field(default=None, ge=0)
+    minimum_illuminance_lx: float | None = Field(default=None, ge=0)
+    maximum_illuminance_lx: float | None = Field(default=None, ge=0)
+    uniformity_u0: float | None = Field(default=None, ge=0, le=1)
+    heatmap_path: str | None = Field(default=None, max_length=500)
+    assumptions: list[str] = Field(default_factory=list, max_length=30)
+    limitations: list[str] = Field(default_factory=list, max_length=30)
+    message: str | None = Field(default=None, max_length=2_000)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class BlenderWorkflow(StrictModel):
+    """Persisted state for the conversational drawing/modeling workflow."""
+
+    source_assets: list[BlenderSourceAsset] = Field(default_factory=list, max_length=20)
+    model: BlenderModelAsset | None = None
+    nodes: list[BlenderWorkflowNode] = Field(default_factory=list, max_length=10)
+    parameters: BlenderWorkflowParameters = Field(default_factory=BlenderWorkflowParameters)
+    estimate: BlenderEstimate | None = None
+    report_markdown_path: str | None = Field(default=None, max_length=500)
+    report_pdf_path: str | None = Field(default=None, max_length=500)
+    report_render_paths: list[str] = Field(default_factory=list, max_length=20)
+    blender_status: Literal["connected", "unavailable", "unknown"] = "unknown"
+    messages: list[str] = Field(default_factory=list, max_length=50)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def ensure_default_nodes(self) -> "BlenderWorkflow":
+        defaults = [
+            ("source", "图纸 / 报告", "保存并解析用户上传的图纸或设计报告"),
+            ("model", "Blender 建模", "首次调用 Blender MCP 建模并保存 .blend，后续优先复用"),
+            ("photometry", "灯具配光", "补充并核验 IES/LDT/ULD 配光文件"),
+            ("parameters", "计算参数", "确认维护系数、反射率和工作面网格"),
+            ("estimate", "照度初算", "生成工作面网格和近似照度热力图"),
+            ("report", "方案报告", "汇总三维渲染图、照度截图和假设限制"),
+        ]
+        existing = {item.node_id: item for item in self.nodes}
+        ordered: list[BlenderWorkflowNode] = []
+        for node_id, title, description in defaults:
+            ordered.append(existing.get(node_id) or BlenderWorkflowNode(node_id=node_id, title=title, description=description))
+        self.nodes = ordered
+        return self
+
+
 class ProjectState(StrictModel):
     project_id: str = Field(default_factory=lambda: uuid4().hex)
     revision: int = Field(default=0, ge=0)
@@ -511,6 +626,7 @@ class ProjectState(StrictModel):
     selected_luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
     luminaire_group_assignments: dict[str, list[str]] = Field(default_factory=dict)
     floor_plan: FloorPlan | None = None
+    blender_workflow: BlenderWorkflow = Field(default_factory=BlenderWorkflow)
     simulation_runs: list[SimulationRun] = Field(default_factory=list)
     workflow_status: Literal[
         "draft",
@@ -616,6 +732,7 @@ class ProjectUpdate(StrictModel):
     selected_luminaire_ids: list[str] | None = None
     luminaire_group_assignments: dict[str, list[str]] | None = None
     floor_plan: FloorPlan | None = None
+    blender_workflow: BlenderWorkflow | None = None
     simulation_runs: list[SimulationRun] | None = None
     open_questions: list[str] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

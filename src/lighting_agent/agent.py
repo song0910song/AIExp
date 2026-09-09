@@ -14,11 +14,15 @@ from .tools import (
     adopt_evidence,
     apply_rag_lighting_parameters,
     ask_user,
+    build_blender_model,
+    calculate_blender_illuminance,
     calculate_preliminary_lighting,
     check_design_rules,
     create_dialux_task_package,
     create_project,
     generate_design_report,
+    generate_blender_optimization_report,
+    get_blender_workflow,
     get_project,
     get_luminaire_detail,
     prepare_luminaire_search,
@@ -26,6 +30,8 @@ from .tools import (
     search_luminaires,
     select_luminaires,
     send_luminaire_to_dialux,
+    sync_luminaires_to_blender,
+    update_blender_parameters,
     update_project_brief,
     update_lighting_groups,
 )
@@ -44,8 +50,9 @@ SYSTEM_PROMPT = """你是室内照明设计顾问与流程编排者。
 8. 计算与规则校核必须调用相应工具，不得心算后声明为计算结果。
 9. 回答采用：规范依据、已确认设计条件、计算/候选灯具、待确认事项、人工复核声明。不要输出伪造的条文、型号、仿真值或配光数据。
 10. A fillable clarification form exists in the browser only after the ask_user tool succeeds. Never say that a structured form or questionnaire has been generated unless you actually called ask_user and received its result. If a clarification is required, call ask_user before any final answer and stop after that tool result.
-11. 图纸能力边界：系统可解析项目已导入的 DXF/DWG 平面图，提取单位、图层、文字、墙体/净空边界候选和面积候选。解析结果是“候选事实”，只有经用户确认或规则自动选定并写入任务书的几何（面积、长宽、空间名称）才能用于计算和选型。不得把图纸解析候选描述为已确认设计事实，也不得声称系统已自动识别墙体、门窗、布灯位置、三维场景或 DIALux 仿真结果。
+11. 图纸与 Blender：用户上传设计报告 PDF 或 DXF/DWG 后，先 get_project 和 get_blender_workflow。必须先从项目资料检索尺寸、空间用途和高度；只有长、宽、净高均有足够证据且写入 confirmed_fields 后，才调用 build_blender_model。该工具会连接/启动 Blender MCP、创建并保存模型与真实渲染图；不要声称建模成功，除非工具返回 created/reused。若返回 blender_unavailable，明确提示用户自行打开 Blender 并在 Blender MCP 面板点击 Connect。模型是几何与方案可视化，不是 DIALux 仿真。
 12. 仿真结果边界：系统支持导入用户在 DIALux evo 导出的结构化仿真结果（照度、UGR），并校验其与当前 DIALux 任务包（handoff_id、输入快照、最终灯具）是否一致。只有校验为 matched 的结果才能称为本项目结论；mismatch/incomplete/unverified 的结果只能作为参考资料说明，不能作为合规结论。任务书、最终灯具或图纸变化会使旧仿真结果标记为 stale，此时必须提示用户重新仿真，不得沿用旧结果。
+13. 上传资料触发的完整顺序：资料与几何确认 -> build_blender_model -> 分析现状照明与规范目标 -> prepare_luminaire_search/search_luminaires 比较优化候选 -> 用户确认后 select_luminaires -> sync_luminaires_to_blender 下载真实 IES/LDT/ULD 并在 3D 模型替换灯具 -> update_blender_parameters 保存维护系数、利用系数、地/墙/顶反射率与工作面网格（资料不明确就 ask_user）-> calculate_blender_illuminance -> generate_blender_optimization_report。最终回答必须说明优化前提、选灯理由、模型换灯结果、平均/最小/最大照度与均匀度、所有假设和 DIALux/人工复核边界。不得跳过换灯就生成最终方案。
 """
 
 # Scope rule is kept explicit for providers that choose tool arguments from
@@ -94,6 +101,41 @@ def set_retry_notifier(notifier: Callable[[str], None] | None) -> None:
         _RETRY_NOTIFIER = notifier
 
 
+def _prompt_cache_model_params(settings: Settings) -> dict[str, Any]:
+    """Build cache fields accepted by Chat Completions requests."""
+
+    prompt_cache_options = settings.prompt_cache_options()
+    if prompt_cache_options is None:
+        return {}
+    # ChatOpenAI exposes prompt_cache_key through model_kwargs for the Chat
+    # Completions API. Keep request-specific data out of this stable key.
+    return {
+        "prompt_cache_options": prompt_cache_options,
+        "model_kwargs": {"prompt_cache_key": settings.llm_prompt_cache_key},
+    }
+
+
+def _system_prompt_for_settings(settings: Settings) -> Any:
+    """Attach a cache breakpoint to the stable system-prompt prefix."""
+
+    if settings.prompt_cache_options() is None:
+        return SYSTEM_PROMPT
+    from langchain_core.messages import SystemMessage
+
+    # ``implicit`` mode still honors explicit breakpoints.  Marking the end
+    # of this invariant prompt keeps project/session-specific messages out
+    # of the cached prefix while making its reuse deterministic.
+    return SystemMessage(
+        content=[
+            {
+                "type": "text",
+                "text": SYSTEM_PROMPT,
+                "prompt_cache_breakpoint": True,
+            }
+        ]
+    )
+
+
 def build_agent(settings: Settings | None = None) -> Any:
     """Build the agent only when an LLM credential is explicitly configured."""
 
@@ -111,6 +153,9 @@ def build_agent(settings: Settings | None = None) -> Any:
         timeout=settings.llm_timeout_seconds,
         max_retries=settings.llm_max_retries,
         stream_usage=True,
+        # The configured provider is an OpenAI-compatible Chat Completions
+        # gateway; retaining this endpoint preserves its cache protocol.
+        use_responses_api=False,
         # Custom http_client keeps _RetryNotifyingTransport; disable
         # langchain-openai's keepalive transport injection so httpx's
         # proxy auto-detection (system proxy) stays active.
@@ -119,11 +164,13 @@ def build_agent(settings: Settings | None = None) -> Any:
             transport=_RetryNotifyingTransport(),
             timeout=settings.llm_timeout_seconds,
         ),
+        **_prompt_cache_model_params(settings),
     )
     return create_agent(
         model=model,
         tools=[
             get_project,
+            get_blender_workflow,
             create_project,
             ask_user,
             update_project_brief,
@@ -133,16 +180,21 @@ def build_agent(settings: Settings | None = None) -> Any:
             adopt_evidence,
             add_document,
             calculate_preliminary_lighting,
+            build_blender_model,
+            update_blender_parameters,
             check_design_rules,
             prepare_luminaire_search,
             search_luminaires,
             get_luminaire_detail,
             send_luminaire_to_dialux,
             select_luminaires,
+            sync_luminaires_to_blender,
+            calculate_blender_illuminance,
             create_dialux_task_package,
             generate_design_report,
+            generate_blender_optimization_report,
         ],
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=_system_prompt_for_settings(settings),
     )
 
 

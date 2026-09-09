@@ -5,6 +5,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
+import lighting_agent.agent as agent_module
 import lighting_agent.web_api as web_api
 from lighting_agent.config import Settings
 from lighting_agent.project_store import ProjectStore
@@ -21,6 +22,38 @@ def test_settings_normalize_reasoning_efforts() -> None:
     assert settings.supported_reasoning_efforts() == ("low", "medium")
     assert settings.default_reasoning_effort() == "low"
     assert settings.with_reasoning_effort("high").llm_reasoning_effort == "high"
+
+
+def test_prompt_cache_settings_are_stable_and_model_aware() -> None:
+    gpt_settings = Settings(llm_model="gpt-5.6-terra", llm_api_key="test-key")
+    assert gpt_settings.llm_prompt_cache_key == "lighting-design-agent-v1"
+    assert gpt_settings.prompt_cache_options() == {"mode": "implicit", "ttl": "30m"}
+    assert agent_module._prompt_cache_model_params(gpt_settings) == {
+        "prompt_cache_options": {"mode": "implicit", "ttl": "30m"},
+        "model_kwargs": {"prompt_cache_key": "lighting-design-agent-v1"},
+    }
+
+    other_settings = Settings(llm_model="other-model", llm_api_key="test-key")
+    assert other_settings.prompt_cache_options() is None
+    assert agent_module._prompt_cache_model_params(other_settings) == {}
+
+    explicit_settings = Settings(
+        llm_model="other-model",
+        llm_api_key="test-key",
+        llm_prompt_cache_enabled=True,
+        llm_prompt_cache_ttl="unsupported",
+    )
+    assert explicit_settings.prompt_cache_options() == {"mode": "implicit", "ttl": "30m"}
+
+
+def test_prompt_cache_uses_a_stable_system_prompt_breakpoint() -> None:
+    from langchain_core.messages import SystemMessage
+
+    settings = Settings(llm_model="gpt-5.6-terra", llm_api_key="test-key")
+    message = agent_module._system_prompt_for_settings(settings)
+    assert isinstance(message, SystemMessage)
+    assert message.content[0]["text"] == agent_module.SYSTEM_PROMPT
+    assert message.content[0]["prompt_cache_breakpoint"] is True
 
 
 def test_health_lists_reasoning_effort_options(tmp_path) -> None:

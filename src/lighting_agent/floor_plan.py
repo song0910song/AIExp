@@ -78,13 +78,18 @@ def parse_floor_plan(source: Path, *, storage_path: str) -> FloorPlan:
     entity_counts = Counter(entity.dxftype() for entity in entities)
     bounds = _bounds(modelspace)
     text_items = _text_items(entities)
-    area_candidates = _area_candidates(entities, meters_per_unit)
+    # DIALux exports can carry an inch unit header while DLX_* coordinates are
+    # already metric.  Normalize the effective scale before persisting facts.
+    dialux_metric = _uses_dialux_metric_coordinates(entities)
+    effective_meters_per_unit = 1.0 if dialux_metric else meters_per_unit
+    area_candidates = _area_candidates(entities, effective_meters_per_unit)
     room_name = _room_name(text_items)
-    if not meters_per_unit:
+    if not effective_meters_per_unit:
         warnings.append("图纸未声明可换算的长度单位；面积与尺寸仅能作为原始单位参考。")
     if not area_candidates:
         warnings.append("未识别到闭合房间边界；请在图纸中使用闭合多段线或在界面手动填写面积。")
 
+    normalized_units = "m" if dialux_metric else unit_name
     return FloorPlan(
         asset=FloorPlanAsset(
             source_name=source.name,
@@ -94,8 +99,8 @@ def parse_floor_plan(source: Path, *, storage_path: str) -> FloorPlan:
             size_bytes=source.stat().st_size,
             converted_from_dwg=converted_from_dwg,
         ),
-        drawing_units=unit_name,
-        meters_per_drawing_unit=meters_per_unit,
+        drawing_units=normalized_units,
+        meters_per_drawing_unit=effective_meters_per_unit,
         bounds=bounds,
         entity_counts=dict(sorted(entity_counts.items())),
         text_items=text_items,
@@ -121,6 +126,15 @@ def _read_document(source: Path) -> tuple[Drawing, bool, list[str]]:
 def _drawing_unit(document: Drawing) -> tuple[str, float | None]:
     unit_code = int(document.header.get("$INSUNITS", 0) or 0)
     return _UNIT_TO_METERS.get(unit_code, (f"unknown:{unit_code}", None))
+
+
+def _uses_dialux_metric_coordinates(entities: list[Any]) -> bool:
+    """Detect DIALux exports whose DLX coordinates are already metres."""
+
+    layers = {str(entity.dxf.layer).upper() for entity in entities}
+    return "DLX_CONT" in layers and bool(
+        layers & {"DLX_LUM", "DLX_OBJ", "DLX_APERT", "DLX_CALC"}
+    )
 
 
 def _bounds(modelspace: Any) -> tuple[CadPoint, CadPoint] | None:
@@ -226,10 +240,9 @@ def _reconstructed_candidates(
     geoms = list(getattr(merged, "geoms", [merged]))
     polys = list(ops.polygonize(geoms))
     polys.sort(key=lambda p: p.area, reverse=True)
-    # DIALux 专属轮廓图层（DLX_CONT）坐标约定为米，不受图纸全局单位声明影响；
-    # 使用这些图层时直接按米解释，避免 $INSUNITS 声明与实际不符导致面积失真。
-    ddx_metric = layers[0].upper().startswith("DLX_") if layers else False
-    effective_meters_per_unit = 1.0 if ddx_metric else meters_per_unit
+    # The caller has already normalized the document-wide scale.  Keep the
+    # reconstruction path on that same scale as closed polylines.
+    effective_meters_per_unit = meters_per_unit
     # 过滤微碎面：仅保留面积不小于主候选千分之一的面。
     largest = polys[0].area if polys else 0.0
     threshold = largest / 1000

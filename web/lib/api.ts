@@ -193,6 +193,67 @@ export const api = {
       is_current: boolean;
       stale_reasons: string[];
     }>(`/projects/${id}/photometry-preview`),
+  blenderWorkflow: (id: string) =>
+    request<{
+      workflow: import("./types").BlenderWorkflow;
+      blender: { status: "connected" | "unavailable" | "unknown"; message: string };
+      project_revision: number;
+    }>(`/projects/${id}/blender-workflow`),
+  uploadBlenderWorkflowSource: (id: string, expectedRevision: number, file: File, autoModel = true) => {
+    const data = new FormData();
+    data.append("file", file);
+    data.append("expected_revision", String(expectedRevision));
+    data.append("auto_model_enabled", String(autoModel));
+    return request<{
+      source: import("./types").BlenderSourceAsset;
+      workflow: import("./types").BlenderWorkflow;
+      project: Project;
+      floor_plan: import("./types").FloorPlan | null;
+      auto_model: {
+        status: "deferred" | "awaiting_evidence" | "created" | "reused" | "blender_unavailable" | "failed";
+        missing_fields: string[];
+        message?: string;
+      };
+    }>(
+      `/projects/${id}/blender-workflow/source`,
+      { method: "POST", body: data },
+    );
+  },
+  openBlenderWorkflow: (id: string) =>
+    request<{ status: "connected"; started: boolean; message: string }>(
+      `/projects/${id}/blender-workflow/open`,
+      { method: "POST" },
+    ),
+  registerBlenderModel: (id: string, expectedRevision: number, modelPath: string | null, reuseExisting = true) =>
+    request<{ workflow: import("./types").BlenderWorkflow; project: Project; reused: boolean }>(
+      `/projects/${id}/blender-workflow/model`,
+      {
+        method: "POST",
+        body: JSON.stringify({ expected_revision: expectedRevision, model_path: modelPath, reuse_existing: reuseExisting }),
+      },
+    ),
+  updateBlenderWorkflowParameters: (
+    id: string,
+    expectedRevision: number,
+    parameters: import("./types").BlenderWorkflowParameters,
+  ) =>
+    request<{ workflow: import("./types").BlenderWorkflow; project: Project }>(
+      `/projects/${id}/blender-workflow/parameters`,
+      { method: "PUT", body: JSON.stringify({ expected_revision: expectedRevision, parameters }) },
+    ),
+  createBlenderEstimate: (id: string, expectedRevision: number, allowProvisional = true) =>
+    request<{ workflow: import("./types").BlenderWorkflow; project: Project; estimate: import("./types").BlenderEstimate }>(
+      `/projects/${id}/blender-workflow/estimate`,
+      { method: "POST", body: JSON.stringify({ expected_revision: expectedRevision, allow_provisional: allowProvisional }) },
+    ),
+  createBlenderWorkflowReport: (id: string, expectedRevision: number) =>
+    request<{ workflow: import("./types").BlenderWorkflow; project: Project; download_url: string }>(
+      `/projects/${id}/blender-workflow/report`,
+      { method: "POST", body: JSON.stringify({ expected_revision: expectedRevision }) },
+    ),
+  blenderWorkflowReportUrl: (id: string) => `${API_ROOT}/projects/${id}/blender-workflow/report`,
+  blenderWorkflowAssetUrl: (id: string, relativePath: string) =>
+    `${API_ROOT}/projects/${id}/blender-workflow/assets/${relativePath.split("/").map(encodeURIComponent).join("/")}`,
   chat: (payload: ChatPayload) =>
     request<{ session_id: string; answer: string }>("/chat", { method: "POST", body: JSON.stringify(payload) }),
   chatHistory: (sessionId: string, projectId?: string) =>
