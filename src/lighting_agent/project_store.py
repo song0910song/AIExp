@@ -153,7 +153,6 @@ class ProjectStore:
                 "selected_luminaire_ids",
                 "luminaire_group_assignments",
                 "floor_plan",
-                "blender_workflow",
                 "simulation_runs",
                 "open_questions",
             ):
@@ -191,22 +190,6 @@ class ProjectStore:
                         luminaires_changed=luminaires_changed,
                     ),
                 )
-                if update.blender_workflow is None:
-                    self._invalidate_blender_outputs(
-                        state,
-                        self._simulation_stale_reason(
-                            brief_changed=brief_changed,
-                            selected_changed=selected_changed,
-                            floor_plan_changed=floor_plan_changed,
-                            luminaires_changed=luminaires_changed,
-                        ),
-                        # Candidate edits can change the final luminaire
-                        # metadata (and therefore the photometry snapshot)
-                        # even when the selected-id list itself is unchanged.
-                        # Treat them as model-affecting so an old render is
-                        # never presented as the current scheme.
-                        model_changed=brief_changed or selected_changed or floor_plan_changed or luminaires_changed,
-                    )
             state.refresh_workflow_status()
             state = ProjectState.model_validate(state.model_dump())
             state.revision += 1
@@ -260,37 +243,6 @@ class ProjectStore:
             else run
             for run in state.simulation_runs
         ]
-
-    @staticmethod
-    def _invalidate_blender_outputs(state: ProjectState, reason: str, *, model_changed: bool) -> None:
-        """Keep assets for audit while preventing stale model/estimate/report reuse."""
-
-        workflow = state.blender_workflow
-        model = workflow.model
-        if model_changed and model is not None:
-            model = model.model_copy(
-                update={"status": "missing", "reused": False, "message": reason}
-            )
-        nodes = []
-        for node in workflow.nodes:
-            if node.node_id == "model" and model_changed:
-                nodes.append(node.model_copy(update={"status": "pending", "message": reason, "output_refs": []}))
-            elif node.node_id == "estimate":
-                nodes.append(node.model_copy(update={"status": "pending", "message": reason, "output_refs": []}))
-            elif node.node_id == "report":
-                nodes.append(node.model_copy(update={"status": "pending", "message": reason, "output_refs": []}))
-            else:
-                nodes.append(node)
-        state.blender_workflow = workflow.model_copy(
-            update={
-                "model": model,
-                "nodes": nodes,
-                "estimate": None,
-                "report_markdown_path": None,
-                "report_pdf_path": None,
-                "report_render_paths": [],
-            }
-        )
 
     def append_simulation_run(
         self,
@@ -482,11 +434,6 @@ class ProjectStore:
             state.selected_luminaire_ids = selected_ids
             state.luminaire_group_assignments = assignments
             self._mark_simulation_runs_stale(state, "Project inputs changed: selected luminaires")
-            self._invalidate_blender_outputs(
-                state,
-                "Project inputs changed: selected luminaires",
-                model_changed=True,
-            )
             state.refresh_workflow_status()
             state.revision += 1
             state.updated_at = datetime.now(UTC)
@@ -581,7 +528,6 @@ class ProjectStore:
             if state.selected_luminaire_ids != previous_selected_ids:
                 reason = "Project inputs changed: luminaire validation"
                 self._mark_simulation_runs_stale(state, reason)
-                self._invalidate_blender_outputs(state, reason, model_changed=True)
             state.refresh_workflow_status()
             state.revision += 1
             state.updated_at = datetime.now(UTC)
@@ -622,7 +568,6 @@ class ProjectStore:
             self.directory / f"{project_id}.photometry",
             self.directory / f"{project_id}.plans",
             self.directory / f"{project_id}.documents",
-            self.directory / f"{project_id}.blender-workflow",
         ):
             if directory.exists():
                 shutil.rmtree(directory)

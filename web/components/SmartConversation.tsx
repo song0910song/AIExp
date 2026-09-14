@@ -9,7 +9,6 @@ import {
   CircleDot,
   CircleX,
   LoaderCircle,
-  Images,
   RotateCcw,
   UserRound,
   Wrench,
@@ -31,7 +30,6 @@ import type {
   ReasoningEffort,
 } from "@/lib/types";
 import { ChatComposer } from "./ChatComposer";
-import { ConversationArtifacts } from "./ConversationArtifacts";
 import { Notice } from "./ui";
 
 type Message = {
@@ -57,12 +55,6 @@ const toolLabels: Record<string, string> = {
   select_luminaires: "确认最终选定灯具",
   generate_design_report: "生成设计报告",
   create_dialux_task_package: "生成 DIALux 任务包",
-  get_blender_workflow: "读取 Blender 方案状态",
-  build_blender_model: "建立 / 复用 Blender 模型",
-  update_blender_parameters: "确认照度估算参数",
-  sync_luminaires_to_blender: "在三维模型中更换灯具",
-  calculate_blender_illuminance: "生成工作面照度初算",
-  generate_blender_optimization_report: "生成三维优化方案",
 };
 
 function statusLabel(status: AgentStepStatus | AgentToolRun["status"]) {
@@ -304,7 +296,6 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
   const [restoring, setRestoring] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [debugOpen, setDebugOpen] = useState(false);
-  const [artifactsOpen, setArtifactsOpen] = useState(false);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const sessionStorageKey = `lighting-smart-session:${project.project_id}`;
   const clarificationStorageKey = `lighting-clarification:${project.project_id}`;
@@ -332,7 +323,6 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
     setError(null);
     setContextUsage(unavailableContextUsage(health?.llm_context_window_tokens));
     setDebugOpen(window.localStorage.getItem("lighting-debug-open") === "true");
-    setArtifactsOpen(false);
     try {
       setClarification(storedClarification ? JSON.parse(storedClarification) as ClarificationRequest : null);
     } catch {
@@ -377,18 +367,6 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
     setDebugOpen((current) => {
       const next = !current;
       window.localStorage.setItem("lighting-debug-open", String(next));
-      if (next) setArtifactsOpen(false);
-      return next;
-    });
-  }
-
-  function toggleArtifacts() {
-    setArtifactsOpen((current) => {
-      const next = !current;
-      if (next) {
-        setDebugOpen(false);
-        window.localStorage.setItem("lighting-debug-open", "false");
-      }
       return next;
     });
   }
@@ -408,32 +386,21 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
     setError(null);
     let uploadedNames: string[] = [];
     let floorPlans: import("@/lib/types").FloorPlan[] = [];
-    const blenderIntake: string[] = [];
-    const workflowFiles = attachments.filter((file) => [".pdf", ".dxf", ".dwg"].includes(file.name.slice(file.name.lastIndexOf(".")).toLowerCase()));
     let projectRevision = project.revision;
     try {
       const uploads: Array<{ floorPlan?: import("@/lib/types").FloorPlan; name: string }> = [];
-      let workflowIndex = 0;
       for (const file of attachments) {
         const extension = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
-        if ([".pdf", ".dxf", ".dwg"].includes(extension)) {
-          workflowIndex += 1;
-          setActivity(extension === ".pdf" ? `正在读取设计报告：${file.name}` : `正在解析平面图：${file.name}`);
-          const imported = await api.uploadBlenderWorkflowSource(
+        if ([".dxf", ".dwg"].includes(extension)) {
+          setActivity(`正在解析平面图：${file.name}`);
+          const imported = await api.importFloorPlan(
             project.project_id,
             projectRevision,
             file,
-            workflowIndex === workflowFiles.length,
           );
           projectRevision = imported.project.revision;
           onProject(imported.project);
-          uploads.push({ floorPlan: imported.floor_plan ?? undefined, name: imported.source?.source_name ?? file.name });
-          const autoModel = imported.auto_model;
-          if (autoModel.status === "created") blenderIntake.push("Blender MCP 已完成首次建模并保存模型与渲染图");
-          if (autoModel.status === "reused") blenderIntake.push("已复用与当前资料匹配的 Blender 模型");
-          if (autoModel.status === "awaiting_evidence") blenderIntake.push(`Blender 建模等待证据：${autoModel.missing_fields.join("、")}`);
-          if (autoModel.status === "blender_unavailable") blenderIntake.push(`Blender 尚未连接：${autoModel.message ?? "请自行打开 Blender 并启用 MCP"}`);
-          if (autoModel.status === "failed") blenderIntake.push(`Blender 建模失败：${autoModel.message ?? "未知错误"}`);
+          uploads.push({ floorPlan: imported.floor_plan, name: imported.floor_plan.asset.source_name });
           continue;
         }
         setActivity(`正在载入项目资料：${file.name}`);
@@ -463,9 +430,8 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
       instruction || "我已上传项目资料，请读取并用于本轮分析。",
       uploadedNames.length ? `已上传文件：${uploadedNames.join("、")}。` : "",
       floorPlanContext.join("\n"),
-      blenderIntake.length ? `建模工作流状态：${blenderIntake.join("；")}。` : "",
       uploadedNames.length > floorPlans.length ? "设计报告和其他项目资料已进入本项目证据范围，可在需要时检索其内容。" : "",
-      workflowFiles.length ? "请按顺序继续：确认建模证据并完成/复用 Blender 模型，分析现状，优化和搜索灯具，确认后在模型中换灯，再进行照度初算并给出优化方案。" : "",
+      uploadedNames.length ? "请先基于已上传资料核对任务书条件和图纸信息，再继续照明分析、选灯和初步计算。" : "",
     ].filter(Boolean).join("\n\n");
     const timestamp = Date.now();
     const assistantId = `assistant-${timestamp}-${Math.random().toString(36).slice(2)}`;
@@ -557,32 +523,11 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
   }
 
   const showObservability = steps.length > 0 || tools.length > 0;
-  const artifactCount = project.blender_workflow.source_assets.reduce((count, source) => count + source.preview_paths.length, 0)
-    + (project.blender_workflow.model?.status === "ready" ? project.blender_workflow.model.render_paths.length : 0)
-    + (project.blender_workflow.estimate?.heatmap_path ? 1 : 0)
-    + project.luminaires.filter((item) => project.selected_luminaire_ids.includes(item.luminaire_id) && (item.image_url || item.photometry_image_url)).length;
-  const artifactSignature = [
-    project.blender_workflow.model?.model_sha256,
-    project.blender_workflow.estimate?.heatmap_path,
-    ...project.blender_workflow.source_assets.flatMap((source) => source.preview_paths),
-    ...project.luminaires
-      .filter((item) => project.selected_luminaire_ids.includes(item.luminaire_id))
-      .flatMap((item) => [item.image_url, item.photometry_image_url]),
-  ].filter(Boolean).join("|");
-
-  useEffect(() => {
-    if (artifactSignature) {
-      setArtifactsOpen(true);
-      setDebugOpen(false);
-      window.localStorage.setItem("lighting-debug-open", "false");
-    }
-  }, [artifactSignature]);
-
   const running = busy || uploading;
   const statusText = running ? activity ?? "正在处理请求" : showObservability ? "本轮执行已完成" : "准备就绪";
 
   return (
-    <div className={`conversation-app ${debugOpen || artifactsOpen ? "conversation-side-open" : ""}`}>
+    <div className={`conversation-app ${debugOpen ? "conversation-side-open" : ""}`}>
       <header className="conversation-header">
         <div className="conversation-header-title">
           <span className="agent-mark" aria-hidden="true"><Bot size={16} /></span>
@@ -590,9 +535,6 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
         </div>
         <div className="conversation-header-actions">
           <span className={`conversation-run-status ${running ? "is-running" : ""}`}><i />{statusText}</span>
-          <button className={`conversation-debug-toggle ${artifactsOpen ? "active" : ""}`} onClick={toggleArtifacts} aria-pressed={artifactsOpen} title={artifactsOpen ? "关闭结果预览" : "打开结果预览"} aria-label={artifactsOpen ? "关闭结果预览" : "打开结果预览"}>
-            <Images size={16} /><span>预览{artifactCount ? ` ${artifactCount}` : ""}</span>
-          </button>
           <button className={`conversation-debug-toggle ${debugOpen ? "active" : ""}`} onClick={toggleDebug} aria-pressed={debugOpen} title={debugOpen ? "关闭执行调试" : "打开执行调试"}>
             <Bug size={16} /><span>调试</span>
           </button>
@@ -619,7 +561,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
                   <AssistantMarkdown content={message.content} streaming={message.streaming} activity={activity ?? undefined} />
                 </> : message.content}</div>
               </article>
-            )) : <div className="chat-welcome smart-welcome"><p className="eyebrow">LIGHTING DESIGN AGENT</p><h3>上传资料，开始方案优化</h3><p>可直接上传设计报告 PDF 或 DXF/DWG 平面图。证据足够时会启动 Blender 建模；随后由智能体分析现状、优化选灯、在模型换灯、进行照度初算并给出方案。</p><div>{["上传设计报告并开始建模", "检查当前任务书还缺什么", "根据已确认条件推荐灯具"].map((text) => <button key={text} onClick={() => setDraft(text)}>{text}</button>)}</div></div>}
+            )) : <div className="chat-welcome smart-welcome"><p className="eyebrow">LIGHTING DESIGN AGENT</p><h3>上传资料，开始方案优化</h3><p>可直接上传设计报告 PDF 或 DXF/DWG 平面图。系统会提取项目资料与平面图信息，供后续任务书核对、灯具选型和照度初步计算使用。</p><div>{["上传设计报告并开始分析", "检查当前任务书还缺什么", "根据已确认条件推荐灯具"].map((text) => <button key={text} onClick={() => setDraft(text)}>{text}</button>)}</div></div>}
             {clarification ? <ClarificationCard request={clarification} busy={busy} onSubmit={(content) => void send(content)} /> : null}
           </div>
           {error ? <div className="conversation-error"><Notice tone="danger">{error}</Notice></div> : null}
@@ -640,7 +582,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
             onSubmit={() => void send()}
           />
         </section>
-        {artifactsOpen ? <ConversationArtifacts project={project} onClose={() => setArtifactsOpen(false)} /> : debugOpen ? <DebugRunPanel project={project} steps={steps} tools={tools} busy={busy} activity={activity} /> : null}
+        {debugOpen ? <DebugRunPanel project={project} steps={steps} tools={tools} busy={busy} activity={activity} /> : null}
       </div>
     </div>
   );

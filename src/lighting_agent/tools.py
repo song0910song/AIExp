@@ -15,17 +15,6 @@ from pydantic import Field, model_validator
 
 from .calculations import calculate_lumen_method, check_design_rules as run_rule_checks
 from . import dialux_protocol
-from .blender_workflow import (
-    BlenderConnectionError,
-    BlenderWorkflowError,
-    build_workflow_report_markdown,
-    create_or_reuse_blender_model,
-    estimate_workplane,
-    modeling_missing_fields,
-    render_workflow_report_pdf,
-    update_node,
-    workflow_root,
-)
 from .dialux_api import (
     DialuxAPI,
     DialuxAPIError,
@@ -40,7 +29,6 @@ from .photometry_assets import PhotometryAssetStore
 from .rag import create_evidence_store, format_evidence
 from .schemas import (
     CalculationInput,
-    BlenderWorkflowParameters,
     DesignBrief,
     LightingGroup,
     LightingParameterSource,
@@ -388,28 +376,6 @@ class DialuxTaskInput(ProjectReference):
 
 class ReportInput(DialuxTaskInput):
     pass
-
-
-class BlenderModelInput(ProjectReference):
-    expected_revision: int = Field(ge=0)
-    force_rebuild: bool = False
-
-
-class BlenderParametersInput(ProjectReference):
-    expected_revision: int = Field(ge=0)
-    workplane_height_m: float | None = Field(default=None, ge=0, le=10)
-    grid_spacing_m: float | None = Field(default=None, gt=0.05, le=10)
-    grid_margin_m: float | None = Field(default=None, ge=0, le=20)
-    maintenance_factor: float | None = Field(default=None, gt=0, le=1)
-    utilization_factor: float | None = Field(default=None, gt=0, le=1)
-    floor_reflectance: float | None = Field(default=None, ge=0, le=1)
-    wall_reflectance: float | None = Field(default=None, ge=0, le=1)
-    ceiling_reflectance: float | None = Field(default=None, ge=0, le=1)
-    total_flux_lm: float | None = Field(default=None, gt=0, le=100_000_000)
-
-
-class BlenderEstimateInput(ProjectReference):
-    expected_revision: int = Field(ge=0)
 
 
 project_store = ProjectStore()
@@ -1284,6 +1250,7 @@ def ask_user(title: str, question: str, fields: list[ClarificationField]) -> dic
     }
 
 
+'''Blender MCP tools removed.
 def _blender_parameter_questions(parameters: BlenderWorkflowParameters) -> list[str]:
     labels = {
         "maintenance_factor": "维护系数 MF",
@@ -1295,7 +1262,6 @@ def _blender_parameter_questions(parameters: BlenderWorkflowParameters) -> list[
     return [f"请确认{label}" for field, label in labels.items() if getattr(parameters, field) is None]
 
 
-@tool("get_blender_workflow", args_schema=ProjectReference)
 def get_blender_workflow(project_id: str) -> dict:
     """Read uploaded sources, saved model, image artifacts and preliminary-result status."""
 
@@ -1307,7 +1273,6 @@ def get_blender_workflow(project_id: str) -> dict:
     }
 
 
-@tool("build_blender_model", args_schema=BlenderModelInput)
 def build_blender_model(project_id: str, expected_revision: int, force_rebuild: bool = False) -> dict:
     """Use the local Blender MCP add-on to build, render and save the evidence-backed room model."""
 
@@ -1355,7 +1320,6 @@ def build_blender_model(project_id: str, expected_revision: int, force_rebuild: 
     }
 
 
-@tool("update_blender_parameters", args_schema=BlenderParametersInput)
 def update_blender_parameters(
     project_id: str,
     expected_revision: int,
@@ -1431,7 +1395,6 @@ def update_blender_parameters(
     }
 
 
-@tool("sync_luminaires_to_blender", args_schema=BlenderModelInput)
 def sync_luminaires_to_blender(project_id: str, expected_revision: int, force_rebuild: bool = False) -> dict:
     """Download final IES/LDT/ULD files and replace placeholder fixtures in the saved 3D model."""
 
@@ -1517,7 +1480,6 @@ def sync_luminaires_to_blender(project_id: str, expected_revision: int, force_re
     }
 
 
-@tool("calculate_blender_illuminance", args_schema=BlenderEstimateInput)
 def calculate_blender_illuminance(project_id: str, expected_revision: int) -> dict:
     """Generate the preliminary work-plane grid and heatmap for the synchronized 3D scheme."""
 
@@ -1614,7 +1576,6 @@ def calculate_blender_illuminance(project_id: str, expected_revision: int) -> di
     }
 
 
-@tool("generate_blender_optimization_report", args_schema=ReportInput)
 def generate_blender_optimization_report(project_id: str, expected_revision: int) -> dict:
     """Create the final optimized-scheme PDF with real Blender renders and an illuminance heatmap."""
 
@@ -1661,6 +1622,8 @@ def generate_blender_optimization_report(project_id: str, expected_revision: int
         "rebased": state.revision != expected_revision,
     }
 
+
+'''
 
 @tool("create_dialux_task_package", args_schema=DialuxTaskInput)
 def create_dialux_task_package(project_id: str, expected_revision: int) -> dict:
