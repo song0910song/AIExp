@@ -14,15 +14,11 @@ from .tools import (
     adopt_evidence,
     apply_rag_lighting_parameters,
     ask_user,
-    build_blender_model,
-    calculate_blender_illuminance,
     calculate_preliminary_lighting,
     check_design_rules,
     create_dialux_task_package,
     create_project,
     generate_design_report,
-    generate_blender_optimization_report,
-    get_blender_workflow,
     get_project,
     get_luminaire_detail,
     prepare_luminaire_search,
@@ -30,8 +26,6 @@ from .tools import (
     search_luminaires,
     select_luminaires,
     send_luminaire_to_dialux,
-    sync_luminaires_to_blender,
-    update_blender_parameters,
     update_project_brief,
     update_lighting_groups,
 )
@@ -62,6 +56,11 @@ SYSTEM_PROMPT += "\nEvidence scope: when a current project_id is available, pass
 SYSTEM_PROMPT += """
 Lighting groups are mandatory. Divide the design by concrete rooms, zones, or functional regions. Every group must carry a region name, group name, area, mounting-point height above finished floor, target illuminance, and confirmation status. The mounting-point height is the height to the luminaire mounting or suspension point, not a guessed room height. Extract candidate values only from user chat, approved project documents/PDF/Word evidence, or explicit CAD/DXF text/layer/block metadata. For an approved DIALux/design-report PDF, use the explicitly listed installation heights directly (for example, separate 3.097 m panel-light and 4.144 m downlight groups); do not ask the user to re-enter or confirm those heights. Never infer an unmentioned height from common practice. When height or region evidence conflicts and the PDF does not resolve it, call ask_user. Save only user-confirmed groups with update_lighting_groups. Run calculate_preliminary_lighting with one CalculationInput per confirmed group, including group_id and mounting_height_m. Search luminaires with lighting_group_id so each search is tied to one group. Assign final luminaires with group_assignments when calling select_luminaires.
 If calculate_preliminary_lighting returns status=needs_clarification, do not retry it with guessed values and do not present the raw tool error. Call ask_user with the returned missing_fields (especially luminaire luminous flux in lm and power in W), or first select/read a saved luminaire with complete values, then stop and wait for confirmation.
+"""
+SYSTEM_PROMPT = """You are an indoor lighting design project assistant and workflow coordinator.
+Use get_project before project work, search_evidence before standards or missing lighting parameters, and apply_rag_lighting_parameters only with applicable non-conflicting evidence. Use ask_user when required values remain missing or conflicting. Use project tools for calculations, luminaire search, DIALux handoff, and reports. Never invent standards, product data, or calculation results; use the latest project revision for every write. CAD files may be parsed as 2D floor-plan evidence only; do not generate 3D scenes.
+只有证据明确、适用且不冲突时写入参数；仅当 RAG 没有适用明确值或存在冲突时询问用户。
+鍙湁璇佹嵁鏄庣‘銆侀€傜敤涓斾笉鍐茬獊鏃?浠呭綋 RAG 娌℃湁閫傜敤鏄庣‘鍊?
 """
 # Module-level hook so the shared agent can report SDK-level model retries
 # (429 / 5xx / connection errors) back to the active request. LangChain runs
@@ -170,7 +169,6 @@ def build_agent(settings: Settings | None = None) -> Any:
         model=model,
         tools=[
             get_project,
-            get_blender_workflow,
             create_project,
             ask_user,
             update_project_brief,
@@ -180,19 +178,14 @@ def build_agent(settings: Settings | None = None) -> Any:
             adopt_evidence,
             add_document,
             calculate_preliminary_lighting,
-            build_blender_model,
-            update_blender_parameters,
             check_design_rules,
             prepare_luminaire_search,
             search_luminaires,
             get_luminaire_detail,
             send_luminaire_to_dialux,
             select_luminaires,
-            sync_luminaires_to_blender,
-            calculate_blender_illuminance,
             create_dialux_task_package,
             generate_design_report,
-            generate_blender_optimization_report,
         ],
         system_prompt=_system_prompt_for_settings(settings),
     )

@@ -36,23 +36,6 @@ from .calculations import (
 )
 from .calculations.photometry import PhotometryParseError, parse_photometry_file
 from .calculations.preview import PreviewGeometryError
-from .blender_workflow import (
-    BlenderConnectionError,
-    BlenderWorkflowError,
-    build_workflow_report_markdown,
-    create_or_reuse_blender_model,
-    ensure_blender_running,
-    estimate_workplane,
-    modeling_missing_fields,
-    probe_blender,
-    register_model,
-    render_source_previews,
-    render_workflow_report_pdf,
-    sha256_file,
-    update_node,
-    workflow_root,
-    workflow_source_fingerprint,
-)
 from .config import (
     DATABASE_FILE,
     REASONING_EFFORT_METADATA,
@@ -79,9 +62,6 @@ from .schemas import (
     SimulationMetrics,
     SimulationRun,
     StrictModel,
-    BlenderSourceAsset,
-    BlenderWorkflow,
-    BlenderWorkflowParameters,
     LightingGroup,
 )
 from .storage import SQLiteDatabase
@@ -235,15 +215,11 @@ class DialuxResultRequest(StrictModel):
     parser_version: str = Field(default="manual-form-1", max_length=80)
 
 
-class PhotometryPreviewWebRequest(IlluminancePreviewRequest):
-    """Illuminance preview inputs plus the mandatory optimistic-lock revision."""
-
-    expected_revision: int = Field(ge=0)
-
-
+# Deprecated Blender endpoints remain as explicit 410 responses for clients
+# that have not yet migrated. Their request shapes are intentionally opaque.
 class BlenderWorkflowParametersRequest(StrictModel):
     expected_revision: int = Field(ge=0)
-    parameters: BlenderWorkflowParameters
+    parameters: dict[str, Any] = Field(default_factory=dict)
 
 
 class BlenderModelRequest(StrictModel):
@@ -261,8 +237,12 @@ class BlenderReportRequest(StrictModel):
     expected_revision: int = Field(ge=0)
 
 
-class BlenderPhotometryRequest(StrictModel):
+class PhotometryPreviewWebRequest(IlluminancePreviewRequest):
+    """Illuminance preview inputs plus the mandatory optimistic-lock revision."""
+
     expected_revision: int = Field(ge=0)
+
+
 
 
 class ChatRequest(StrictModel):
@@ -733,13 +713,13 @@ _AGENT_WORKFLOW_STEPS: tuple[dict[str, Any], ...] = (
         "id": "model",
         "title": "建立并保存三维模型",
         "description": "证据充分后连接 Blender MCP 建模、渲染，并复用匹配的项目模型。",
-        "tools": ["get_blender_workflow", "build_blender_model"],
+        "tools": [],
     },
     {
         "id": "analysis",
         "title": "分析现状照明",
         "description": "结合设计资料、空间分区与规范目标识别当前问题和优化方向。",
-        "tools": ["update_blender_parameters", "check_design_rules"],
+        "tools": ["check_design_rules"],
     },
     {
         "id": "luminaires",
@@ -751,20 +731,25 @@ _AGENT_WORKFLOW_STEPS: tuple[dict[str, Any], ...] = (
         "id": "relight",
         "title": "在三维模型中更换灯具",
         "description": "下载最终灯具 IES/LDT/ULD，并更新 Blender 灯具阵列和渲染图。",
-        "tools": ["sync_luminaires_to_blender"],
+        "tools": [],
     },
     {
         "id": "calculation",
         "title": "照度初算",
         "description": "运行流明法与工作面网格初算，输出照度热力图及限制。",
-        "tools": ["calculate_preliminary_lighting", "calculate_blender_illuminance"],
+        "tools": ["calculate_preliminary_lighting"],
     },
     {
         "id": "deliverables",
         "title": "给出优化后的方案",
         "description": "生成包含真实三维渲染和照度热力图的方案报告，并声明专业复核边界。",
-        "tools": ["generate_blender_optimization_report", "generate_design_report", "create_dialux_task_package"],
+        "tools": ["generate_design_report", "create_dialux_task_package"],
     },
+)
+
+# Blender-specific workflow stages were retired with the Blender MCP feature.
+_AGENT_WORKFLOW_STEPS = tuple(
+    step for step in _AGENT_WORKFLOW_STEPS if step["id"] not in {"model", "relight"}
 )
 
 _AGENT_TOOL_STEPS = {
@@ -1385,10 +1370,12 @@ def create_app(
             "applied_area_candidate_index": candidate_index,
         }
 
-    # --- Conversational drawing/report -> Blender -> preliminary estimate workflow ---
+    '''
+    # --- Retired Blender MCP workflow ---
 
     @app.get("/api/projects/{project_id}/blender-workflow")
     def get_blender_workflow(project_id: str) -> dict[str, Any]:
+        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
         state = projects.get(project_id)
         workflow = state.blender_workflow
         status, message = probe_blender()
@@ -1402,6 +1389,7 @@ def create_app(
 
     @app.post("/api/projects/{project_id}/blender-workflow/open")
     def open_blender_for_workflow(project_id: str) -> dict[str, Any]:
+        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
         state = projects.get(project_id)
         model_path = None
         if state.blender_workflow.model:
@@ -1422,6 +1410,8 @@ def create_app(
         auto_model_enabled: Annotated[bool, Form()] = True,
     ) -> dict[str, Any]:
         """Save and index a PDF/DXF/DWG source specifically for the workflow."""
+
+        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
 
         state = projects.get(project_id)
         if state.revision != expected_revision:
@@ -1664,6 +1654,7 @@ def create_app(
 
     @app.post("/api/projects/{project_id}/blender-workflow/model", status_code=201)
     def register_blender_model(project_id: str, request: BlenderModelRequest) -> dict[str, Any]:
+        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
         state = projects.get(project_id)
         if state.revision != request.expected_revision:
             raise RevisionConflictError(
@@ -1702,6 +1693,7 @@ def create_app(
 
     @app.put("/api/projects/{project_id}/blender-workflow/parameters")
     def update_blender_workflow_parameters(project_id: str, request: BlenderWorkflowParametersRequest) -> dict[str, Any]:
+        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
         state = projects.get(project_id)
         if state.revision != request.expected_revision:
             raise RevisionConflictError(
@@ -1759,6 +1751,7 @@ def create_app(
 
     @app.post("/api/projects/{project_id}/blender-workflow/estimate", status_code=201)
     def create_blender_estimate(project_id: str, request: BlenderEstimateRequest) -> dict[str, Any]:
+        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
         state = projects.get(project_id)
         if state.revision != request.expected_revision:
             raise RevisionConflictError(
@@ -1791,6 +1784,7 @@ def create_app(
 
     @app.post("/api/projects/{project_id}/blender-workflow/report", status_code=201)
     def create_blender_workflow_report(project_id: str, request: BlenderReportRequest) -> dict[str, Any]:
+        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
         state = projects.get(project_id)
         if state.revision != request.expected_revision:
             raise RevisionConflictError(
@@ -1819,6 +1813,7 @@ def create_app(
 
     @app.get("/api/projects/{project_id}/blender-workflow/report")
     def download_blender_workflow_report(project_id: str):
+        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
         state = projects.get(project_id)
         relative = state.blender_workflow.report_pdf_path
         if not relative:
@@ -1830,6 +1825,7 @@ def create_app(
 
     @app.get("/api/projects/{project_id}/blender-workflow/assets/{asset_path:path}")
     def download_blender_workflow_asset(project_id: str, asset_path: str):
+        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
         projects.get(project_id)
         root = project_directory(project_id)
         target = (root / asset_path).resolve()
@@ -1837,6 +1833,8 @@ def create_app(
         if workflow_root_path not in target.parents or not target.is_file():
             raise HTTPException(status_code=404, detail="工作流资产不存在")
         return FileResponse(target, filename=target.name)
+
+    '''
 
     @app.post("/api/projects/{project_id}/rule-checks")
     def rules(project_id: str, request: RuleCheckRequest) -> dict[str, Any]:
