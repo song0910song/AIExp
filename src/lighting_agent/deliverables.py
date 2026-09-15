@@ -23,13 +23,6 @@ def handoff_snapshot(state: ProjectState) -> dict:
         "project_id": state.project_id,
         "project_revision": state.revision,
         "brief": state.brief.model_dump(mode="json"),
-        "lighting_groups": [
-            {
-                **group.model_dump(mode="json"),
-                "selected_luminaire_ids": state.luminaire_group_assignments.get(group.group_id, []),
-            }
-            for group in state.brief.lighting_groups
-        ],
         "selected_luminaire_ids": state.selected_luminaire_ids,
     }
 
@@ -74,13 +67,6 @@ def build_dialux_task_package(state: ProjectState) -> dict:
         "input_snapshot": snapshot,
         "input_snapshot_sha256": hashlib.sha256(_canonical_json(snapshot)).hexdigest(),
         "brief": state.brief.model_dump(mode="json"),
-        "lighting_groups": [
-            {
-                **group.model_dump(mode="json"),
-                "selected_luminaire_ids": state.luminaire_group_assignments.get(group.group_id, []),
-            }
-            for group in state.brief.lighting_groups
-        ],
         "selected_luminaire_ids": state.selected_luminaire_ids,
         "candidates": [
             {
@@ -260,21 +246,8 @@ def build_design_report(state: ProjectState) -> str:
         "min_ip_rating": "最低 IP 等级",
     }
     for field, label in labels.items():
-        if field == "mounting_height_m":
-            continue
         value = getattr(brief, field, None)
         lines.append(f"| {label} | {_markdown_value(value)} |")
-
-    lines.extend(["", "## Lighting regions and groups", "", "| Region | Group | Area (m2) | Mounting point height (m) | Target illuminance (lx) | Status |", "| --- | --- | ---: | ---: | ---: | --- |"])
-    if not brief.lighting_groups:
-        lines.append("| - | - | - | - | - | pending |")
-    else:
-        for group in brief.lighting_groups:
-            lines.append(
-                f"| {group.region_name} | {group.group_name} | {group.area_m2:g} | "
-                f"{group.mounting_height_m:g} | {group.target_illuminance_lx:g} | "
-                f"{'confirmed' if group.confirmed else 'pending'} |"
-            )
 
     lines.extend(["", "## 规范与项目证据", ""])
     if not state.evidence:

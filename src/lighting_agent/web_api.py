@@ -22,7 +22,7 @@ from uuid import uuid4
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import Field
+from pydantic import Field, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from . import dialux_protocol
@@ -62,103 +62,9 @@ from .schemas import (
     SimulationMetrics,
     SimulationRun,
     StrictModel,
-    LightingGroup,
 )
 from .storage import SQLiteDatabase
 from .workspace import WorkspaceError, WorkspaceEvidenceStore, WorkspaceProjectStore
-
-
-def _pdf_installation_heights(text: str) -> list[tuple[float, str]]:
-    """Extract explicit luminaire mounting heights from a DIALux PDF.
-
-    DIALux reports repeat the installation-height column for every luminaire,
-    so we keep only distinct, positive values.  The labels are intentionally
-    tied to product names when present; otherwise the value remains a neutral
-    PDF-derived group name.  No engineering default is inferred here.
-    """
-
-    normalized = re.sub(r"\s+", " ", text or "")
-    values: list[float] = []
-    # The summary page often prints a compact range such as
-    # “安装高度 3.097 m – 4.144 m”.  When present this is authoritative and
-    # avoids mistaking the X/Y coordinates in the repeated luminaire tables
-    # for installation heights.
-    range_values: list[float] = []
-    for first, second in re.findall(
-        r"(?:安装高度|mounting height)[^0-9]{0,20}(\d+(?:[.,]\d+)?)\s*m\s*[–-]\s*(\d+(?:[.,]\d+)?)\s*m",
-        normalized,
-        re.I,
-    ):
-        for raw in (first, second):
-            try:
-                value = float(raw.replace(",", "."))
-            except ValueError:
-                continue
-            if value > 0 and value not in range_values:
-                range_values.append(value)
-    if len(range_values) >= 2:
-        values = range_values
-    for raw in ([] if values else re.findall(r"(?:安装高度|mounting height)[^0-9]{0,30}(\d+(?:[.,]\d+)?)\s*m", normalized, re.I)):
-        try:
-            value = float(raw.replace(",", "."))
-        except ValueError:
-            continue
-        if value > 0 and value not in values:
-            values.append(value)
-    # Some extracted PDFs place the value on the next line after the column
-    # heading; the broader fallback still requires the explicit metre unit.
-    if not values:
-        for raw in re.findall(r"(\d+(?:[.,]\d+)?)\s*m\s*[–-]\s*(\d+(?:[.,]\d+)?)\s*m", normalized):
-            for item in raw:
-                try:
-                    value = float(item.replace(",", "."))
-                except ValueError:
-                    continue
-                if value > 0 and value not in values:
-                    values.append(value)
-    values.sort()
-    result: list[tuple[float, str]] = []
-    for value in values:
-        if abs(value - 3.097) <= 0.01:
-            label = "基础面板灯（PDF设计）"
-        elif abs(value - 4.144) <= 0.01:
-            label = "重点/补充筒灯（PDF设计）"
-        else:
-            label = f"PDF设计灯具（安装高度 {value:g} m）"
-        result.append((value, label))
-    return result
-
-
-def _groups_from_pdf(text: str, brief: DesignBrief) -> list[LightingGroup]:
-    """Build confirmed groups only from explicit heights in an approved PDF."""
-
-    heights = _pdf_installation_heights(text)
-    if not heights:
-        return []
-    area = brief.area_m2
-    if area is None and brief.length_m and brief.width_m:
-        area = brief.length_m * brief.width_m
-    if area is None:
-        return []
-    target = brief.target_illuminance_lx or 500.0
-    groups: list[LightingGroup] = []
-    for value, label in heights:
-        groups.append(
-            LightingGroup(
-                region_name=brief.space_type or "PDF设计空间",
-                group_name=label,
-                purpose="PDF现状照明分组",
-                area_m2=area,
-                mounting_height_m=value,
-                target_illuminance_lx=target,
-                target_cct_k=brief.target_cct_k,
-                min_cri=brief.min_cri,
-                target_ugr=brief.target_ugr,
-                source_references=["设计报告 PDF：安装高度/灯具位置图"],
-                confirmed=True,
-            )
-        )
-    return groups
 
 
 class BriefUpdateRequest(StrictModel):
@@ -202,7 +108,14 @@ class LuminaireWebRequest(LuminaireSearchRequest):
 class LuminaireSelectionRequest(StrictModel):
     expected_revision: int = Field(ge=0)
     luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
-    group_assignments: dict[str, list[str]] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_removed_group_assignments(cls, values: object) -> object:
+        if isinstance(values, dict):
+            values = dict(values)
+            values.pop("group_assignments", None)
+        return values
 
 
 class DialuxResultRequest(StrictModel):
@@ -241,6 +154,14 @@ class PhotometryPreviewWebRequest(IlluminancePreviewRequest):
     """Illuminance preview inputs plus the mandatory optimistic-lock revision."""
 
     expected_revision: int = Field(ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_removed_group_fields(cls, values: object) -> object:
+        if isinstance(values, dict):
+            values = dict(values)
+            values.pop("lighting_group_id", None)
+        return values
 
 
 
@@ -450,10 +371,6 @@ def _fallback_clarification(project: ProjectState) -> dict[str, Any]:
             )
 
     missing_fields = {
-        "lighting_groups": ("Lighting regions and groups", "Confirm each region, group, area, mounting-point height, and target illuminance.", "text"),
-        # Installation heights are taken from an approved design-report PDF
-        # when available; they are not a user questionnaire field.
-        "lighting_groups_confirmation": ("Confirm lighting groups", "Confirm the source and value of every group except heights already stated in the design-report PDF.", "text"),
         "space_type": ("空间类型", "请填写空间用途，例如会议室、教室或走廊。", "text"),
         "area_m2": ("设计面积（m2）", "请填写实际参与照明计算的面积。", "number"),
         "target_illuminance_lx": ("目标照度（lx）", "请填写工作面维持照度目标。", "number"),
@@ -707,7 +624,7 @@ _AGENT_WORKFLOW_STEPS: tuple[dict[str, Any], ...] = (
         "id": "brief",
         "title": "补齐设计条件",
         "description": "优先使用已确认 CAD 平面图、规范与项目资料补齐设计条件；仅在证据不确定时请求确认。",
-        "tools": ["apply_rag_lighting_parameters", "ask_user", "update_project_brief", "update_lighting_groups"],
+        "tools": ["apply_rag_lighting_parameters", "ask_user", "update_project_brief"],
     },
     {
         "id": "model",
@@ -1558,16 +1475,6 @@ def create_app(
             if not brief.space_type and floor_plan.room_name:
                 brief_updates["space_type"] = floor_plan.room_name
                 brief_updates["confirmed_fields"] = set(brief_updates.get("confirmed_fields", confirmed)) | {"space_type"}
-        # DIALux PDF reports explicitly list installation heights for each
-        # luminaire type.  Treat those values as approved project evidence:
-        # users should not be asked to re-enter or confirm heights already
-        # stated in the report.  Existing manually confirmed groups remain
-        # untouched.
-        if suffix == ".pdf" and pdf_text and not brief.lighting_groups:
-            pdf_groups = _groups_from_pdf(pdf_text, brief)
-            if pdf_groups:
-                brief_updates["lighting_groups"] = pdf_groups
-                brief_updates["confirmed_fields"] = set(brief_updates.get("confirmed_fields", confirmed)) | {"lighting_groups"}
         if brief_updates:
             brief = brief.model_copy(update=brief_updates)
         # The source hash is normally sufficient to detect a geometry change,
@@ -1946,7 +1853,6 @@ def create_app(
                 project_id,
                 request.expected_revision,
                 request.luminaire_ids,
-                request.group_assignments,
             )
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
@@ -2130,27 +2036,15 @@ def create_app(
         if candidate is None:
             raise HTTPException(status_code=404, detail="Luminaire is not in this project")
 
-        group = next(
-            (
-                item
-                for item in state.brief.lighting_groups
-                if item.group_id == request.lighting_group_id
-            ),
-            None,
-        )
         resolved_request = IlluminancePreviewRequest.model_validate(
             request.model_dump(exclude={"expected_revision"})
         )
-        group_maintenance = group.maintenance_factor if group else None
-        group_utilization = group.utilization_factor if group else None
         resolved_request = resolved_request.model_copy(
             update={
                 "room_length_m": resolved_request.room_length_m or state.brief.length_m,
                 "room_width_m": resolved_request.room_width_m or state.brief.width_m,
-                "mounting_height_m": resolved_request.mounting_height_m
-                or (group.mounting_height_m if group else None),
-                "maintenance_factor": resolved_request.maintenance_factor or group_maintenance or 1.0,
-                "utilization_factor": resolved_request.utilization_factor or group_utilization,
+                "mounting_height_m": resolved_request.mounting_height_m or state.brief.room_height_m,
+                "maintenance_factor": resolved_request.maintenance_factor or 1.0,
             }
         )
 

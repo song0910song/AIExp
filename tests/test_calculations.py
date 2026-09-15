@@ -6,7 +6,6 @@ from lighting_agent.schemas import (
     CalculationInput,
     CalculationResult,
     DesignBrief,
-    LightingGroup,
     RuleRequirement,
     SimulationMetrics,
 )
@@ -15,10 +14,6 @@ from lighting_agent.schemas import (
 def test_lumen_method_is_reproducible() -> None:
     result = calculate_lumen_method(
         CalculationInput(
-            group_id="group-a",
-            region_name="Open office",
-            group_name="General lighting",
-            mounting_height_m=2.7,
             area_m2=30,
             target_illuminance_lx=500,
             luminaire_luminous_flux_lm=3200,
@@ -49,22 +44,10 @@ def test_rule_checker_preserves_insufficient_data() -> None:
 
 
 def test_removed_brief_metrics_are_dropped_from_legacy_payloads() -> None:
-    group = LightingGroup.model_validate(
-        {
-            "group_id": "group-a-1",
-            "region_name": "Open office",
-            "group_name": "General lighting",
-            "area_m2": 30,
-            "mounting_height_m": 2.7,
-            "target_illuminance_lx": 500,
-            "target_uniformity_u0": 0.6,
-            "max_lpd_w_m2": None,
-        }
-    )
     brief = DesignBrief.model_validate(
         {
             "project_name": "Legacy brief",
-            "lighting_groups": [group.model_dump(mode="json")],
+            "lighting_groups": [{"group_id": "group-a-1"}],
             "target_uniformity_u0": 0.6,
             "max_lpd_w_m2": 6.5,
             "confirmed_fields": ["target_uniformity_u0", "target_illuminance_lx"],
@@ -74,8 +57,6 @@ def test_removed_brief_metrics_are_dropped_from_legacy_payloads() -> None:
         }
     )
 
-    assert "target_uniformity_u0" not in group.model_dump()
-    assert "max_lpd_w_m2" not in group.model_dump()
     assert "target_uniformity_u0" not in brief.model_dump()
     assert "max_lpd_w_m2" not in brief.model_dump()
     assert "target_uniformity_u0" not in brief.confirmed_fields

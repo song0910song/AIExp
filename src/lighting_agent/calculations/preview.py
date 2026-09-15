@@ -34,7 +34,6 @@ class IlluminancePreviewRequest(StrictModel):
     """Inputs for one approximate illuminance preview run."""
 
     luminaire_id: str = Field(min_length=1, max_length=128)
-    lighting_group_id: str | None = Field(default=None, min_length=8, max_length=64)
     fixture_rows: int = Field(default=2, ge=1, le=24)
     fixture_columns: int = Field(default=3, ge=1, le=24)
     # Optional exact count for non-rectangular arrays.  Existing callers that
@@ -47,6 +46,14 @@ class IlluminancePreviewRequest(StrictModel):
     maintenance_factor: float | None = Field(default=None, gt=0, le=1)
     utilization_factor: float | None = Field(default=None, gt=0, le=1)
     total_flux_lm: float | None = Field(default=None, gt=0, le=10_000_000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_removed_group_fields(cls, values: object) -> object:
+        if isinstance(values, dict):
+            values = dict(values)
+            values.pop("lighting_group_id", None)
+        return values
 
 
 class IlluminancePreviewResult(StrictModel):

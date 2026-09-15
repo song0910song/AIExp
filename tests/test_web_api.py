@@ -246,8 +246,7 @@ def test_web_accepts_legacy_removed_brief_metrics_without_persisting_them(tmp_pa
     payload = response.json()
     assert "target_uniformity_u0" not in payload["brief"]
     assert "max_lpd_w_m2" not in payload["brief"]
-    assert "target_uniformity_u0" not in payload["brief"]["lighting_groups"][0]
-    assert "max_lpd_w_m2" not in payload["brief"]["lighting_groups"][0]
+    assert "lighting_groups" not in payload["brief"]
 
 
 def test_web_revision_conflict_and_health(tmp_path) -> None:
