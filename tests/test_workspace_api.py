@@ -52,7 +52,10 @@ def test_workspace_creation_uses_selected_nonempty_directory_for_project_files(t
     project = created.json()
     project_id = project["project_id"]
     assert selection["directory"] == str(workspace.resolve())
-    assert (workspace / "lighting_design.sqlite3").exists()
+    project_root = workspace / "projects"
+    assert project_root.is_dir()
+    assert (project_root / "lighting_design.sqlite3").exists()
+    assert not (workspace / "lighting_design.sqlite3").exists()
     assert original_file.read_text(encoding="utf-8") == "keep this file"
 
     uploaded = client.post(
@@ -61,7 +64,7 @@ def test_workspace_creation_uses_selected_nonempty_directory_for_project_files(t
         data={"source_type": "project_document"},
     )
     assert uploaded.status_code == 201, uploaded.text
-    assert (workspace / f"{project_id}.documents" / "brief.md").exists()
+    assert (project_root / f"{project_id}.documents" / "brief.md").exists()
 
     # Project-only evidence is durable inside the selected workspace database.
     searched = client.post(
@@ -109,7 +112,7 @@ def test_health_does_not_deserialize_project_state(tmp_path) -> None:
     assert created.status_code == 201
     project_id = created.json()["project_id"]
 
-    database = workspace / "lighting_design.sqlite3"
+    database = workspace / "projects" / "lighting_design.sqlite3"
     with sqlite3.connect(database) as connection:
         state = connection.execute(
             "SELECT state_json FROM projects WHERE project_id = ?", (project_id,)
@@ -146,7 +149,7 @@ def test_workspace_directory_picker_can_be_cancelled(tmp_path) -> None:
     assert response.json() == {"selected": False}
 
 
-def test_workspace_rejects_an_unrelated_database_without_modifying_it(tmp_path) -> None:
+def test_workspace_ignores_unrelated_database_without_modifying_it(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     database = workspace / "lighting_design.sqlite3"
@@ -160,9 +163,9 @@ def test_workspace_rejects_an_unrelated_database_without_modifying_it(tmp_path) 
         json={"project_name": "Collision", "workspace_selection_id": selection["selection_id"]},
     )
 
-    assert created.status_code == 422
-    assert "无法覆盖已有文件" in created.json()["detail"]
+    assert created.status_code == 201, created.text
     assert database.read_bytes() == original
+    assert (workspace / "projects" / "lighting_design.sqlite3").exists()
 
 
 def test_workspace_delete_preserves_user_files_and_unregisters_directory(tmp_path) -> None:
@@ -182,5 +185,5 @@ def test_workspace_delete_preserves_user_files_and_unregisters_directory(tmp_pat
 
     assert deleted.status_code == 204
     assert source_file.read_text(encoding="utf-8") == "client-owned"
-    assert not (workspace / "lighting_design.sqlite3").exists()
+    assert not (workspace / "projects" / "lighting_design.sqlite3").exists()
     assert client.get("/api/projects").json() == []

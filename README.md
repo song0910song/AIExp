@@ -13,14 +13,15 @@
 - DIALux Luminaire Finder：搜索 JSON 列表、补取产品详情页、标准化型号/品牌/功率/IP/详情链接/ULD 与配光下载标记，并声明字段缺失。
 - 交付草稿：可生成包含证据、输入、计算、规则状态、候选灯具、待确认事项与人工复核声明的 Markdown 报告，以及 DIALux evo 仿真交接包；任务包和配光文件只使用项目中明确确认的最终灯具。
 - `create_agent`：提供项目、检索、计算、校核、灯具查询和 DIALux 交接包工具。没有 `LIGHTING_LLM_API_KEY` 时，离线命令仍可正常使用。
-- Web 工作区：新建项目时由本机 Windows 文件夹选择器指定项目目录。一个目录只对应一个项目；项目状态、私有资料索引、聊天记录、图纸、配光文件和交付文件均存放在该目录，已有用户文件不会被覆盖或删除。
+- Web 工作区：新建项目时由本机 Windows 文件夹选择器指定项目目录。系统会在所选目录下创建 `projects/`，一个目录只对应一个项目；项目状态、私有资料索引、聊天记录、图纸、配光文件和交付文件均存放在该子目录，已有用户文件不会被覆盖或删除。
 
 ## 安装与配置
 
 ```powershell
 uv sync --group dev
 $env:LIGHTING_LLM_API_KEY = "..."       # 仅 chat 命令需要
-$env:LIGHTING_LLM_MODEL = "deepseek-v4-flash"  # 可选
+$env:LIGHTING_LLM_MODEL = "..."  # 可选
+$env:LIGHTING_LLM_BASE_URL = "..."  # 可选
 ```
 
 默认安装包含 Chroma + `BAAI/bge-small-zh-v1.5` 语义检索依赖。首次安装后运行 `uv sync --group dev` 即可使用默认的 Chroma 后端。
@@ -33,8 +34,6 @@ $env:LIGHTING_LLM_MODEL = "deepseek-v4-flash"  # 可选
 
 可选配置项：`LIGHTING_LLM_BASE_URL`、`LIGHTING_LLM_TEMPERATURE`、`LIGHTING_LLM_CONTEXT_WINDOW_TOKENS`（默认 `1000000`，用于模型实际返回 token 的窗口占用比例）、`LIGHTING_LLM_REASONING_EFFORTS`（默认 `none,low,medium,high`）和 `LIGHTING_LLM_REASONING_EFFORT_DEFAULT`（默认 `medium`），以及 `DIALUX_BASE_URL`、`DIALUX_TIMEOUT_SECONDS`、`PADDLEOCR_API_URL`、`PADDLEOCR_MODEL`、`PADDLEOCR_TIMEOUT_SECONDS`。聊天流会请求模型返回 usage；若所用网关不支持该字段，界面会明确显示“模型未返回用量”，不会显示估算值。
 对于支持 GPT-5.6 prompt caching 的模型，默认启用稳定系统提示缓存：`LIGHTING_LLM_PROMPT_CACHE_ENABLED=false` 可关闭，`LIGHTING_LLM_PROMPT_CACHE_KEY` 可覆盖路由 key，`LIGHTING_LLM_PROMPT_CACHE_TTL` 目前规范化为 `30m`。聊天流若收到缓存读写 token，也会显示缓存命中率；非 GPT-5.6 模型默认不发送这些扩展参数，兼容网关可显式设置开关为 `true`。
-
-当前 `agnes-2.5-flash` 网关实测接受 `none`、`low`、`medium`、`high` 四档，拒绝 `minimal` 和 `xhigh`。前端的“思考强度”选择会将所选档位透传为 `reasoning_effort`；较高档位通常会消耗更多推理 token，但不会把模型内部思维内容展示给浏览器。更换模型或网关时，请按其兼容协议覆盖上述两个环境变量。
 
 ## 快速开始
 
@@ -60,11 +59,9 @@ npm install
 npm run dev        # 自动拉起后端并等待 /api/health 就绪后再启动前端
 ```
 
-点击“新建照明项目”后，先选择项目文件夹，再填写项目条件并创建。选择已有内容的文件夹是允许的；若该文件夹已经是本系统的工作区，将直接重新打开其中的项目而不会覆盖任务书。
+点击“新建照明项目”后，先选择项目文件夹，再填写项目条件并创建。系统会在所选目录下使用 `projects/` 子目录保存项目；选择已有内容的文件夹是允许的，已有用户文件不会被覆盖。若该目录已经是本系统的工作区，将直接重新打开其中的项目而不会覆盖任务书。
 
 进入项目的“智能对话”页后，输入区右侧的“思考强度”菜单可切换当前模型支持的推理档位；上传 PDF/DXF/DWG 后，助手会读取资料、确认设计条件、搜索灯具、执行初算并生成 DIALux 交接包或设计报告。系统不提供三维建模功能。
-
-Blender 必须运行并启用 Blender MCP 插件。系统会尝试自动启动本机 Blender；若 Blender 已打开但 MCP 未连接，请在 Blender 的 Blender MCP 面板点击 **Connect** 后重试。默认 MCP 地址为 `127.0.0.1:9876`，可通过 `BLENDER_MCP_HOST` / `BLENDER_MCP_PORT` 覆盖。
 
 也可手动先启动后端（脚本检测到后端已就绪会直接复用）：
 
@@ -127,7 +124,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify-phase0.ps1
 
 ## SQLite 持久化
 
-命令行项目与全局规范资料库仍使用 `data/lighting_design.sqlite3`。Web 工作区将项目当前状态、不可变 revision 快照、项目私有 RAG 证据块和聊天会话保存到用户选择的项目目录中的 `lighting_design.sqlite3`；项目资料、图纸、配光与交付文件也保存在同一目录。`data/workspace_registry.sqlite3` 只记录工作区目录与项目 ID 的对应关系，不保存项目设计内容。
+命令行项目与全局规范资料库仍使用 `data/lighting_design.sqlite3`。Web 工作区会在用户选择的目录下创建 `projects/`，并将项目当前状态、不可变 revision 快照、项目私有 RAG 证据块和聊天会话保存到其中的 `lighting_design.sqlite3`；项目资料、图纸、配光与交付文件也保存在该子目录。`data/workspace_registry.sqlite3` 只记录工作区目录与项目 ID 的对应关系，不保存项目设计内容。
 
 全局数据库首次启动时会自动导入旧的
 `data/projects/*.json` 与旧版 `data/rag/index.json`（若存在）；原始 JSON 不会被删除，

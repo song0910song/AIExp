@@ -140,7 +140,7 @@ export function CreateProjectModal({ onClose, onCreated }: { onClose: () => void
           <Field label="项目名称" wide>
             <input value={draft.project_name} onChange={(event) => updateField("project_name", event.target.value)} required placeholder="例如：总部三层会议室改造" autoFocus />
           </Field>
-          <Field label="项目文件夹" hint="项目状态、资料、图纸、配光和交付文件均保存于此目录" wide>
+          <Field label="项目文件夹" hint="系统会在所选目录下创建 projects，项目状态、资料、图纸、配光和交付文件均保存于其中" wide>
             <div className="directory-picker">
               <input value={workspaceDirectory?.directory ?? ""} readOnly placeholder="请选择本机项目文件夹" aria-label="项目文件夹" />
               <BusyButton className="button button-secondary" busy={selectingDirectory} type="button" onClick={() => void selectDirectory()} disabled={busy}>
