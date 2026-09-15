@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from math import isclose
 from pathlib import Path
 
 # langchain_core.tools 的 tool 与 langchain.tools 等价，但导入快约 25 倍：
@@ -30,7 +29,6 @@ from .rag import create_evidence_store, format_evidence
 from .schemas import (
     CalculationInput,
     DesignBrief,
-    LightingGroup,
     LightingParameterSource,
     LuminaireSearchRun,
     LuminaireSearchRequest,
@@ -72,11 +70,6 @@ class BriefUpdateInput(ProjectReference):
     brief: DesignBrief
 
 
-class LightingGroupsUpdateInput(ProjectReference):
-    expected_revision: int = Field(ge=0)
-    lighting_groups: list[LightingGroup] = Field(min_length=1, max_length=100)
-
-
 class RagLightingParameterInput(ProjectReference):
     """Evidence-backed values extracted from approved RAG results."""
 
@@ -89,13 +82,6 @@ class RagLightingParameterInput(ProjectReference):
 
 
 _CALCULATION_INPUT_ALIASES = {
-    "lighting_group_id": "group_id",
-    "region": "region_name",
-    "zone_name": "region_name",
-    "lighting_group_name": "group_name",
-    "group": "group_name",
-    "mounting_height": "mounting_height_m",
-    "mounting_point_height_m": "mounting_height_m",
     "area": "area_m2",
     "target_lx": "target_illuminance_lx",
     "target_lux": "target_illuminance_lx",
@@ -117,7 +103,6 @@ _CALCULATION_INPUT_ALIASES = {
 }
 _CALCULATION_NUMERIC_FIELDS = frozenset(
     {
-        "mounting_height_m",
         "area_m2",
         "target_illuminance_lx",
         "luminaire_luminous_flux_lm",
@@ -131,10 +116,6 @@ _CALCULATION_REMOVED_FIELDS = frozenset(
 )
 _CALCULATION_CANONICAL_FIELDS = frozenset(
     {
-        "group_id",
-        "region_name",
-        "group_name",
-        "mounting_height_m",
         "area_m2",
         "target_illuminance_lx",
         "luminaire_luminous_flux_lm",
@@ -144,17 +125,6 @@ _CALCULATION_CANONICAL_FIELDS = frozenset(
         "luminaire_id",
     }
 )
-_NESTED_GROUP_ALIASES = {
-    "id": "group_id",
-    "name": "group_name",
-    "region": "region_name",
-    "zone": "region_name",
-    "area": "area_m2",
-    "mounting_height": "mounting_height_m",
-    "mounting_point_height_m": "mounting_height_m",
-    "target_lx": "target_illuminance_lx",
-    "target_lux": "target_illuminance_lx",
-}
 _NESTED_LUMINAIRE_ALIASES = {
     "id": "luminaire_id",
     "lumens": "luminaire_luminous_flux_lm",
@@ -209,11 +179,7 @@ class CalculationToolInput(StrictModel):
     are already present in the confirmed group or selected luminaire.
     """
 
-    group_id: str = Field(default="unassigned", min_length=1, max_length=64)
-    region_name: str = Field(default="Unassigned region", min_length=1, max_length=160)
-    group_name: str = Field(default="Unassigned group", min_length=1, max_length=160)
-    mounting_height_m: float | None = Field(default=None, gt=0, le=100)
-    area_m2: float | None = Field(default=None, gt=0, description="Confirmed group area in m2.")
+    area_m2: float | None = Field(default=None, gt=0, description="Confirmed project area in m2.")
     target_illuminance_lx: float | None = Field(default=None, gt=0, description="Confirmed target illuminance in lx.")
     luminaire_luminous_flux_lm: float | None = Field(
         default=None, gt=0, description="Luminaire flux in lm; may be read from the selected candidate."
@@ -238,11 +204,10 @@ class CalculationToolInput(StrictModel):
         for field in _CALCULATION_REMOVED_FIELDS:
             cleaned.pop(field, None)
 
-        nested_group = cleaned.pop("group", None)
-        if isinstance(nested_group, dict):
-            _merge_nested_calculation_fields(nested_group, cleaned, _NESTED_GROUP_ALIASES)
-        elif isinstance(nested_group, str):
-            cleaned.setdefault("group_name", nested_group)
+        # Group/region payloads from older clients are deliberately ignored.
+        cleaned.pop("group", None)
+        for removed in ("group_id", "region_name", "group_name", "mounting_height_m", "lighting_group_id"):
+            cleaned.pop(removed, None)
 
         nested = cleaned.pop("luminaire", None)
         if isinstance(nested, dict):
@@ -317,7 +282,7 @@ class ProjectCalculationInput(ProjectReference):
                 for key in list(cleaned)
                 if key in _CALCULATION_INPUT_ALIASES
                 or key in _CALCULATION_NUMERIC_FIELDS
-                or key in {"group_id", "region_name", "group_name", "luminaire_id", "luminaire"}
+                or key in {"luminaire_id", "luminaire"}
             }
             if calculation_fields:
                 cleaned["inputs"] = calculation_fields
@@ -338,7 +303,6 @@ class LuminaireSearchToolInput(LuminaireSearchRequest):
 class LuminaireSelectionInput(ProjectReference):
     expected_revision: int = Field(ge=0)
     luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
-    group_assignments: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class LuminaireDetailInput(ProjectReference):
@@ -486,25 +450,6 @@ def update_project_brief(project_id: str, expected_revision: int, brief: DesignB
     return {**updated.model_dump(mode="json"), "project_revision": updated.revision, "rebased": False}
 
 
-@tool("update_lighting_groups", args_schema=LightingGroupsUpdateInput)
-def update_lighting_groups(
-    project_id: str, expected_revision: int, lighting_groups: list[LightingGroup]
-) -> dict:
-    """Save explicit, user-confirmed region lighting groups and their mounting heights."""
-
-    state = project_store.get(project_id)
-    brief = state.brief.model_copy(update={"lighting_groups": lighting_groups})
-    updated = project_store.update(
-        project_id,
-        ProjectUpdate(expected_revision=expected_revision, brief=brief),
-    )
-    return {
-        "lighting_groups": [item.model_dump(mode="json") for item in updated.brief.lighting_groups],
-        "project_revision": updated.revision,
-        "rebased": False,
-    }
-
-
 @tool("apply_rag_lighting_parameters", args_schema=RagLightingParameterInput)
 def apply_rag_lighting_parameters(
     project_id: str,
@@ -647,78 +592,21 @@ def add_document(file_path: str, source_type: str = "project_document", project_
     }
 
 
-_PLACEHOLDER_GROUP_IDS = frozenset({"", "unassigned", "default", "general", "general_lighting"})
-_PLACEHOLDER_GROUP_NAMES = frozenset({"", "unassigned region", "unassigned group"})
-
-
 class CalculationInputIncompleteError(ValueError):
     """A recoverable calculation request that needs user/project data."""
 
-    def __init__(self, group_id: str, missing_fields: list[str]) -> None:
-        self.group_id = group_id
+    def __init__(self, missing_fields: list[str]) -> None:
         self.missing_fields = tuple(missing_fields)
         super().__init__(
-            f"Calculation input for lighting group {group_id} is incomplete; "
+            "Calculation input is incomplete; "
             "provide or confirm: "
             + ", ".join(missing_fields)
         )
 
 
-def _text_key(value: object) -> str:
-    return str(value or "").strip().casefold()
-
-
-def _resolve_calculation_group(
-    item: CalculationToolInput, groups: dict[str, LightingGroup]
-) -> LightingGroup | None:
-    """Resolve provider-friendly group references without guessing between groups."""
-
-    if not groups:
-        # Projects created before lighting groups were introduced keep the
-        # original flat calculation workflow. They are still valid for the
-        # lumen-method estimate, which does not use geometry or mounting height.
-        if _text_key(item.group_id) not in _PLACEHOLDER_GROUP_IDS:
-            raise ValueError(
-                "Calculation inputs reference unknown lighting groups: " + item.group_id
-            )
-        return None
-
-    exact = groups.get(item.group_id)
-    if exact is not None:
-        return exact
-
-    requested_region = _text_key(item.region_name)
-    requested_group = _text_key(item.group_name)
-    candidates = [
-        group
-        for group in groups.values()
-        if (
-            requested_region not in _PLACEHOLDER_GROUP_NAMES
-            and requested_region == _text_key(group.region_name)
-        )
-        or (
-            requested_group not in _PLACEHOLDER_GROUP_NAMES
-            and requested_group == _text_key(group.group_name)
-        )
-    ]
-    if len(candidates) == 1:
-        return candidates[0]
-    if len(candidates) > 1:
-        raise ValueError(
-            "Calculation input matches more than one lighting group; use the exact group_id"
-        )
-    if _text_key(item.group_id) in _PLACEHOLDER_GROUP_IDS and len(groups) == 1:
-        return next(iter(groups.values()))
-    raise ValueError(
-        "Calculation inputs reference unknown lighting groups: "
-        + (item.group_id or "(empty)")
-    )
-
-
 def _candidate_values_for_calculation(
     item: CalculationToolInput,
     state: ProjectState,
-    group: LightingGroup | None,
 ) -> list[tuple[float | None, float | None]]:
     """Return saved candidate flux/power pairs relevant to one calculation.
 
@@ -730,15 +618,6 @@ def _candidate_values_for_calculation(
     ids: list[str] = []
     if item.luminaire_id:
         ids.append(item.luminaire_id)
-    elif group is not None:
-        assigned_ids = [
-            *group.luminaire_ids,
-            *state.luminaire_group_assignments.get(group.group_id, []),
-        ]
-        # An explicit assignment narrows the calculation to this group.  The
-        # project-wide selection is only a fallback for legacy/single-group
-        # projects that predate group assignments.
-        ids.extend(assigned_ids or state.selected_luminaire_ids)
     else:
         ids.extend(state.selected_luminaire_ids)
     ids = list(dict.fromkeys(ids))
@@ -754,66 +633,20 @@ def _prepare_calculation_input(
     item: CalculationToolInput | CalculationInput,
     *,
     state: ProjectState,
-    groups: dict[str, LightingGroup],
 ) -> CalculationInput:
-    """Fill omitted provider fields from confirmed groups and saved luminaires."""
+    """Fill omitted values from the project brief and saved luminaires."""
 
     if not isinstance(item, CalculationToolInput):
         item = CalculationToolInput.model_validate(
             item.model_dump(mode="json") if hasattr(item, "model_dump") else item
         )
-    group = _resolve_calculation_group(item, groups)
-    if group is not None and not group.confirmed:
-        raise ValueError(
-            "Lighting groups must be user-confirmed before calculation: " + group.group_id
-        )
-
-    group_label = group.group_id if group is not None else item.group_id
-    region_name = (
-        group.region_name
-        if group is not None and _text_key(item.region_name) in _PLACEHOLDER_GROUP_NAMES
-        else item.region_name
-    )
-    group_name = (
-        group.group_name
-        if group is not None and _text_key(item.group_name) in _PLACEHOLDER_GROUP_NAMES
-        else item.group_name
-    )
-    mounting_height = item.mounting_height_m
-    if group is not None:
-        if mounting_height is None:
-            mounting_height = group.mounting_height_m
-        elif not isclose(mounting_height, group.mounting_height_m, rel_tol=0, abs_tol=1e-6):
-            raise ValueError(
-                "Calculation mounting point height must match the confirmed lighting group: "
-                + group.group_id
-            )
-
-    area = item.area_m2 if item.area_m2 is not None else group.area_m2 if group is not None else state.brief.area_m2
-    target = (
-        item.target_illuminance_lx
-        if item.target_illuminance_lx is not None
-        else group.target_illuminance_lx
-        if group is not None
-        else state.brief.target_illuminance_lx
-    )
-    utilization = (
-        item.utilization_factor
-        if item.utilization_factor is not None
-        else group.utilization_factor
-        if group is not None
-        else None
-    )
-    maintenance = (
-        item.maintenance_factor
-        if item.maintenance_factor is not None
-        else group.maintenance_factor
-        if group is not None
-        else None
-    )
+    area = item.area_m2 if item.area_m2 is not None else state.brief.area_m2
+    target = item.target_illuminance_lx if item.target_illuminance_lx is not None else state.brief.target_illuminance_lx
+    utilization = item.utilization_factor
+    maintenance = item.maintenance_factor
     flux = item.luminaire_luminous_flux_lm
     power = item.luminaire_power_w
-    candidate_values = _candidate_values_for_calculation(item, state, group)
+    candidate_values = _candidate_values_for_calculation(item, state)
     usable_values = [
         (float(candidate_flux), float(candidate_power))
         for candidate_flux, candidate_power in candidate_values
@@ -842,12 +675,8 @@ def _prepare_calculation_input(
         if value is None
     ]
     if missing:
-        raise CalculationInputIncompleteError(group_label, missing)
+        raise CalculationInputIncompleteError(missing)
     return CalculationInput(
-        group_id=group_label,
-        region_name=region_name,
-        group_name=group_name,
-        mounting_height_m=mounting_height,
         area_m2=area,
         target_illuminance_lx=target,
         luminaire_luminous_flux_lm=flux,
@@ -865,10 +694,9 @@ def calculate_preliminary_lighting(
 ) -> dict:
     """Run and persist a reproducible lumen-method calculation.
 
-    Inputs may reference a confirmed lighting group by ID and a saved
-    luminaire by ID. Omitted group metadata and luminaire flux/power are filled
-    only when the project contains an unambiguous confirmed source; no design
-    values are guessed.
+    Inputs may reference a saved luminaire by ID. Omitted project-level area,
+    target illuminance, flux and power are filled only from unambiguous saved
+    sources; no design values are guessed.
     """
 
     if isinstance(inputs, (CalculationInput, CalculationToolInput)):
@@ -876,18 +704,16 @@ def calculate_preliminary_lighting(
     else:
         normalized_inputs = list(inputs)
     if not normalized_inputs:
-        raise ValueError("At least one lighting-group calculation input is required")
+        raise ValueError("At least one calculation input is required")
 
     state = project_store.get(project_id)
-    groups = {group.group_id: group for group in state.brief.lighting_groups}
     try:
         prepared_inputs = [
-            _prepare_calculation_input(item, state=state, groups=groups) for item in normalized_inputs
+            _prepare_calculation_input(item, state=state) for item in normalized_inputs
         ]
     except CalculationInputIncompleteError as error:
         return {
             "status": "needs_clarification",
-            "group_id": error.group_id,
             "missing_fields": list(error.missing_fields),
             "project_revision": state.revision,
             "message": (
@@ -939,9 +765,6 @@ def check_design_rules(
 
 def _luminaire_request(
     keyword: str,
-    lighting_group_id: str | None,
-    region_name: str | None,
-    mounting_height_m: float | None,
     language: str,
     brand: str | None,
     brand_id: str | None,
@@ -957,9 +780,6 @@ def _luminaire_request(
 ) -> LuminaireSearchRequest:
     return LuminaireSearchRequest(
         keyword=keyword,
-        lighting_group_id=lighting_group_id,
-        region_name=region_name,
-        mounting_height_m=mounting_height_m,
         language=language,
         brand=brand,
         brand_id=brand_id,
@@ -986,9 +806,6 @@ def _prepare_luminaire_request(
 @tool("prepare_luminaire_search", args_schema=LuminaireSearchToolInput)
 def prepare_luminaire_search(
     keyword: str,
-    lighting_group_id: str | None = None,
-    region_name: str | None = None,
-    mounting_height_m: float | None = None,
     language: str = "zh",
     brand: str | None = None,
     brand_id: str | None = None,
@@ -1008,9 +825,6 @@ def prepare_luminaire_search(
 
     request = _luminaire_request(
         keyword,
-        lighting_group_id,
-        region_name,
-        mounting_height_m,
         language,
         brand,
         brand_id,
@@ -1037,9 +851,6 @@ def prepare_luminaire_search(
 @tool("search_luminaires", args_schema=LuminaireSearchToolInput)
 def search_luminaires(
     keyword: str,
-    lighting_group_id: str | None = None,
-    region_name: str | None = None,
-    mounting_height_m: float | None = None,
     language: str = "zh",
     brand: str | None = None,
     brand_id: str | None = None,
@@ -1064,9 +875,6 @@ def search_luminaires(
 
     request = _luminaire_request(
         keyword,
-        lighting_group_id,
-        region_name,
-        mounting_height_m,
         language,
         brand,
         brand_id,
@@ -1219,20 +1027,18 @@ def select_luminaires(
     project_id: str,
     expected_revision: int,
     luminaire_ids: list[str],
-    group_assignments: dict[str, list[str]] | None = None,
 ) -> dict:
     """Confirm final project luminaires for DIALux task-package photometry downloads.
 
-    A room usually combines several luminaire types (base lighting, accent or
-    emergency lighting), so the list may hold multiple final selections.
+    A project may combine several luminaire types, so the list may hold
+    multiple final selections.
     """
 
     updated = project_store.set_selected_luminaires(
-        project_id, expected_revision, luminaire_ids, group_assignments
+        project_id, expected_revision, luminaire_ids
     )
     return {
         "selected_luminaire_ids": updated.selected_luminaire_ids,
-        "luminaire_group_assignments": updated.luminaire_group_assignments,
         "project_revision": updated.revision,
         "rebased": False,
     }

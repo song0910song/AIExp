@@ -799,7 +799,6 @@ def _ip_meets_minimum(candidate: str, requirement: str) -> bool:
 def apply_brief_constraints(
     request: LuminaireSearchRequest,
     brief: DesignBrief,
-    lighting_group_id: str | None = None,
 ) -> LuminaireSearchRequest:
     """Fill the key lighting conditions (illuminance/CCT/CRI/UGR) from the confirmed brief.
 
@@ -807,16 +806,11 @@ def apply_brief_constraints(
     conditions are applied only when the caller states them explicitly.
     """
 
-    group = next(
-        (item for item in brief.lighting_groups if item.group_id == lighting_group_id), None
-    ) if lighting_group_id else (brief.lighting_groups[0] if len(brief.lighting_groups) == 1 else None)
     inferred = {
-        "target_illuminance_lx": group.target_illuminance_lx if group else brief.target_illuminance_lx,
-        "target_cct_k": group.target_cct_k if group else brief.target_cct_k,
-        "min_cri": group.min_cri if group else brief.min_cri,
-        "max_ugr": group.target_ugr if group else brief.target_ugr,
-        "region_name": group.region_name if group and request.region_name is None else None,
-        "mounting_height_m": group.mounting_height_m if group and request.mounting_height_m is None else None,
+        "target_illuminance_lx": brief.target_illuminance_lx,
+        "target_cct_k": brief.target_cct_k,
+        "min_cri": brief.min_cri,
+        "max_ugr": brief.target_ugr,
     }
     updates = {
         name: value
@@ -836,16 +830,10 @@ def validate_luminaire_search(
     catalogue search.
     """
 
-    effective = apply_brief_constraints(request, brief, request.lighting_group_id) if brief is not None else request
+    effective = apply_brief_constraints(request, brief) if brief is not None else request
     missing: list[str] = []
     if brief is not None and not brief.space_type:
         missing.append("space_type")
-    if brief is not None and len(brief.lighting_groups) > 1 and not request.lighting_group_id:
-        missing.append("lighting_group_id")
-    if brief is not None and request.lighting_group_id and not any(
-        item.group_id == request.lighting_group_id for item in brief.lighting_groups
-    ):
-        missing.append("lighting_group_id")
     if not any(
         (
             effective.target_illuminance_lx is not None,

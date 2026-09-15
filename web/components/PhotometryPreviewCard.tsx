@@ -12,7 +12,6 @@ import { BusyButton, EmptyState, formatNumber, Notice } from "./ui";
 
 type FormState = {
   luminaireId: string;
-  groupId: string;
   fixtureRows: number;
   fixtureColumns: number;
   mountingHeight: string;
@@ -67,25 +66,20 @@ export function PhotometryPreviewCard({ project }: { project: Project }) {
     };
   }, [project.project_id]);
 
-  // Seed the form defaults from the current brief/group once luminaire options exist.
+  // Seed the form defaults from the current project once luminaire options exist.
   useEffect(() => {
     if (form || eligibleIds.length === 0) return;
-    const group =
-      project.brief.lighting_groups.find((item) =>
-        project.luminaire_group_assignments[item.group_id]?.includes(eligibleIds[0]),
-      ) ?? project.brief.lighting_groups[0];
     const luminaire = project.luminaires.find((item) => item.luminaire_id === eligibleIds[0]);
     setForm({
       luminaireId: eligibleIds[0],
-      groupId: group?.group_id ?? "",
       fixtureRows: 2,
       fixtureColumns: 3,
-      mountingHeight: group ? String(group.mounting_height_m) : "",
-      utilizationFactor: group?.utilization_factor ? String(group.utilization_factor) : "",
-      maintenanceFactor: group?.maintenance_factor ? String(group.maintenance_factor) : "",
+      mountingHeight: project.brief.room_height_m ? String(project.brief.room_height_m) : "",
+      utilizationFactor: "",
+      maintenanceFactor: "",
       totalFlux: luminaire?.luminous_flux_lm ? String(luminaire.luminous_flux_lm) : "",
     });
-  }, [eligibleIds, form, project.brief.lighting_groups, project.luminaire_group_assignments, project.luminaires]);
+  }, [eligibleIds, form, project.brief.room_height_m, project.luminaires]);
 
   const refreshStored = useCallback(async () => {
     try {
@@ -105,7 +99,6 @@ export function PhotometryPreviewCard({ project }: { project: Project }) {
       const response = await api.createPhotometryPreview(project.project_id, {
         expected_revision: project.revision,
         luminaire_id: form.luminaireId,
-        lighting_group_id: form.groupId || null,
         fixture_rows: Number(form.fixtureRows),
         fixture_columns: Number(form.fixtureColumns),
         mounting_height_m: form.mountingHeight ? Number(form.mountingHeight) : null,

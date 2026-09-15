@@ -10,7 +10,7 @@
 
 | 模块 | 能做什么 |
 | --- | --- |
-| 项目管理 | 创建项目、保存设计任务书、revision 版本和待确认事项 |
+| 项目管理 | 创建项目、保存项目级设计任务书、revision 版本和待确认事项 |
 | 资料检索 | 将 Markdown、TXT、Word、PDF 建库，保留证据片段和来源位置 |
 | 平面图解析 | 读取 DXF；安装 ODA File Converter 后可转换并读取 DWG，提取二维房间边界与标注 |
 | 确定性初算 | 使用流明法计算所需光通量、灯具数量和装机功率 |
@@ -49,7 +49,6 @@ npm run dev
 # 创建项目
 uv run python main.py init-project "会议室改造" `
   --space-type "会议室" --area-m2 30 `
-  --lighting-groups-json '[{"group_id":"general-01","region_name":"会议室","group_name":"基础照明","area_m2":30,"mounting_height_m":2.7,"target_illuminance_lx":500,"confirmed":true}]' `
   --target-lx 500 --target-cct-k 4000 --min-cri 80
 
 # 查看项目
@@ -61,8 +60,7 @@ uv run python main.py search-evidence "会议室 照度 显色指数"
 
 # 初步计算、查询灯具、生成交付物
 uv run python main.py calculate <project_id> --revision 0 `
-  --group-id general-01 --region-name "会议室" --group-name "基础照明" `
-  --mounting-height-m 2.7 --area-m2 30 --target-lx 500 `
+  --area-m2 30 --target-lx 500 `
   --lumens 3200 --power-w 24 --utilization-factor 0.6 --maintenance-factor 0.8
 uv run python main.py search-luminaires "嵌入式 LED 筒灯" --target-cct-k 4000 --min-cri 80
 uv run python main.py generate-report <project_id> --revision <revision>
@@ -135,7 +133,7 @@ $env:LIGHTING_RAG_BACKEND = "local"
 | `.model-cache/` | 嵌入模型缓存（运行时生成） |
 | `src/data/user_docs/` | 可加入资料库的示例文档 |
 
-项目状态以版本化 `ProjectState` 为准，更新使用 revision 乐观锁，避免旧会话覆盖新数据。
+项目状态以版本化 `ProjectState` 为准，更新使用 revision 乐观锁，避免旧会话覆盖新数据。计算和选型均基于项目级条件，不再维护照明分组。
 
 ## 验证
 

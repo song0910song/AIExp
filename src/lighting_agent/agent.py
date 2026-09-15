@@ -27,7 +27,6 @@ from .tools import (
     select_luminaires,
     send_luminaire_to_dialux,
     update_project_brief,
-    update_lighting_groups,
 )
 
 
@@ -52,7 +51,7 @@ SYSTEM_PROMPT = """你是室内照明设计顾问与流程编排者。
 # available to every project.
 SYSTEM_PROMPT += "\nEvidence scope: when a current project_id is available, pass it to search_evidence so results combine global knowledge with that project's private documents. Never expose one project's documents to another project.\n"
 SYSTEM_PROMPT += """
-Lighting groups are mandatory. Divide the design by concrete rooms, zones, or functional regions. Every group must carry a region name, group name, area, mounting-point height above finished floor, target illuminance, and confirmation status. The mounting-point height is the height to the luminaire mounting or suspension point, not a guessed room height. Extract candidate values only from user chat, approved project documents/PDF/Word evidence, or explicit CAD/DXF text/layer/block metadata. For an approved DIALux/design-report PDF, use the explicitly listed installation heights directly (for example, separate 3.097 m panel-light and 4.144 m downlight groups); do not ask the user to re-enter or confirm those heights. Never infer an unmentioned height from common practice. When height or region evidence conflicts and the PDF does not resolve it, call ask_user. Save only user-confirmed groups with update_lighting_groups. Run calculate_preliminary_lighting with one CalculationInput per confirmed group, including group_id and mounting_height_m. Search luminaires with lighting_group_id so each search is tied to one group. Assign final luminaires with group_assignments when calling select_luminaires.
+Use one project-level design brief and one calculation input per requested estimate. Do not create or ask for lighting groups, regions, group IDs, mounting-point heights, or group assignments.
 If calculate_preliminary_lighting returns status=needs_clarification, do not retry it with guessed values and do not present the raw tool error. Call ask_user with the returned missing_fields (especially luminaire luminous flux in lm and power in W), or first select/read a saved luminaire with complete values, then stop and wait for confirmation.
 """
 SYSTEM_PROMPT = """
@@ -169,7 +168,6 @@ def build_agent(settings: Settings | None = None) -> Any:
             create_project,
             ask_user,
             update_project_brief,
-            update_lighting_groups,
             apply_rag_lighting_parameters,
             search_evidence,
             adopt_evidence,

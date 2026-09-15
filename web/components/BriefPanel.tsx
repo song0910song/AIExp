@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Save } from "lucide-react";
 import { api } from "@/lib/api";
-import type { DesignBrief, LightingGroup, Project } from "@/lib/types";
+import type { DesignBrief, Project } from "@/lib/types";
 import { BusyButton, Field, Notice, Panel, toNullableNumber } from "./ui";
 
 const numericFields = [
@@ -36,20 +36,6 @@ export function BriefPanel({ project, onProject }: { project: Project; onProject
     setValue(key, toNullableNumber(value));
   }
 
-  function updateGroup(index: number, patch: Partial<LightingGroup>) {
-    setValue("lighting_groups", draft.lighting_groups.map((group, itemIndex) => itemIndex === index ? { ...group, ...patch, confirmed: false } : group));
-  }
-
-  function addGroup() {
-    const group: LightingGroup = {
-      group_id: crypto.randomUUID(), region_name: "", group_name: "", purpose: null,
-      area_m2: draft.area_m2 ?? 1, mounting_height_m: 0.1, target_illuminance_lx: draft.target_illuminance_lx ?? 1,
-      target_cct_k: draft.target_cct_k, min_cri: draft.min_cri, target_ugr: draft.target_ugr,
-      utilization_factor: null, maintenance_factor: null, luminaire_ids: [], source_evidence_ids: [], source_references: [], confirmed: false,
-    };
-    setValue("lighting_groups", [...draft.lighting_groups, group]);
-  }
-
   async function save(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -60,7 +46,6 @@ export function BriefPanel({ project, onProject }: { project: Project; onProject
         .map(([key]) => key);
       const updated = await api.updateBrief(project.project_id, project.revision, {
         ...draft,
-        lighting_groups: draft.lighting_groups.map((group) => ({ ...group, confirmed: true })),
         confirmed_fields: confirmed,
       });
       onProject(updated);
@@ -91,19 +76,6 @@ export function BriefPanel({ project, onProject }: { project: Project; onProject
             <Field label="最低防护等级"><input value={draft.min_ip_rating ?? ""} onChange={(event) => setValue("min_ip_rating", event.target.value.toUpperCase() || null)} placeholder="IP20" pattern="IP[0-9]{2}[A-Za-z]?" /></Field>
             <Field label="偏好品牌" wide hint="多个品牌请用逗号分隔；偏好不是合规条件。"><input value={draft.preferred_brands.join("，")} onChange={(event) => setValue("preferred_brands", event.target.value.split(/[，,]/).map((item) => item.trim()).filter(Boolean))} /></Field>
             <Field label="项目备注" wide><textarea rows={4} value={draft.notes ?? ""} onChange={(event) => setValue("notes", event.target.value || null)} placeholder="记录甲方要求、现场限制或尚未结构化的条件。" /></Field>
-          </div>
-          <div className="boundary-note">
-            <strong>Lighting regions and groups</strong>
-            {draft.lighting_groups.map((group, index) => (
-              <div className="form-grid form-grid-three" key={group.group_id}>
-                <Field label="Region"><input value={group.region_name} onChange={(event) => updateGroup(index, { region_name: event.target.value })} required /></Field>
-                <Field label="Group"><input value={group.group_name} onChange={(event) => updateGroup(index, { group_name: event.target.value })} required /></Field>
-                <Field label="Area / m2"><input type="number" min="0.1" step="0.1" value={group.area_m2} onChange={(event) => updateGroup(index, { area_m2: Number(event.target.value) })} required /></Field>
-                <Field label="Mounting point / m"><input type="number" min="0.1" step="0.1" value={group.mounting_height_m} onChange={(event) => updateGroup(index, { mounting_height_m: Number(event.target.value) })} required /></Field>
-                <Field label="Target illuminance / lx"><input type="number" min="1" step="1" value={group.target_illuminance_lx} onChange={(event) => updateGroup(index, { target_illuminance_lx: Number(event.target.value) })} required /></Field>
-              </div>
-            ))}
-            <button type="button" className="button button-quiet" onClick={addGroup}>Add lighting group</button>
           </div>
           {draft.template_origin ? <div className="boundary-note"><strong>模板初始值</strong><p>{draft.template_origin.template_name} · {draft.template_origin.standard_reference}</p><p>模板值仅作为可编辑起点；请结合项目资料、RAG 证据和工程师确认修正。</p></div> : null}
           {message ? <Notice tone={message.tone}>{message.text}</Notice> : null}

@@ -147,10 +147,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  selectLuminaires: (id: string, expectedRevision: number, luminaireIds: string[], groupAssignments: Record<string, string[]> = {}) =>
+  selectLuminaires: (id: string, expectedRevision: number, luminaireIds: string[]) =>
     request<Project>(`/projects/${id}/selected-luminaires`, {
       method: "PUT",
-      body: JSON.stringify({ expected_revision: expectedRevision, luminaire_ids: luminaireIds, group_assignments: groupAssignments }),
+      body: JSON.stringify({ expected_revision: expectedRevision, luminaire_ids: luminaireIds }),
     }),
   photometryAssets: (id: string) =>
     request<{ assets: import("./types").PhotometryAsset[] }>(`/projects/${id}/photometry`),
