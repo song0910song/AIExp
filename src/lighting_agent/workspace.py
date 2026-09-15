@@ -14,6 +14,9 @@ from .schemas import DesignBrief, ProjectState
 from .storage import SQLiteDatabase
 
 
+_WORKSPACE_PROJECTS_DIRECTORY_NAME = "projects"
+
+
 class WorkspaceError(ValueError):
     """A selected directory cannot be used as an independent workspace."""
 
@@ -27,7 +30,7 @@ class WorkspaceRecord:
 
 
 class WorkspaceRegistry:
-    """Keep only local folder-to-project registrations outside project folders."""
+    """Keep local selected-folder registrations outside project folders."""
 
     def __init__(self, database_path: Path = WORKSPACE_REGISTRY_FILE) -> None:
         self.database = SQLiteDatabase(database_path)
@@ -69,8 +72,14 @@ class WorkspaceRegistry:
         connection = self.database.connect()
         try:
             row = connection.execute(
-                "SELECT project_id, directory, created_at, updated_at FROM workspaces WHERE directory = ?",
-                (str(directory),),
+                """
+                SELECT project_id, directory, created_at, updated_at
+                FROM workspaces
+                WHERE directory IN (?, ?)
+                ORDER BY CASE WHEN directory = ? THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (str(directory), str(directory / _WORKSPACE_PROJECTS_DIRECTORY_NAME), str(directory)),
             ).fetchone()
         finally:
             connection.close()
@@ -105,7 +114,9 @@ class WorkspaceRegistry:
 
 
 class WorkspaceProjectStore:
-    """Route each project operation to its selected single-project directory."""
+    """Route projects into a ``projects`` folder below the selected directory."""
+
+    _PROJECTS_DIRECTORY_NAME = _WORKSPACE_PROJECTS_DIRECTORY_NAME
 
     def __init__(self, registry: WorkspaceRegistry | None = None) -> None:
         self.registry = registry or WorkspaceRegistry()
@@ -116,6 +127,12 @@ class WorkspaceProjectStore:
         if not directory.is_dir():
             raise WorkspaceError("所选项目文件夹不存在或不是目录")
         return directory
+
+    @classmethod
+    def _projects_directory(cls, directory: Path) -> Path:
+        """Return the application-owned directory below a selected folder."""
+
+        return directory / cls._PROJECTS_DIRECTORY_NAME
 
     def _store_for_directory(self, directory: Path) -> ProjectStore:
         database_path = directory / "lighting_design.sqlite3"
@@ -151,17 +168,19 @@ class WorkspaceProjectStore:
         return self._store_for_directory(record.directory)
 
     def create_workspace(self, brief: DesignBrief, directory: Path | str) -> ProjectState:
-        root = self._directory(directory)
-        registered = self.registry.find_by_directory(root)
+        selected_root = self._directory(directory)
+        registered = self.registry.find_by_directory(selected_root)
         if registered is not None:
             return self._store(registered.project_id).get(registered.project_id)
 
-        store = self._store_for_directory(root)
+        project_root = self._projects_directory(selected_root)
+        project_root.mkdir(parents=True, exist_ok=True)
+        store = self._store_for_directory(project_root)
         existing = store.list()
         if len(existing) > 1:
             raise WorkspaceError("所选文件夹包含多个项目，不能作为单个工作区")
         state = existing[0] if existing else store.create(brief)
-        self.registry.register(state.project_id, root)
+        self.registry.register(state.project_id, project_root)
         return state
 
     def create(self, _brief: DesignBrief) -> ProjectState:
