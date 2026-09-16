@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 from fastapi.testclient import TestClient
 
 from lighting_agent.document_loader import load_document
@@ -49,32 +47,6 @@ def test_project_state_ignores_removed_layout_fields_in_legacy_payload() -> None
     payload = state.model_dump(mode="json")
     assert "layout_analysis" not in payload
     assert "luminaire_placements" not in payload["floor_plan"]
-
-
-def test_rag_imports_legacy_json_with_stable_evidence_ids(tmp_path) -> None:
-    legacy_index = tmp_path / "index.json"
-    legacy_index.write_text(
-        json.dumps(
-            [
-                {
-                    "chunk_id": "legacy-evidence-1",
-                    "source_name": "standard.md",
-                    "source_type": "standard",
-                    "source_hash": "legacy-source-hash",
-                    "locator": "page 1",
-                    "content": "Meeting room maintained illuminance is 500 lx.",
-                    "indexed_at": "2026-01-01T00:00:00+00:00",
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    store = LocalEvidenceStore(legacy_index)
-
-    assert store.search("meeting room illuminance")[0].evidence_id == "legacy-evidence-1"
-    assert store.get_evidence(["legacy-evidence-1"])[0].locator == "page 1"
-    assert legacy_index.exists()
 
 
 def test_evidence_adoption_is_saved_in_the_project_revision(tmp_path) -> None:

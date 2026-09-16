@@ -129,7 +129,7 @@ $env:LIGHTING_RAG_BACKEND = "local"
 | --- | --- |
 | `data/lighting_design.sqlite3` | CLI 使用的项目与全局资料库 |
 | `data/projects/` | CLI 项目数据（运行时生成） |
-| 工作区目录下的 `projects/` | Web 项目状态、聊天记录、资料和交付文件 |
+| 工作区目录下的 `projects/<project_id>/` | Web 项目状态、聊天记录、资料和交付文件（每个项目独立存放） |
 | `.model-cache/` | 嵌入模型缓存（运行时生成） |
 | `src/data/user_docs/` | 可加入资料库的示例文档 |
 
