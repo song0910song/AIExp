@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 from .config import WORKSPACE_REGISTRY_FILE
 from .project_store import ProjectNotFoundError, ProjectStore
@@ -114,7 +116,7 @@ class WorkspaceRegistry:
 
 
 class WorkspaceProjectStore:
-    """Route projects into a ``projects`` folder below the selected directory."""
+    """Route each project into ``projects/<project_id>`` below a selected directory."""
 
     _PROJECTS_DIRECTORY_NAME = _WORKSPACE_PROJECTS_DIRECTORY_NAME
 
@@ -169,17 +171,17 @@ class WorkspaceProjectStore:
 
     def create_workspace(self, brief: DesignBrief, directory: Path | str) -> ProjectState:
         selected_root = self._directory(directory)
-        registered = self.registry.find_by_directory(selected_root)
-        if registered is not None:
-            return self._store(registered.project_id).get(registered.project_id)
+        projects_root = self._projects_directory(selected_root)
+        projects_root.mkdir(parents=True, exist_ok=True)
 
-        project_root = self._projects_directory(selected_root)
-        project_root.mkdir(parents=True, exist_ok=True)
+        project_id = uuid4().hex
+        project_root = projects_root / project_id
+        while project_root.exists():
+            project_id = uuid4().hex
+            project_root = projects_root / project_id
+
         store = self._store_for_directory(project_root)
-        existing = store.list()
-        if len(existing) > 1:
-            raise WorkspaceError("所选文件夹包含多个项目，不能作为单个工作区")
-        state = existing[0] if existing else store.create(brief)
+        state = store.create(brief, project_id=project_id)
         self.registry.register(state.project_id, project_root)
         return state
 
@@ -232,11 +234,17 @@ class WorkspaceProjectStore:
 
     def delete(self, project_id: str) -> None:
         store = self._store(project_id)
+        project_directory = store.directory.resolve()
         database_path = store.database_path
         store.delete(project_id)
         self.registry.remove(project_id)
         for target in (database_path, Path(f"{database_path}-wal"), Path(f"{database_path}-shm")):
             target.unlink(missing_ok=True)
+        if (
+            project_directory.name == project_id
+            and project_directory.parent.name == self._PROJECTS_DIRECTORY_NAME
+        ):
+            shutil.rmtree(project_directory)
 
     def __getattr__(self, name: str):
         """Delegate ordinary ProjectStore operations using their project_id argument."""
@@ -256,7 +264,7 @@ class WorkspaceEvidenceStore:
 
     def _project_store(self, project_id: str) -> LocalEvidenceStore:
         database_path = self.projects.database_path_for(project_id)
-        return LocalEvidenceStore(database_path=database_path, import_legacy=False)
+        return LocalEvidenceStore(database_path=database_path)
 
     def add_document(self, document, *, source_type: str = "project_document", project_id: str | None = None) -> int:
         if project_id is None:

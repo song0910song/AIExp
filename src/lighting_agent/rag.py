@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
 from dataclasses import asdict, dataclass
@@ -12,7 +11,7 @@ from pathlib import Path
 from threading import RLock
 from uuid import uuid4
 
-from .config import DATABASE_FILE, LEGACY_RAG_INDEX_FILE, Settings, ensure_data_directories
+from .config import DATABASE_FILE, Settings, ensure_data_directories
 from .document_loader import ParsedDocument
 from .schemas import Evidence
 from .storage import SQLiteDatabase
@@ -32,7 +31,7 @@ LOGGER = logging.getLogger(__name__)
 class EvidenceNotFoundError(ValueError):
     pass
 
-
+# 
 def tokenize(value: str) -> list[str]:
     tokens: list[str] = []
     for part in TOKEN_PATTERN.findall(value.lower()):
@@ -124,16 +123,14 @@ class LocalEvidenceStore:
         index_path: Path | None = None,
         *,
         database_path: Path | None = None,
-        import_legacy: bool = True,
     ) -> None:
+        # ``index_path`` is kept for callers that still pass the pre-SQLite
+        # index location; it only derives where the SQLite database lives.
         ensure_data_directories()
-        self.index_path = index_path
         self.database_path = database_path or (
             DATABASE_FILE if index_path is None else self._database_path_for(index_path)
         )
         self.database = SQLiteDatabase(self.database_path)
-        if import_legacy:
-            self._import_legacy_index()
 
     @staticmethod
     def _database_path_for(index_path: Path) -> Path:
@@ -424,49 +421,6 @@ class LocalEvidenceStore:
             )
             return document
 
-    def _import_legacy_index(self) -> None:
-        legacy_index_path = self.index_path or LEGACY_RAG_INDEX_FILE
-        source_key = f"rag-json:{legacy_index_path.resolve()}"
-        if self.database.legacy_import_completed(source_key):
-            return
-        chunks: list[StoredChunk] = []
-        if legacy_index_path.exists():
-            try:
-                raw = json.loads(legacy_index_path.read_text(encoding="utf-8"))
-                chunks = [StoredChunk(**item) for item in raw]
-            except (OSError, ValueError, TypeError) as error:
-                raise RuntimeError(f"Cannot import legacy evidence index: {legacy_index_path}") from error
-        with self.database.transaction() as connection:
-            for chunk in chunks:
-                connection.execute(
-                    """
-                    INSERT INTO documents (source_hash, source_name, source_type, page_count, indexed_at)
-                    VALUES (?, ?, ?, NULL, ?)
-                    ON CONFLICT(source_hash) DO NOTHING
-                    """,
-                    (chunk.source_hash, chunk.source_name, chunk.source_type, chunk.indexed_at),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO evidence_chunks
-                        (chunk_id, source_hash, source_name, source_type, locator, content, indexed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(chunk_id) DO NOTHING
-                    """,
-                    (
-                        chunk.chunk_id,
-                        chunk.source_hash,
-                        chunk.source_name,
-                        chunk.source_type,
-                        chunk.locator,
-                        chunk.content,
-                        chunk.indexed_at,
-                    ),
-                )
-            connection.execute(
-                "INSERT INTO legacy_imports (source_key, imported_at) VALUES (?, ?)",
-                (source_key, datetime.now(UTC).isoformat()),
-            )
 
 class ChromaEvidenceStore:
     """Optional semantic backend using Chroma and BGE embeddings."""

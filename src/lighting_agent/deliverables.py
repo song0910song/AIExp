@@ -11,7 +11,7 @@ from pathlib import Path
 from .photometry_assets import PhotometryAssetStore
 from .schemas import ProjectState
 
-
+# 
 def _canonical_json(payload: object) -> bytes:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 

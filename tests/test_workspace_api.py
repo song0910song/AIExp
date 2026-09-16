@@ -5,7 +5,9 @@ import sqlite3
 
 from fastapi.testclient import TestClient
 
+from lighting_agent.project_store import ProjectStore
 from lighting_agent.rag import LocalEvidenceStore
+from lighting_agent.schemas import DesignBrief
 from lighting_agent.web_api import create_app
 from lighting_agent.workspace import WorkspaceProjectStore, WorkspaceRegistry
 
@@ -17,7 +19,6 @@ def make_client(tmp_path, directory_picker) -> TestClient:
             project_store=projects,
             evidence_store=LocalEvidenceStore(
                 database_path=tmp_path / "global-evidence.sqlite3",
-                import_legacy=False,
             ),
             directory_picker=directory_picker,
         )
@@ -52,9 +53,10 @@ def test_workspace_creation_uses_selected_nonempty_directory_for_project_files(t
     project = created.json()
     project_id = project["project_id"]
     assert selection["directory"] == str(workspace.resolve())
-    project_root = workspace / "projects"
+    project_root = workspace / "projects" / project_id
     assert project_root.is_dir()
     assert (project_root / "lighting_design.sqlite3").exists()
+    assert not (workspace / "projects" / "lighting_design.sqlite3").exists()
     assert not (workspace / "lighting_design.sqlite3").exists()
     assert original_file.read_text(encoding="utf-8") == "keep this file"
 
@@ -75,7 +77,7 @@ def test_workspace_creation_uses_selected_nonempty_directory_for_project_files(t
     assert any(item["source_name"] == "brief.md" for item in searched.json()["evidence"])
 
 
-def test_selecting_an_existing_workspace_reopens_its_single_project(tmp_path) -> None:
+def test_selecting_the_same_directory_creates_separate_project_directories(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     client = make_client(tmp_path, lambda: workspace)
@@ -91,12 +93,33 @@ def test_selecting_an_existing_workspace_reopens_its_single_project(tmp_path) ->
     second = select_directory(client)
     reopened = client.post(
         "/api/projects",
-        json={"project_name": "Should not overwrite", "workspace_selection_id": second["selection_id"]},
+        json={"project_name": "Second project", "workspace_selection_id": second["selection_id"]},
     )
     assert reopened.status_code == 201
-    assert reopened.json()["project_id"] == original["project_id"]
-    assert reopened.json()["brief"]["project_name"] == "Original project"
-    assert len(client.get("/api/projects").json()) == 1
+    second_project = reopened.json()
+    assert second_project["project_id"] != original["project_id"]
+    assert second_project["brief"]["project_name"] == "Second project"
+    assert (workspace / "projects" / original["project_id"] / "lighting_design.sqlite3").exists()
+    assert (workspace / "projects" / second_project["project_id"] / "lighting_design.sqlite3").exists()
+    assert len(client.get("/api/projects").json()) == 2
+
+
+def test_legacy_shared_projects_directory_remains_readable(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    legacy_root = workspace / "projects"
+    legacy_store = ProjectStore(legacy_root, import_legacy=False)
+    legacy_project = legacy_store.create(DesignBrief(project_name="Legacy project"))
+    registry = WorkspaceRegistry(tmp_path / "workspace-registry.sqlite3")
+    registry.register(legacy_project.project_id, legacy_root)
+    projects = WorkspaceProjectStore(registry)
+
+    created = projects.create_workspace(DesignBrief(project_name="Nested project"), workspace)
+
+    assert projects.get(legacy_project.project_id).brief.project_name == "Legacy project"
+    assert projects.get(created.project_id).brief.project_name == "Nested project"
+    assert (legacy_root / "lighting_design.sqlite3").exists()
+    assert (legacy_root / created.project_id / "lighting_design.sqlite3").exists()
+    assert len(projects.list()) == 2
 
 
 def test_health_does_not_deserialize_project_state(tmp_path) -> None:
@@ -112,7 +135,7 @@ def test_health_does_not_deserialize_project_state(tmp_path) -> None:
     assert created.status_code == 201
     project_id = created.json()["project_id"]
 
-    database = workspace / "projects" / "lighting_design.sqlite3"
+    database = workspace / "projects" / project_id / "lighting_design.sqlite3"
     with sqlite3.connect(database) as connection:
         state = connection.execute(
             "SELECT state_json FROM projects WHERE project_id = ?", (project_id,)
@@ -165,7 +188,8 @@ def test_workspace_ignores_unrelated_database_without_modifying_it(tmp_path) -> 
 
     assert created.status_code == 201, created.text
     assert database.read_bytes() == original
-    assert (workspace / "projects" / "lighting_design.sqlite3").exists()
+    project_id = created.json()["project_id"]
+    assert (workspace / "projects" / project_id / "lighting_design.sqlite3").exists()
 
 
 def test_workspace_delete_preserves_user_files_and_unregisters_directory(tmp_path) -> None:
@@ -185,5 +209,6 @@ def test_workspace_delete_preserves_user_files_and_unregisters_directory(tmp_pat
 
     assert deleted.status_code == 204
     assert source_file.read_text(encoding="utf-8") == "client-owned"
-    assert not (workspace / "projects" / "lighting_design.sqlite3").exists()
+    assert not (workspace / "projects" / project["project_id"]).exists()
+    assert (workspace / "projects").is_dir()
     assert client.get("/api/projects").json() == []

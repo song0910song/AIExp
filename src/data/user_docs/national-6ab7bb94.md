@@ -1,1 +1,0 @@
-National standard requires 300 lx.

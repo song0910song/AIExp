@@ -93,8 +93,14 @@ class ProjectStore:
         self._validate_project_id(project_id)
         return self.directory / f"{project_id}{suffix}"
 
-    def create(self, brief: DesignBrief) -> ProjectState:
-        state = ProjectState(brief=brief)
+    def create(self, brief: DesignBrief, *, project_id: str | None = None) -> ProjectState:
+        if project_id is not None:
+            self._validate_project_id(project_id)
+        state = (
+            ProjectState(brief=brief)
+            if project_id is None
+            else ProjectState(project_id=project_id, brief=brief)
+        )
         state.refresh_open_questions()
         state.refresh_workflow_status()
         payload = self._payload(state)
