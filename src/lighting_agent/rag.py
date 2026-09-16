@@ -31,7 +31,7 @@ LOGGER = logging.getLogger(__name__)
 class EvidenceNotFoundError(ValueError):
     pass
 
-# 
+# 将文本分解为标记
 def tokenize(value: str) -> list[str]:
     tokens: list[str] = []
     for part in TOKEN_PATTERN.findall(value.lower()):
@@ -41,7 +41,7 @@ def tokenize(value: str) -> list[str]:
             tokens.append(part)
     return tokens
 
-
+# 提取中文关键词
 def chroma_keyword_terms(query: str, *, maximum: int = 12) -> list[str]:
     """Return high-signal Chinese n-grams for Chroma ``where_document`` lookup."""
 
@@ -56,7 +56,7 @@ def chroma_keyword_terms(query: str, *, maximum: int = 12) -> list[str]:
                     return terms
     return terms
 
-
+# 将文本分块为指定大小的片段
 def chunk_text(text: str, *, size: int = 900, overlap: int = 120) -> list[str]:
     if size <= overlap:
         raise ValueError("size must be greater than overlap")

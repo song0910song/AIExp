@@ -2,7 +2,7 @@ import type { AgentPlanStep, AgentStepStatus, AgentToolRun, ClarificationRequest
 
 const API_ROOT = "/backend";
 
-export type ChatPayload = { message: string; session_id?: string; project_id?: string; debug?: boolean; reasoning_effort?: ReasoningEffort };
+export type ChatPayload = { message: string; session_id?: string; project_id?: string; reasoning_effort?: ReasoningEffort };
 type ChatStreamEvent =
   | { type: "start"; session_id: string }
   | { type: "plan"; steps: AgentPlanStep[] }
