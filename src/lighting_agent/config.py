@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2] # 根目录
 DATA_DIRECTORY = PROJECT_ROOT / "data" # 数据库目录
-PROJECTS_DIRECTORY = DATA_DIRECTORY / "projects" # 项目文件
+
 USER_DOCUMENTS_DIRECTORY = PROJECT_ROOT / "src" / "data" / "user_docs"
 DATABASE_FILE = DATA_DIRECTORY / "lighting_design.sqlite3"
 WORKSPACE_REGISTRY_FILE = DATA_DIRECTORY / "workspace_registry.sqlite3" # 工作目录数据库
@@ -177,3 +177,4 @@ class Settings:
 def ensure_data_directories() -> None:
     for directory in (DATA_DIRECTORY, PROJECTS_DIRECTORY, USER_DOCUMENTS_DIRECTORY):
         directory.mkdir(parents=True, exist_ok=True)
+PROJECTS_DIRECTORY = DATA_DIRECTORY / "projects" # 项目文件

@@ -3,11 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
-  Bug,
   Check,
-  CircleCheck,
-  CircleDot,
-  CircleX,
   LoaderCircle,
   RotateCcw,
   UserRound,
@@ -19,8 +15,6 @@ import { api } from "@/lib/api";
 import { unavailableContextUsage } from "@/lib/context-usage";
 import { defaultReasoningEffort, reasoningOptionsForHealth } from "@/lib/reasoning";
 import type {
-  AgentPlanStep,
-  AgentStepStatus,
   AgentToolRun,
   ClarificationField,
   ClarificationRequest,
@@ -57,76 +51,8 @@ const toolLabels: Record<string, string> = {
   create_dialux_task_package: "生成 DIALux 任务包",
 };
 
-function statusLabel(status: AgentStepStatus | AgentToolRun["status"]) {
+function statusLabel(status: AgentToolRun["status"]) {
   return { pending: "待执行", active: "执行中", done: "已完成", failed: "失败", skipped: "本轮未触发" }[status];
-}
-
-function formatDuration(value: number | undefined) {
-  if (value === undefined) return null;
-  return value >= 1000 ? `${(value / 1000).toFixed(1)} s` : `${value} ms`;
-}
-
-function DebugRunPanel({
-  project,
-  steps,
-  tools,
-  busy,
-  activity,
-}: {
-  project: Project;
-  steps: AgentPlanStep[];
-  tools: AgentToolRun[];
-  busy: boolean;
-  activity: string | null;
-}) {
-  const stepIcon = (status: AgentStepStatus) => {
-    if (status === "done") return <CircleCheck size={14} />;
-    if (status === "failed") return <CircleX size={14} />;
-    if (status === "active") return <LoaderCircle size={14} className="spin" />;
-    return <CircleDot size={14} />;
-  };
-
-  return (
-    <aside className="debug-run-panel" aria-label="执行调试">
-      <header className="debug-run-heading">
-        <div><Bug size={15} aria-hidden="true" /><strong>执行调试</strong></div>
-        <span className={busy ? "is-running" : ""}>{busy ? activity ?? "运行中" : "空闲"}</span>
-      </header>
-      <dl className="debug-project-meta">
-        <div><dt>项目</dt><dd title={project.project_id}>{project.project_id.slice(0, 12)}</dd></div>
-        <div><dt>版本</dt><dd>r{project.revision}</dd></div>
-      </dl>
-      <section className="debug-run-section">
-        <h2>流程</h2>
-        {steps.length ? <ol className="debug-step-list">
-          {steps.map((step) => <li key={step.id} className={`debug-step debug-step-${step.status}`}>
-            <span>{stepIcon(step.status)}</span>
-            <div><strong>{step.title}</strong><small>{step.description}</small></div>
-            <em>{statusLabel(step.status)}</em>
-          </li>)}
-        </ol> : <p className="debug-empty">本轮尚未触发项目工具。</p>}
-      </section>
-      <section className="debug-run-section">
-        <h2>工具</h2>
-        {tools.length ? <ol className="debug-tool-list">
-          {tools.map((tool) => <li key={tool.call_id} className={`debug-tool debug-tool-${tool.status}`}>
-            <div className="debug-tool-row">
-              <Wrench size={14} aria-hidden="true" />
-              <strong>{toolLabels[tool.name] ?? tool.name}</strong>
-              <em>{statusLabel(tool.status)}</em>
-              {formatDuration(tool.duration_ms) ? <small>{formatDuration(tool.duration_ms)}</small> : null}
-            </div>
-            <code>{tool.name} · {tool.call_id}</code>
-            {tool.input || tool.output ? <details>
-              <summary>调试摘要</summary>
-              {tool.input ? <><span>输入</span><pre>{JSON.stringify(tool.input, null, 2)}</pre></> : null}
-              {tool.output ? <><span>结果</span><pre>{JSON.stringify(tool.output, null, 2)}</pre></> : null}
-            </details> : null}
-          </li>)}
-        </ol> : <p className="debug-empty">工具调用会按实际执行顺序出现在这里。</p>}
-      </section>
-    </aside>
-  );
 }
 
 function AssistantMarkdown({ content, streaming, activity }: Pick<Message, "content" | "streaming"> & { activity?: string }) {
@@ -286,7 +212,6 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
   const [sessionId, setSessionId] = useState<string | undefined>();
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<File[]>([]);
-  const [steps, setSteps] = useState<AgentPlanStep[]>([]);
   const [tools, setTools] = useState<AgentToolRun[]>([]);
   const [clarification, setClarification] = useState<ClarificationRequest | null>(null);
   const [activity, setActivity] = useState<string | null>(null);
@@ -295,7 +220,6 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
   const [uploading, setUploading] = useState(false);
   const [restoring, setRestoring] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [debugOpen, setDebugOpen] = useState(false);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const sessionStorageKey = `lighting-smart-session:${project.project_id}`;
   const clarificationStorageKey = `lighting-clarification:${project.project_id}`;
@@ -317,12 +241,10 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
     setSessionId(storedSessionId ?? undefined);
     setDraft("");
     setAttachments([]);
-    setSteps([]);
     setTools([]);
     setActivity(null);
     setError(null);
     setContextUsage(unavailableContextUsage(health?.llm_context_window_tokens));
-    setDebugOpen(window.localStorage.getItem("lighting-debug-open") === "true");
     try {
       setClarification(storedClarification ? JSON.parse(storedClarification) as ClarificationRequest : null);
     } catch {
@@ -355,20 +277,8 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
     if (transcript) transcript.scrollTo({ top: transcript.scrollHeight, behavior: busy ? "auto" : "smooth" });
   }, [busy, clarification, messages]);
 
-  function updateStep(stepId: string, status: AgentStepStatus) {
-    setSteps((current) => current.map((step) => step.id === stepId ? { ...step, status } : step));
-  }
-
   function updateTool(next: AgentToolRun) {
     setTools((current) => mergeToolRuns(current, next));
-  }
-
-  function toggleDebug() {
-    setDebugOpen((current) => {
-      const next = !current;
-      window.localStorage.setItem("lighting-debug-open", String(next));
-      return next;
-    });
   }
 
   function updateReasoningEffort(value: ReasoningEffort) {
@@ -443,7 +353,6 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
     ]);
     setDraft("");
     setAttachments([]);
-    setSteps([]);
     setTools([]);
     setClarification(null);
     window.localStorage.removeItem(clarificationStorageKey);
@@ -455,16 +364,9 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
         message: content,
         session_id: sessionId,
         project_id: project.project_id,
-        debug: debugOpen,
         reasoning_effort: reasoningEffort,
       }, {
         onStart: (newSessionId) => { setSessionId(newSessionId); window.localStorage.setItem(sessionStorageKey, newSessionId); },
-        onPlan: (nextSteps) => {
-          setSteps(nextSteps);
-        },
-        onStep: (stepId, status) => {
-          updateStep(stepId, status);
-        },
         onToolStart: (tool) => {
           updateTool(tool);
           setMessages((current) => current.map((message) => message.id === assistantId
@@ -515,19 +417,18 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
     setSessionId(undefined);
     setMessages([]);
     setAttachments([]);
-    setSteps([]);
     setTools([]);
     setClarification(null);
     setError(null);
     setActivity(null);
   }
 
-  const showObservability = steps.length > 0 || tools.length > 0;
+  const showObservability = tools.length > 0;
   const running = busy || uploading;
   const statusText = running ? activity ?? "正在处理请求" : showObservability ? "本轮执行已完成" : "准备就绪";
 
   return (
-    <div className={`conversation-app ${debugOpen ? "conversation-side-open" : ""}`}>
+    <div className="conversation-app">
       <header className="conversation-header">
         <div className="conversation-header-title">
           <span className="agent-mark" aria-hidden="true"><Bot size={16} /></span>
@@ -535,9 +436,6 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
         </div>
         <div className="conversation-header-actions">
           <span className={`conversation-run-status ${running ? "is-running" : ""}`}><i />{statusText}</span>
-          <button className={`conversation-debug-toggle ${debugOpen ? "active" : ""}`} onClick={toggleDebug} aria-pressed={debugOpen} title={debugOpen ? "关闭执行调试" : "打开执行调试"}>
-            <Bug size={16} /><span>调试</span>
-          </button>
           <button className="button button-quiet conversation-reset" onClick={clear} disabled={busy} title="新会话"><RotateCcw size={16} /><span>新会话</span></button>
         </div>
       </header>
@@ -582,7 +480,6 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
             onSubmit={() => void send()}
           />
         </section>
-        {debugOpen ? <DebugRunPanel project={project} steps={steps} tools={tools} busy={busy} activity={activity} /> : null}
       </div>
     </div>
   );
