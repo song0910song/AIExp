@@ -49,6 +49,8 @@ from .dialux_api import DialuxAPI, DialuxAPIError, validate_luminaire_search
 from .dialux_protocol import DialuxProtocolError
 from .dialux_results import (
     DialuxResultError,
+    DialuxVisionError,
+    analyze_dialux_result_image,
     extract_maintained_illuminance_from_pdf,
     validate_dialux_result_bytes,
 )
@@ -60,6 +62,7 @@ from .rag import EvidenceNotFoundError, create_evidence_store, format_evidence
 from .schemas import (
     CalculationInput,
     DesignBrief,
+    DialuxVisionAnalysis,
     LuminaireSearchRequest,
     PhotometryExtractedFile,
     ProjectState,
@@ -874,6 +877,7 @@ def create_app(
     evidence_store: Any | None = None,
     dialux_api: DialuxAPI | None = None,
     directory_picker: Callable[[], Path | None] | None = None,
+    dialux_image_analyzer: Callable[[bytes, str], DialuxVisionAnalysis] | None = None,
 ) -> FastAPI:
     ensure_data_directories()
     projects = project_store or WorkspaceProjectStore()
@@ -885,6 +889,13 @@ def create_app(
     )
     dialux = dialux_api or DialuxAPI()
     settings = Settings()
+    image_analyzer = dialux_image_analyzer or (
+        lambda content, media_type: analyze_dialux_result_image(
+            content,
+            media_type,
+            settings=settings,
+        )
+    )
     sessions = ChatSessionStore(
         DATABASE_FILE if isinstance(projects, WorkspaceProjectStore) else projects.database_path,
         settings,
@@ -926,6 +937,8 @@ def create_app(
         solver_version: str | None,
         parser_version: str,
         artifacts: list[SimulationArtifact] | None = None,
+        metric_source: Literal["manual", "pdf_text", "vision"] | None = None,
+        vision_analysis: DialuxVisionAnalysis | None = None,
     ) -> SimulationRun:
         messages: list[str] = []
         expected_snapshot = package.get("input_snapshot_sha256")
@@ -957,6 +970,8 @@ def create_app(
             source_kind=source_kind,
             artifacts=evidence,
             metrics=metrics,
+            metric_source=metric_source,
+            vision_analysis=vision_analysis,
             verification_status=status,
             verification_messages=messages,
             parser_version=parser_version,
@@ -1185,13 +1200,48 @@ def create_app(
         await run_in_threadpool(target.write_bytes, content)
         extracted = maintained_illuminance_lx
         parser_version = "manual-evidence-1"
-        if extracted is None and suffix == ".pdf":
-            extracted = await run_in_threadpool(
-                extract_maintained_illuminance_from_pdf,
-                target,
-                allowed_root=result_directory,
-            )
-            parser_version = "dialux-pdf-text-1"
+        metric_source: Literal["manual", "pdf_text", "vision"] = "manual"
+        vision_analysis: DialuxVisionAnalysis | None = None
+        if suffix == ".pdf":
+            if extracted is None:
+                extracted = await run_in_threadpool(
+                    extract_maintained_illuminance_from_pdf,
+                    target,
+                    allowed_root=result_directory,
+                )
+                parser_version = "dialux-pdf-text-1"
+                metric_source = "pdf_text"
+        else:
+            try:
+                vision_analysis = await run_in_threadpool(image_analyzer, content, media_type)
+            except DialuxVisionError as error:
+                await run_in_threadpool(target.unlink, missing_ok=True)
+                raise HTTPException(status_code=503, detail=str(error)) from error
+            except Exception as error:
+                await run_in_threadpool(target.unlink, missing_ok=True)
+                raise HTTPException(status_code=502, detail="视觉模型解析 DIALux 仿真图片失败") from error
+            if not vision_analysis.is_dialux_result:
+                await run_in_threadpool(target.unlink, missing_ok=True)
+                raise HTTPException(
+                    status_code=422,
+                    detail="视觉模型无法确认该图片是 DIALux 仿真结果，请上传包含 DIALux 结果标识和照度表的清晰图片",
+                )
+            parser_version = "dialux-image-vision-1"
+            if extracted is None:
+                if (
+                    vision_analysis.maintained_illuminance_lx is None
+                    or vision_analysis.confidence < settings.vision_min_confidence
+                ):
+                    await run_in_threadpool(target.unlink, missing_ok=True)
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            "视觉模型未能可靠识别主要计算面的维持照度："
+                            f"{vision_analysis.explanation}。请上传更清晰的结果图，或填写人工校正值后重试"
+                        ),
+                    )
+                extracted = vision_analysis.maintained_illuminance_lx
+                metric_source = "vision"
         if extracted is None:
             await run_in_threadpool(target.unlink, missing_ok=True)
             raise HTTPException(
@@ -1218,6 +1268,8 @@ def create_app(
             solver_version=solver_version,
             parser_version=parser_version,
             artifacts=[artifact],
+            metric_source=metric_source,
+            vision_analysis=vision_analysis,
         )
         try:
             updated = projects.append_simulation_run(project_id, expected_revision, run)

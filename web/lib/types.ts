@@ -101,6 +101,16 @@ export type SimulationArtifact = {
   uploaded_at: string;
 };
 
+export type DialuxVisionAnalysis = {
+  is_dialux_result: boolean;
+  maintained_illuminance_lx: number | null;
+  confidence: number;
+  metric_label: string | null;
+  calculation_surface: string | null;
+  explanation: string;
+  model: string;
+};
+
 export type SimulationRun = {
   run_id: string;
   status: "pending" | "running" | "succeeded" | "failed" | "stale" | "unverified" | "cancelled";
@@ -114,8 +124,11 @@ export type SimulationRun = {
     maintained_illuminance_lx: number | null;
     minimum_illuminance_lx: number | null;
   } | null;
+  metric_source: "manual" | "pdf_text" | "vision" | null;
+  vision_analysis: DialuxVisionAnalysis | null;
   verification_status: "matched" | "mismatch" | "incomplete" | "unverified" | "stale";
   verification_messages: string[];
+  parser_version: string | null;
   stale_reason: string | null;
   created_at: string;
   completed_at: string | null;
@@ -247,57 +260,6 @@ export type FloorPlanImport = {
   floor_plan: FloorPlan;
   project: Project;
   applied_area_candidate_index: number | null;
-};
-
-export type PhotometryPreviewRequest = {
-  expected_revision: number;
-  luminaire_id: string;
-  fixture_rows: number;
-  fixture_columns: number;
-  fixture_count?: number;
-  room_length_m?: number | null;
-  room_width_m?: number | null;
-  workplane_height_m?: number | null;
-  mounting_height_m?: number | null;
-  maintenance_factor?: number | null;
-  utilization_factor?: number | null;
-  total_flux_lm?: number | null;
-};
-
-export type PhotometryPreviewResult = {
-  solver_version: string;
-  grid_rows: number;
-  grid_columns: number;
-  grid_x_coordinates_m: number[];
-  grid_y_coordinates_m: number[];
-  illuminance_lx: number[][];
-  direct_average_lx: number;
-  calibration_scale: number;
-  average_illuminance_lx: number;
-  minimum_illuminance_lx: number;
-  maximum_illuminance_lx: number;
-  installed_flux_lm: number;
-  installed_power_w: number | null;
-  assumptions: string[];
-  limitations: string[];
-};
-
-export type PhotometryPreviewPayload = {
-  schema_version: number;
-  kind: "preview";
-  solver_version: string;
-  generated_at: string;
-  input_project_revision: number;
-  input_snapshot_sha256: string;
-  luminaire: {
-    luminaire_id: string;
-    article_name: string;
-    source_file: string;
-    file_type: "ies" | "ldt";
-    photometry_sha256: string;
-  };
-  warnings: string[];
-  result: PhotometryPreviewResult;
 };
 
 export type PhotometryParseSummary = {

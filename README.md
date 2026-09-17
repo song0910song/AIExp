@@ -23,7 +23,7 @@
 
 - 现阶段仅以照度作为计算、验证与迭代停止标准；UGR、显色指数、色温、功率等不参与本阶段通过/不通过判定。
 - 流明法用于方案前置估算，DIALux evo 用于仿真复核。两者结果都不低于目标照度时，联合检验才通过。
-- DIALux 证据可上传 PDF 设计报告或 PNG/JPG/WEBP 仿真图片。原文件、哈希、任务包和项目 revision 一并保存；图片照度必须人工录入，PDF 仅在明确字段可提取时自动读数。
+- DIALux 证据可上传 PDF 设计报告或 PNG/JPG/WEBP 仿真图片。原文件、哈希、任务包和项目 revision 一并保存；图片必须经视觉模型识别 DIALux 身份、主要计算面和维持照度，PDF 仅从明确标注的结果字段提取。用户可填写人工校正值，但不能绕过图片视觉解析。
 - 未达标时智能体继续调整可控方案并生成最新任务包；需要重新运行 DIALux 时暂停等待用户回传结果。达到目标，或用户明确说停止、结束、取消迭代时，终止循环。
 
 ## 快速开始
@@ -99,6 +99,10 @@ LIGHTING_LLM_BASE_URL=https://你的网关地址/v1
 | `LIGHTING_LLM_API_KEY` | 无 | 智能对话密钥 |
 | `LIGHTING_LLM_MODEL` | 无 | 对话模型 |
 | `LIGHTING_LLM_BASE_URL` | 无 | OpenAI 兼容网关地址 |
+| `LIGHTING_VISION_MODEL` | `LIGHTING_LLM_MODEL` | 解析 DIALux 仿真图片的多模态模型 |
+| `LIGHTING_VISION_MIN_CONFIDENCE` | `0.7` | 自动采用图片照度读数的最低置信度 |
+| `LIGHTING_VISION_TIMEOUT_SECONDS` | `60` | 单次视觉模型请求超时 |
+| `LIGHTING_VISION_MAX_RETRIES` | `0` | 视觉模型失败后的最大重试次数 |
 | `LIGHTING_RAG_BACKEND` | `chroma` | `local` 切换为 SQLite 关键词检索 |
 | `LIGHTING_EMBEDDING_MODEL` | `BAAI/bge-small-zh-v1.5` | Chroma 嵌入模型 |
 | `LIGHTING_EMBEDDING_CACHE_FOLDER` | `.model-cache` | 嵌入模型缓存目录 |

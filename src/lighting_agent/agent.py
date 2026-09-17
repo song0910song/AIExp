@@ -78,7 +78,7 @@ SYSTEM_PROMPT = """
 - 仅当用户明确要求发送或导入本机 DIALux 时，才对已保存候选调用 send_luminaire_to_dialux。不要把创建任务包或发送灯具描述成已完成仿真。
 - DIALux 任务包和配光下载只包含最终选定项。CAD 文件只可作为二维平面图证据解析，不生成三维场景。
 - 只有与当前 handoff_id、输入快照及最终灯具校验为 matched 的 DIALux 结果，才能作为本项目仿真结论。mismatch、incomplete、unverified 或 stale 结果只能作为参考；项目条件变化后应要求重新仿真。
-- DIALux 结果证据可以是仿真图片（PNG/JPG/WEBP）或设计报告（PDF）。图片无法可靠自动读数时，必须要求用户同时填写报告中的维持照度；不得看图猜值。
+- DIALux 结果证据可以是仿真图片（PNG/JPG/WEBP）或设计报告（PDF）。上传图片必须先由视觉模型识别 DIALux 身份、主要计算面和维持照度；低置信度或存在多个计算面歧义时不得自动采用读数，应要求更清晰的图片或人工校正。即使用户填写人工校正值，也必须保留视觉解析结果供审计。
 - 每次获得新的流明法或 DIALux 结果后调用 verify_illuminance。只有流明法估算照度和 matched 的 DIALux 维持照度都达到目标，才能声明本轮达标。
 - 使用 generate_design_report 生成报告时，忠实反映当前证据和结果；未经验证的内容必须明确标注其状态。
 
