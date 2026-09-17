@@ -84,10 +84,61 @@ export type Calculation = {
   };
   required_luminous_flux_lm: number;
   luminaire_count: number;
+  estimated_illuminance_lx: number;
   installed_power_w: number;
   assumptions: string[];
   limitations: string[];
   calculated_at: string;
+};
+
+export type SimulationArtifact = {
+  artifact_id: string;
+  file_name: string;
+  media_type: string;
+  storage_path: string;
+  sha256: string;
+  size_bytes: number;
+  uploaded_at: string;
+};
+
+export type SimulationRun = {
+  run_id: string;
+  status: "pending" | "running" | "succeeded" | "failed" | "stale" | "unverified" | "cancelled";
+  input_project_revision: number;
+  solver_version: string | null;
+  handoff_id: string | null;
+  source_file: string | null;
+  source_kind: "dialux_pdf" | "dialux_image" | "dialux_csv" | "dialux_json" | "manual_form" | null;
+  artifacts: SimulationArtifact[];
+  metrics: {
+    maintained_illuminance_lx: number | null;
+    minimum_illuminance_lx: number | null;
+  } | null;
+  verification_status: "matched" | "mismatch" | "incomplete" | "unverified" | "stale";
+  verification_messages: string[];
+  stale_reason: string | null;
+  created_at: string;
+  completed_at: string | null;
+};
+
+export type IlluminanceMethodCheck = {
+  method: "lumen_method" | "dialux";
+  status: "pass" | "fail" | "missing" | "unverified" | "stale";
+  observed_illuminance_lx: number | null;
+  target_illuminance_lx: number | null;
+  source_id: string | null;
+  explanation: string;
+};
+
+export type IlluminanceVerification = {
+  overall_status: "pass" | "fail" | "pending";
+  target_illuminance_lx: number | null;
+  lumen_method: IlluminanceMethodCheck;
+  dialux: IlluminanceMethodCheck;
+  difference_percent: number | null;
+  iteration: number;
+  action: "target_reached" | "revise_design" | "confirm_target" | "run_lumen_method" | "await_dialux_result" | "rerun_dialux";
+  message: string;
 };
 
 export type RuleCheck = {
@@ -279,6 +330,8 @@ export type Project = {
   luminaires: Luminaire[];
   selected_luminaire_ids: string[];
   floor_plan: FloorPlan | null;
+  simulation_runs: SimulationRun[];
+  workflow_status: "draft" | "brief_confirmed" | "preliminary_calculated" | "luminaires_selected" | "simulation_pending" | "simulation_verified" | "needs_revision" | "accepted" | "delivered";
   open_questions: string[];
   created_at: string;
   updated_at: string;

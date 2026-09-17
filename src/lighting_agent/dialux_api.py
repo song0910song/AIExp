@@ -800,10 +800,10 @@ def apply_brief_constraints(
     request: LuminaireSearchRequest,
     brief: DesignBrief,
 ) -> LuminaireSearchRequest:
-    """Fill the key lighting conditions (illuminance/CCT/CRI/UGR) from the confirmed brief.
+    """Fill available product-selection conditions from the confirmed brief.
 
-    Power, IP and brand preferences are deliberately not inferred: those
-    conditions are applied only when the caller states them explicitly.
+    These filters help shortlist products but do not participate in the
+    current phase's illuminance-only acceptance decision.
     """
 
     inferred = {
@@ -825,9 +825,9 @@ def validate_luminaire_search(
 ) -> tuple[LuminaireSearchRequest, list[str]]:
     """Return an effective request and missing deterministic prerequisites.
 
-    The key lighting conditions are illuminance, CCT, CRI and UGR; any of
-    them (or an explicitly stated brand/IP/power condition) can unlock a
-    catalogue search.
+    Any explicit product-selection condition can unlock a catalogue search.
+    This is separate from project acceptance, which currently uses only
+    illuminance.
     """
 
     effective = apply_brief_constraints(request, brief) if brief is not None else request

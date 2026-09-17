@@ -38,7 +38,7 @@ export function CalculationPanel({ project, onProject }: { project: Project; onP
   const latest = project.calculations.at(-1);
   return (
     <div className="content-stack">
-      <div className="section-heading"><div><p className="eyebrow">DETERMINISTIC SERVICES</p><h1>预计算与规则校核</h1><p>所有结果由确定性函数生成；流明法不替代逐点仿真。</p></div></div>
+      <div className="section-heading"><div><p className="eyebrow">DETERMINISTIC SERVICES</p><h1>照度初算与校核</h1><p>现阶段仅以照度为计算和验证标准；流明法结果仍需 DIALux 复核。</p></div></div>
       {error ? <Notice tone="danger">{error}</Notice> : null}
       <div className="split-grid">
         <Panel title="流明法初算" eyebrow="LUMEN METHOD">
@@ -53,13 +53,13 @@ export function CalculationPanel({ project, onProject }: { project: Project; onP
           </form>
         </Panel>
         <Panel title="最新计算结果" eyebrow={latest ? new Date(latest.calculated_at).toLocaleString("zh-CN") : "NO RESULT"}>
-          {latest ? <><div className="result-grid"><div><span>灯具数量</span><strong>{latest.luminaire_count}<small> 套</small></strong></div><div><span>装机功率</span><strong>{formatNumber(latest.installed_power_w)}<small> W</small></strong></div><div><span>目标总光通量</span><strong>{formatNumber(latest.required_luminous_flux_lm, 0)}<small> lm</small></strong></div></div><div className="boundary-note"><strong>适用限制</strong>{latest.limitations.map((item) => <p key={item}>{item}</p>)}</div></> : <EmptyState title="尚未计算">填写灯具光通量、功率和两个设计系数后执行流明法。</EmptyState>}
+          {latest ? <><div className="result-grid"><div><span>估算照度</span><strong>{formatNumber(latest.estimated_illuminance_lx)}<small> lx</small></strong></div><div><span>灯具数量</span><strong>{latest.luminaire_count}<small> 套</small></strong></div><div><span>目标总光通量</span><strong>{formatNumber(latest.required_luminous_flux_lm, 0)}<small> lm</small></strong></div></div><div className="boundary-note"><strong>适用限制</strong>{latest.limitations.map((item) => <p key={item}>{item}</p>)}</div></> : <EmptyState title="尚未计算">填写灯具光通量、功率和两个设计系数后执行流明法。</EmptyState>}
         </Panel>
       </div>
       <div className="split-grid">
-        <Panel title="规则校核器" eyebrow="EXPLICIT THRESHOLD">
+        <Panel title="照度阈值校核" eyebrow="ILLUMINANCE ONLY">
           <form onSubmit={checkRule} className="form-grid">
-            <Field label="指标"><select name="metric"><option value="illuminance_lx">照度 / lx</option><option value="cri">显色指数 / Ra</option><option value="ugr">UGR</option></select></Field>
+            <Field label="指标"><select name="metric"><option value="illuminance_lx">照度 / lx</option></select></Field>
             <Field label="判定方向"><select name="operator"><option value="min">不低于</option><option value="max">不高于</option></select></Field>
             <Field label="阈值"><input name="threshold" type="number" step="0.1" required /></Field>
             <Field label="观测值"><input name="observed" type="number" step="0.1" required /></Field>
@@ -68,7 +68,7 @@ export function CalculationPanel({ project, onProject }: { project: Project; onP
           </form>
         </Panel>
         <Panel title="校核记录" eyebrow={`${project.rule_checks.length} CHECKS`}>
-          {project.rule_checks.length ? <div className="check-table">{project.rule_checks.toReversed().map((item, index) => <div key={`${item.metric}-${index}`}><StatusPill status={item.status === "pass" ? "success" : item.status === "fail" ? "danger" : "warning"}>{item.status}</StatusPill><p><strong>{item.metric}</strong><small>{item.explanation}</small></p></div>)}</div> : <EmptyState title="尚无校核记录">输入证据阈值与观测值后进行确定性比较。</EmptyState>}
+          {project.rule_checks.length ? <div className="check-table">{project.rule_checks.toReversed().map((item, index) => <div key={`${item.metric}-${index}`}><StatusPill status={item.status === "pass" ? "success" : item.status === "fail" ? "danger" : "warning"}>{item.status}</StatusPill><p><strong>照度</strong><small>{item.explanation}</small></p></div>)}</div> : <EmptyState title="尚无校核记录">输入照度证据阈值与观测值后进行确定性比较。</EmptyState>}
         </Panel>
       </div>
     </div>

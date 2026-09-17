@@ -9,6 +9,7 @@ from io import BytesIO
 from pathlib import Path
 
 from .photometry_assets import PhotometryAssetStore
+from .calculations.verification import evaluate_illuminance
 from .schemas import ProjectState
 
 # 
@@ -24,6 +25,9 @@ def handoff_snapshot(state: ProjectState) -> dict:
         "project_revision": state.revision,
         "brief": state.brief.model_dump(mode="json"),
         "selected_luminaire_ids": state.selected_luminaire_ids,
+        "latest_lumen_method": (
+            state.calculations[-1].model_dump(mode="json") if state.calculations else None
+        ),
     }
 
 
@@ -99,7 +103,8 @@ def build_dialux_task_package(state: ProjectState) -> dict:
                 else "No final luminaires have been selected; no photometry files were downloaded."
             ),
         },
-        "pending_simulation_metrics": ["maintained illuminance", "UGR"],
+        "pending_simulation_metrics": ["maintained illuminance"],
+        "acceptance_metric": "illuminance only",
         "limitations": ["This package is a DIALux evo handoff, not an executed simulation result."],
     }
 
@@ -268,11 +273,35 @@ def build_design_report(state: ProjectState) -> str:
                     "",
                     f"- 所需光通量：{result.required_luminous_flux_lm:g} lm",
                     f"- 估算灯具数量：{result.luminaire_count}",
+                    f"- 估算平均照度：{result.estimated_illuminance_lx:g} lx",
                     f"- 装机功率：{result.installed_power_w:g} W",
                     "- 局限：" + "；".join(result.limitations),
                     "",
                 ]
             )
+
+    verification = evaluate_illuminance(state)
+    lines.extend(
+        [
+            "",
+            "## 照度联合检验",
+            "",
+            "| 方法 | 状态 | 结果 | 目标 |",
+            "| --- | --- | ---: | ---: |",
+            f"| 流明法 | {verification.lumen_method.status} | "
+            f"{_markdown_value(verification.lumen_method.observed_illuminance_lx)} lx | "
+            f"{_markdown_value(verification.target_illuminance_lx)} lx |",
+            f"| DIALux | {verification.dialux.status} | "
+            f"{_markdown_value(verification.dialux.observed_illuminance_lx)} lx | "
+            f"{_markdown_value(verification.target_illuminance_lx)} lx |",
+            "",
+            f"- 联合结论：`{verification.overall_status}`",
+            f"- 下一动作：`{verification.action}`",
+            f"- 说明：{verification.message}",
+        ]
+    )
+    if verification.difference_percent is not None:
+        lines.append(f"- 两种方法结果差异：{verification.difference_percent:g}%")
 
     lines.extend(["", "## 平面图", ""])
     if state.floor_plan is None:
@@ -328,8 +357,6 @@ def build_design_report(state: ProjectState) -> str:
                 parts = []
                 if metrics.maintained_illuminance_lx is not None:
                     parts.append(f"Ē={metrics.maintained_illuminance_lx:g} lx")
-                if metrics.ugr is not None:
-                    parts.append(f"UGR={metrics.ugr:g}")
                 summary = "，".join(parts) if parts else "已导入"
             status = run.status
             if run.stale_reason:
@@ -348,7 +375,7 @@ def build_design_report(state: ProjectState) -> str:
             "",
             "## 人工复核声明",
             "",
-            "本报告为可审查草稿。Luminaire Finder 结果仅用于候选灯具筛选；维持照度、UGR、布灯方式及最终规范符合性，须由有资质人员在 DIALux evo 或等效软件中复核并签发。仿真结果仅在其输入与当前项目版本匹配（matched）时方可视为本项目结论。",
+            "本报告为可审查草稿。现阶段仅以照度作为计算和验证标准：流明法用于前置估算，DIALux evo 维持照度用于仿真复核，两者均达到目标后才判定通过。仿真结果仅在其输入与当前项目版本匹配（matched）时方可视为本项目结论。其他指标不参与本阶段验收，最终方案仍须由有资质人员复核并签发。",
             "",
         ]
     )

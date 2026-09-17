@@ -33,6 +33,7 @@ from .calculations import (
     calculate_lumen_method,
     check_design_rules,
     compute_illuminance_preview,
+    evaluate_illuminance,
 )
 from .calculations.photometry import PhotometryParseError, parse_photometry_file
 from .calculations.preview import PreviewGeometryError
@@ -46,6 +47,11 @@ from .config import (
 from .deliverables import build_design_report, build_dialux_task_archive, read_dialux_task_package
 from .dialux_api import DialuxAPI, DialuxAPIError, validate_luminaire_search
 from .dialux_protocol import DialuxProtocolError
+from .dialux_results import (
+    DialuxResultError,
+    extract_maintained_illuminance_from_pdf,
+    validate_dialux_result_bytes,
+)
 from .document_loader import DocumentLoadError, load_document
 from .floor_plan import MAX_DRAWING_BYTES, FloorPlanParseError, parse_floor_plan
 from .project_store import ProjectNotFoundError, ProjectStore, RevisionConflictError
@@ -59,6 +65,7 @@ from .schemas import (
     ProjectState,
     ProjectUpdate,
     RuleRequirement,
+    SimulationArtifact,
     SimulationMetrics,
     SimulationRun,
     StrictModel,
@@ -123,7 +130,9 @@ class DialuxResultRequest(StrictModel):
     handoff_id: str = Field(min_length=8, max_length=128)
     input_snapshot_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     metrics: SimulationMetrics
-    source_kind: Literal["dialux_pdf", "dialux_csv", "dialux_json", "manual_form"] = "manual_form"
+    source_kind: Literal[
+        "dialux_pdf", "dialux_image", "dialux_csv", "dialux_json", "manual_form"
+    ] = "manual_form"
     solver_version: str | None = Field(default=None, max_length=120)
     parser_version: str = Field(default="manual-form-1", max_length=80)
 
@@ -274,6 +283,36 @@ def _event_line(event: dict[str, Any]) -> str:
     """Encode one newline-delimited JSON event for the chat stream."""
 
     return json.dumps(event, ensure_ascii=False) + "\n"
+
+
+_ITERATION_STOP_PATTERN = re.compile(
+    r"^(?:请)?(?:停止|停止迭代|结束|结束迭代|取消迭代|不用继续|不要继续)(?:吧|了)?[。！! ]*$"
+)
+
+
+def _is_iteration_stop(message: str) -> bool:
+    """Match explicit stop commands without catching explanatory sentences."""
+
+    return _ITERATION_STOP_PATTERN.fullmatch(message.strip()) is not None
+
+
+def _iteration_stop_answer(state: ProjectState | None) -> str:
+    if state is None:
+        return "已停止自主迭代。本轮不会调用工具或修改项目。"
+    verification = evaluate_illuminance(state)
+
+    def value(number: float | None) -> str:
+        return f"{number:g} lx" if number is not None else "尚无结果"
+
+    status = {"pass": "已达标", "fail": "未达标", "pending": "待验证"}[
+        verification.overall_status
+    ]
+    return (
+        "已停止自主迭代。本轮不会调用工具或修改项目。\n\n"
+        f"当前联合状态：{status}；目标照度 {value(verification.target_illuminance_lx)}；"
+        f"流明法 {value(verification.lumen_method.observed_illuminance_lx)}；"
+        f"DIALux {value(verification.dialux.observed_illuminance_lx)}。"
+    )
 
 
 def _stream_text(content: Any) -> str:
@@ -657,6 +696,12 @@ _AGENT_WORKFLOW_STEPS: tuple[dict[str, Any], ...] = (
         "tools": ["calculate_preliminary_lighting"],
     },
     {
+        "id": "verification",
+        "title": "流明法与 DIALux 联合检验",
+        "description": "仅比较两种方法的照度结果；达标即停止，否则进入下一轮修订。",
+        "tools": ["verify_illuminance"],
+    },
+    {
         "id": "deliverables",
         "title": "给出优化后的方案",
         "description": "生成包含真实三维渲染和照度热力图的方案报告，并声明专业复核边界。",
@@ -868,6 +913,56 @@ def create_app(
     def project_photometry(project_id: str) -> PhotometryAssetStore:
         return PhotometryAssetStore(project_directory(project_id), dialux)
 
+    def build_dialux_simulation_run(
+        project_id: str,
+        *,
+        state: ProjectState,
+        package: dict[str, Any],
+        expected_revision: int,
+        handoff_id: str,
+        input_snapshot_sha256: str | None,
+        metrics: SimulationMetrics,
+        source_kind: str,
+        solver_version: str | None,
+        parser_version: str,
+        artifacts: list[SimulationArtifact] | None = None,
+    ) -> SimulationRun:
+        messages: list[str] = []
+        expected_snapshot = package.get("input_snapshot_sha256")
+        if handoff_id != package.get("handoff_id"):
+            messages.append("handoff_id 与当前任务包不匹配")
+        if input_snapshot_sha256 and input_snapshot_sha256 != expected_snapshot:
+            messages.append("input_snapshot_sha256 与当前任务包不匹配")
+        package_snapshot = package.get("input_snapshot", {})
+        if package_snapshot.get("project_id") != project_id:
+            messages.append("任务包不属于当前项目")
+        if package_snapshot.get("selected_luminaire_ids", []) != state.selected_luminaire_ids:
+            messages.append("任务包中的最终灯具与当前项目不一致")
+        if package_snapshot.get("project_revision") != expected_revision:
+            messages.append("任务包中的项目 revision 与导入 revision 不一致")
+        status = "matched" if not messages else "mismatch"
+        evidence = artifacts or []
+        return SimulationRun(
+            kind="精算",
+            status="succeeded" if status == "matched" else "unverified",
+            input_project_revision=expected_revision,
+            solver_version=solver_version,
+            artifact_path=evidence[0].storage_path if evidence else None,
+            handoff_id=handoff_id,
+            input_snapshot_sha256=input_snapshot_sha256 or expected_snapshot,
+            selected_luminaire_ids=list(package.get("selected_luminaire_ids", [])),
+            photometry_sha256_by_luminaire=dict(package.get("photometry_sha256_by_luminaire", {})),
+            source_file=evidence[0].file_name if evidence else None,
+            source_sha256=evidence[0].sha256 if evidence else None,
+            source_kind=source_kind,
+            artifacts=evidence,
+            metrics=metrics,
+            verification_status=status,
+            verification_messages=messages,
+            parser_version=parser_version,
+            completed_at=datetime.now(UTC),
+        )
+
     def chat_agent(request: ChatRequest, runtime_settings: Settings) -> Any:
         """Return an agent configured for the requested reasoning effort.
 
@@ -1013,6 +1108,12 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(error)) from error
         return run.model_dump(mode="json")
 
+    @app.get("/api/projects/{project_id}/illuminance-verification")
+    def get_illuminance_verification(project_id: str) -> dict[str, Any]:
+        """Return the current lumen-method plus DIALux illuminance decision."""
+
+        return evaluate_illuminance(projects.get(project_id)).model_dump(mode="json")
+
     @app.post("/api/projects/{project_id}/dialux-results", status_code=201)
     def import_dialux_result(project_id: str, request: DialuxResultRequest) -> dict[str, Any]:
         state = projects.get(project_id)
@@ -1024,45 +1125,126 @@ def create_app(
         except (OSError, ValueError) as error:
             raise HTTPException(status_code=422, detail=f"无法读取 DIALux 任务包：{error}") from error
 
-        messages: list[str] = []
-        expected_snapshot = package.get("input_snapshot_sha256")
-        package_handoff_id = package.get("handoff_id")
-        if request.handoff_id != package_handoff_id:
-            messages.append("handoff_id 与当前任务包不匹配")
-        if request.input_snapshot_sha256 and request.input_snapshot_sha256 != expected_snapshot:
-            messages.append("input_snapshot_sha256 与当前任务包不匹配")
         if state.revision != request.expected_revision:
             raise RevisionConflictError(
                 f"Project revision is {state.revision}, but request expected {request.expected_revision}"
             )
-
-        package_snapshot = package.get("input_snapshot", {})
-        if package_snapshot.get("project_id") != project_id:
-            messages.append("任务包不属于当前项目")
-        if package_snapshot.get("selected_luminaire_ids", []) != state.selected_luminaire_ids:
-            messages.append("任务包中的最终灯具与当前项目不一致")
-        if package_snapshot.get("project_revision") != request.expected_revision:
-            messages.append("任务包中的项目 revision 与导入 revision 不一致")
-
-        status = "matched" if not messages else "mismatch"
-        run = SimulationRun(
-            kind="精算",
-            status="succeeded" if status == "matched" else "unverified",
-            input_project_revision=request.expected_revision,
-            solver_version=request.solver_version,
+        run = build_dialux_simulation_run(
+            project_id,
+            state=state,
+            package=package,
+            expected_revision=request.expected_revision,
             handoff_id=request.handoff_id,
-            input_snapshot_sha256=request.input_snapshot_sha256 or expected_snapshot,
-            selected_luminaire_ids=list(package.get("selected_luminaire_ids", [])),
-            photometry_sha256_by_luminaire=dict(package.get("photometry_sha256_by_luminaire", {})),
-            source_kind=request.source_kind,
+            input_snapshot_sha256=request.input_snapshot_sha256,
             metrics=request.metrics,
-            verification_status=status,
-            verification_messages=messages,
+            source_kind=request.source_kind,
+            solver_version=request.solver_version,
             parser_version=request.parser_version,
-            completed_at=datetime.now(UTC),
         )
         updated = projects.append_simulation_run(project_id, request.expected_revision, run)
-        return {"simulation_run": run.model_dump(mode="json"), "project": updated.model_dump(mode="json")}
+        return {
+            "simulation_run": run.model_dump(mode="json"),
+            "verification": evaluate_illuminance(updated).model_dump(mode="json"),
+            "project": updated.model_dump(mode="json"),
+        }
+
+    @app.post("/api/projects/{project_id}/dialux-results/upload", status_code=201)
+    async def upload_dialux_result(
+        project_id: str,
+        file: Annotated[UploadFile, File()],
+        expected_revision: Annotated[int, Form(ge=0)],
+        maintained_illuminance_lx: Annotated[float | None, Form(ge=0)] = None,
+        solver_version: Annotated[str | None, Form(max_length=120)] = None,
+    ) -> dict[str, Any]:
+        """Preserve a DIALux screenshot/report and bind its illuminance to the handoff."""
+
+        state = projects.get(project_id)
+        if state.revision != expected_revision:
+            raise RevisionConflictError(
+                f"Project revision is {state.revision}, but request expected {expected_revision}"
+            )
+        handoff_path = projects.artifact_path(project_id, ".dialux-task.zip")
+        if not handoff_path.exists():
+            raise HTTPException(status_code=404, detail="请先生成当前版本的 DIALux 任务包")
+        try:
+            package = read_dialux_task_package(handoff_path.read_bytes())
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=422, detail=f"无法读取 DIALux 任务包：{error}") from error
+
+        safe_name = _safe_upload_name(file.filename or "dialux-result")
+        suffix = Path(safe_name).suffix.casefold()
+        content = await file.read()
+        try:
+            media_type = validate_dialux_result_bytes(suffix, content)
+        except DialuxResultError as error:
+            raise HTTPException(status_code=415, detail=str(error)) from error
+
+        project_root = project_directory(project_id).resolve()
+        result_directory = project_root / f"{project_id}.dialux-results"
+        target = _unique_upload_target(result_directory, safe_name)
+        await run_in_threadpool(target.write_bytes, content)
+        extracted = maintained_illuminance_lx
+        parser_version = "manual-evidence-1"
+        if extracted is None and suffix == ".pdf":
+            extracted = await run_in_threadpool(
+                extract_maintained_illuminance_from_pdf,
+                target,
+                allowed_root=result_directory,
+            )
+            parser_version = "dialux-pdf-text-1"
+        if extracted is None:
+            await run_in_threadpool(target.unlink, missing_ok=True)
+            raise HTTPException(
+                status_code=422,
+                detail="未能从文件中可靠提取维持照度，请填写 DIALux 结果中的维持照度（lx）后重试",
+            )
+
+        artifact = SimulationArtifact(
+            file_name=target.name,
+            media_type=media_type,
+            storage_path=str(target.relative_to(project_root).as_posix()),
+            sha256=hashlib.sha256(content).hexdigest(),
+            size_bytes=len(content),
+        )
+        run = build_dialux_simulation_run(
+            project_id,
+            state=state,
+            package=package,
+            expected_revision=expected_revision,
+            handoff_id=str(package["handoff_id"]),
+            input_snapshot_sha256=package.get("input_snapshot_sha256"),
+            metrics=SimulationMetrics(maintained_illuminance_lx=extracted),
+            source_kind="dialux_pdf" if suffix == ".pdf" else "dialux_image",
+            solver_version=solver_version,
+            parser_version=parser_version,
+            artifacts=[artifact],
+        )
+        try:
+            updated = projects.append_simulation_run(project_id, expected_revision, run)
+        except Exception:
+            await run_in_threadpool(target.unlink, missing_ok=True)
+            raise
+        return {
+            "simulation_run": run.model_dump(mode="json"),
+            "verification": evaluate_illuminance(updated).model_dump(mode="json"),
+            "project": updated.model_dump(mode="json"),
+        }
+
+    @app.get("/api/projects/{project_id}/dialux-results/{run_id}/artifact")
+    def download_dialux_result_artifact(project_id: str, run_id: str):
+        run = projects.get_simulation_run(project_id, run_id)
+        if not run.artifacts:
+            raise HTTPException(status_code=404, detail="该 DIALux 结果没有上传原始文件")
+        artifact = run.artifacts[0]
+        root = project_directory(project_id).resolve()
+        target = (root / artifact.storage_path).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="DIALux 结果文件路径无效") from error
+        if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != artifact.sha256:
+            raise HTTPException(status_code=404, detail="DIALux 结果文件缺失或校验失败")
+        return FileResponse(target, media_type=artifact.media_type, filename=artifact.file_name)
 
     @app.put("/api/projects/{project_id}/brief")
     def update_brief(project_id: str, request: BriefUpdateRequest) -> dict[str, Any]:
@@ -2193,12 +2375,29 @@ def create_app(
 
     @app.post("/api/chat")
     def chat(request: ChatRequest) -> dict[str, Any]:
-        settings = Settings()
-        if not settings.llm_api_key:
-            raise HTTPException(status_code=503, detail="未配置 LIGHTING_LLM_API_KEY，聊天功能暂不可用")
         session_id = request.session_id or uuid4().hex
         session_store = project_sessions(request.project_id)
         messages = _chat_history(session_store.get(session_id))
+        if _is_iteration_stop(request.message):
+            project = projects.get(request.project_id) if request.project_id else None
+            answer = _iteration_stop_answer(project)
+            session_store.save(
+                session_id,
+                [
+                    *messages,
+                    {"role": "user", "content": request.message},
+                    {"role": "assistant", "content": answer},
+                ],
+                project_id=request.project_id,
+            )
+            return {
+                "session_id": session_id,
+                "answer": answer,
+                "project": project.model_dump(mode="json") if project else None,
+            }
+        settings = Settings()
+        if not settings.llm_api_key:
+            raise HTTPException(status_code=503, detail="未配置 LIGHTING_LLM_API_KEY，聊天功能暂不可用")
         content = request.message
         if request.project_id:
             project = projects.get(request.project_id)
@@ -2228,12 +2427,42 @@ def create_app(
     def stream_chat(request: ChatRequest) -> StreamingResponse:
         """Stream visible assistant tokens while retaining the chat session."""
 
-        settings = Settings()
-        if not settings.llm_api_key:
-            raise HTTPException(status_code=503, detail="未配置 LIGHTING_LLM_API_KEY，聊天功能暂不可用")
         session_id = request.session_id or uuid4().hex
         session_store = project_sessions(request.project_id)
         messages = _chat_history(session_store.get(session_id))
+        if _is_iteration_stop(request.message):
+            project = projects.get(request.project_id) if request.project_id else None
+            answer = _iteration_stop_answer(project)
+            session_store.save(
+                session_id,
+                [
+                    *messages,
+                    {"role": "user", "content": request.message},
+                    {"role": "assistant", "content": answer},
+                ],
+                project_id=request.project_id,
+            )
+
+            def stop_events():
+                yield _event_line({"type": "start", "session_id": session_id})
+                yield _event_line({"type": "status", "content": "自主迭代已停止"})
+                event: dict[str, Any] = {
+                    "type": "done",
+                    "session_id": session_id,
+                    "answer": answer,
+                }
+                if project is not None:
+                    event["project"] = project.model_dump(mode="json")
+                yield _event_line(event)
+
+            return StreamingResponse(
+                stop_events(),
+                media_type="application/x-ndjson; charset=utf-8",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        settings = Settings()
+        if not settings.llm_api_key:
+            raise HTTPException(status_code=503, detail="未配置 LIGHTING_LLM_API_KEY，聊天功能暂不可用")
         content = request.message
         if request.project_id:
             project = projects.get(request.project_id)

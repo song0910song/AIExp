@@ -104,7 +104,6 @@ def build_parser() -> argparse.ArgumentParser:
     result.add_argument("--source-kind", choices=["dialux_pdf", "dialux_csv", "dialux_json", "manual_form"], default="manual_form")
     result.add_argument("--maintained-lx", type=float)
     result.add_argument("--minimum-lx", type=float)
-    result.add_argument("--ugr", type=float)
     result.add_argument("--solver-version")
 
     chat = subcommands.add_parser("chat", help="run the LLM agent; requires LIGHTING_LLM_API_KEY")
@@ -217,7 +216,6 @@ def main(argv: list[str] | None = None) -> None:
         metrics = SimulationMetrics(
             maintained_illuminance_lx=args.maintained_lx,
             minimum_illuminance_lx=args.minimum_lx,
-            ugr=args.ugr,
         )
         status = "matched" if not messages else "mismatch"
         run = SimulationRun(

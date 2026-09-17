@@ -324,6 +324,32 @@ def test_web_chat_stream_returns_ndjson_and_keeps_session(tmp_path, monkeypatch)
     assert len(agent.requests[1]["messages"]) == 3
 
 
+def test_explicit_stop_command_bypasses_model_and_preserves_project(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        web_api,
+        "build_agent",
+        lambda _settings: (_ for _ in ()).throw(AssertionError("stop command must not build an agent")),
+    )
+    client = make_client(tmp_path)
+    project = client.post(
+        "/api/projects",
+        json={"project_name": "停止迭代", "target_illuminance_lx": 500},
+    ).json()
+
+    response = client.post(
+        "/api/chat/stream",
+        json={"message": "请停止迭代", "project_id": project["project_id"]},
+    )
+
+    assert response.status_code == 200
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert [event["type"] for event in events] == ["start", "status", "done"]
+    assert events[1]["content"] == "自主迭代已停止"
+    assert "不会调用工具或修改项目" in events[-1]["answer"]
+    assert "目标照度 500 lx" in events[-1]["answer"]
+    assert events[-1]["project"]["revision"] == project["revision"]
+
+
 def test_web_agent_stream_exposes_plan_and_real_tool_trace(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(web_api, "build_agent", lambda _settings: FakeTraceAgent())
     client = make_client(tmp_path)

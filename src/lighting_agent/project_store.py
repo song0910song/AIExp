@@ -149,6 +149,9 @@ class ProjectStore:
             )
             floor_plan_changed = update.floor_plan is not None and update.floor_plan != state.floor_plan
             luminaires_changed = update.luminaires is not None and update.luminaires != state.luminaires
+            calculations_changed = (
+                update.calculations is not None and update.calculations != state.calculations
+            )
             for name in (
                 "brief",
                 "evidence",
@@ -178,7 +181,13 @@ class ProjectStore:
                 ]
                 # A changed task brief invalidates the prior final-selection conclusion.
                 state.selected_luminaire_ids = []
-            if brief_changed or selected_changed or floor_plan_changed or luminaires_changed:
+            if (
+                brief_changed
+                or selected_changed
+                or floor_plan_changed
+                or luminaires_changed
+                or calculations_changed
+            ):
                 self._mark_simulation_runs_stale(
                     state,
                     self._simulation_stale_reason(
@@ -186,6 +195,7 @@ class ProjectStore:
                         selected_changed=selected_changed,
                         floor_plan_changed=floor_plan_changed,
                         luminaires_changed=luminaires_changed,
+                        calculations_changed=calculations_changed,
                     ),
                 )
             state.refresh_workflow_status()
@@ -213,6 +223,7 @@ class ProjectStore:
         selected_changed: bool,
         floor_plan_changed: bool,
         luminaires_changed: bool,
+        calculations_changed: bool,
     ) -> str:
         changes: list[str] = []
         if brief_changed:
@@ -223,6 +234,8 @@ class ProjectStore:
             changes.append("selected luminaires")
         if luminaires_changed:
             changes.append("luminaire candidates")
+        if calculations_changed:
+            changes.append("lumen-method calculation")
         return "Project inputs changed: " + ", ".join(changes)
 
     @staticmethod
@@ -543,6 +556,7 @@ class ProjectStore:
             self.directory / f"{project_id}.photometry",
             self.directory / f"{project_id}.plans",
             self.directory / f"{project_id}.documents",
+            self.directory / f"{project_id}.dialux-results",
         ):
             if directory.exists():
                 shutil.rmtree(directory)

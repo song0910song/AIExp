@@ -19,7 +19,8 @@ def test_report_contains_evidence_and_review_boundary() -> None:
     assert "不得将本报告视作规范符合性结论" not in report
     package = build_dialux_task_package(state)
     assert package["project_id"] == state.project_id
-    assert "UGR" in package["pending_simulation_metrics"]
+    assert package["pending_simulation_metrics"] == ["maintained illuminance"]
+    assert package["acceptance_metric"] == "illuminance only"
 
 
 def test_cli_creates_project_and_report_in_store(tmp_path, monkeypatch, capsys) -> None:
