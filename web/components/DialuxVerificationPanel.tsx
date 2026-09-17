@@ -87,6 +87,7 @@ export function DialuxVerificationPanel({
 
   const latestRun = project.simulation_runs.at(-1);
   const checks = verification ? [verification.lumen_method, verification.dialux] : [];
+  const selectedFileIsImage = file ? file.type.startsWith("image/") : false;
 
   return (
     <section className="illuminance-verification" aria-label="照度联合检验">
@@ -134,16 +135,24 @@ export function DialuxVerificationPanel({
         </div>
         <div className="dialux-upload-action">
           <span className="flow-index">02</span>
-          <div className="dialux-upload-copy"><strong>上传仿真证据</strong><p>支持 PDF 设计报告或 PNG/JPG/WEBP 仿真图片。</p></div>
+          <div className="dialux-upload-copy"><strong>上传仿真证据</strong><p>图片由视觉模型解析，PDF 从明确标注的结果字段提取。</p></div>
           <label className="dialux-file-picker">
             <FileImage size={16} />
             <span>{file?.name ?? "选择文件"}</span>
             <input ref={fileInput} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" hidden onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
           </label>
-          <label className="dialux-lx-input"><span>维持照度</span><input type="number" min="0" step="0.1" value={maintainedLx} onChange={(event) => setMaintainedLx(event.target.value)} placeholder="PDF 可尝试自动提取" /><small>lx</small></label>
-          <BusyButton busy={busy === "upload"} type="button" disabled={!file} onClick={() => void uploadResult()}><Upload size={15} />导入并检验</BusyButton>
+          <label className="dialux-lx-input"><span>{selectedFileIsImage ? "人工校正" : "维持照度"}</span><input type="number" min="0" step="0.1" value={maintainedLx} onChange={(event) => setMaintainedLx(event.target.value)} placeholder={selectedFileIsImage ? "可选；默认采用视觉读数" : "可选；自动提取"} /><small>lx</small></label>
+          <BusyButton busy={busy === "upload"} type="button" disabled={!file} onClick={() => void uploadResult()}><Upload size={15} />解析并检验</BusyButton>
         </div>
       </div>
+
+      {latestRun?.vision_analysis ? (
+        <div className="dialux-vision-result" aria-label="视觉模型解析结果">
+          <div><strong>视觉解析 {formatNumber(latestRun.vision_analysis.maintained_illuminance_lx, 1)} lx</strong><span>置信度 {formatNumber(latestRun.vision_analysis.confidence * 100, 0)}%</span></div>
+          <p>{latestRun.vision_analysis.calculation_surface ?? "计算面未标明"} · {latestRun.vision_analysis.metric_label ?? "维持平均照度"}</p>
+          {latestRun.metric_source === "manual" ? <small>联合检验采用人工校正值 {formatNumber(latestRun.metrics?.maintained_illuminance_lx, 1)} lx</small> : null}
+        </div>
+      ) : null}
 
       {latestRun?.artifacts.length ? (
         <a className="verification-artifact" href={api.dialuxResultArtifactUrl(project.project_id, latestRun.run_id)} target="_blank" rel="noreferrer">

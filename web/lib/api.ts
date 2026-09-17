@@ -182,17 +182,6 @@ export const api = {
     request<import("./types").PhotometryParseSummary>(
       `/projects/${id}/luminaires/${encodeURIComponent(luminaireId)}/photometry/parse`,
     ),
-  createPhotometryPreview: (id: string, payload: import("./types").PhotometryPreviewRequest) =>
-    request<{ preview: import("./types").PhotometryPreviewPayload; saved: boolean }>(
-      `/projects/${id}/photometry-preview`,
-      { method: "POST", body: JSON.stringify(payload) },
-    ),
-  getPhotometryPreview: (id: string) =>
-    request<{
-      preview: import("./types").PhotometryPreviewPayload;
-      is_current: boolean;
-      stale_reasons: string[];
-    }>(`/projects/${id}/photometry-preview`),
   illuminanceVerification: (id: string) =>
     request<IlluminanceVerification>(`/projects/${id}/illuminance-verification`),
   uploadDialuxResult: (

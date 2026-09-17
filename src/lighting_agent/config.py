@@ -67,10 +67,14 @@ class Settings:
     """Runtime settings, read once so secrets are never printed or persisted."""
 
     llm_model: str = os.getenv("LIGHTING_LLM_MODEL")
+    vision_model: str = os.getenv("LIGHTING_VISION_MODEL") or os.getenv("LIGHTING_LLM_MODEL")
     llm_base_url: str = os.getenv("LIGHTING_LLM_BASE_URL")
     llm_api_key: str | None = os.getenv("LIGHTING_LLM_API_KEY")
     llm_temperature: float = float(os.getenv("LIGHTING_LLM_TEMPERATURE", "0.3"))
     llm_timeout_seconds: float = float(os.getenv("LIGHTING_LLM_TIMEOUT_SECONDS", "60"))
+    vision_min_confidence: float = float(os.getenv("LIGHTING_VISION_MIN_CONFIDENCE", "0.7"))
+    vision_timeout_seconds: float = float(os.getenv("LIGHTING_VISION_TIMEOUT_SECONDS", "60"))
+    vision_max_retries: int = int(os.getenv("LIGHTING_VISION_MAX_RETRIES", "0"))
     # Codex-style: SDK retries transient model failures (429/5xx/connection) up to 5 times with exponential backoff + jitter.
     llm_max_retries: int = int(os.getenv("LIGHTING_LLM_MAX_RETRIES", "5"))
     llm_context_window_tokens: int = int(os.getenv("LIGHTING_LLM_CONTEXT_WINDOW_TOKENS", "1000000"))

@@ -273,6 +273,18 @@ class SimulationArtifact(StrictModel):
     uploaded_at: datetime = Field(default_factory=utc_now)
 
 
+class DialuxVisionAnalysis(StrictModel):
+    """Structured, auditable reading returned by the image-capable model."""
+
+    is_dialux_result: bool
+    maintained_illuminance_lx: float | None = Field(default=None, ge=0)
+    confidence: float = Field(ge=0, le=1)
+    metric_label: str | None = Field(default=None, max_length=160)
+    calculation_surface: str | None = Field(default=None, max_length=240)
+    explanation: str = Field(min_length=1, max_length=1_000)
+    model: str = Field(min_length=1, max_length=160)
+
+
 class DialuxHandoff(StrictModel):
     """Immutable identity and input snapshot for one DIALux handoff."""
 
@@ -308,6 +320,8 @@ class SimulationRun(StrictModel):
     ] | None = None
     artifacts: list[SimulationArtifact] = Field(default_factory=list, max_length=20)
     metrics: SimulationMetrics | None = None
+    metric_source: Literal["manual", "pdf_text", "vision"] | None = None
+    vision_analysis: DialuxVisionAnalysis | None = None
     verification_status: Literal["matched", "mismatch", "incomplete", "unverified", "stale"] = "unverified"
     verification_messages: list[str] = Field(default_factory=list, max_length=50)
     parser_version: str | None = None

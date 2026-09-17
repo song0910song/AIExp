@@ -1,16 +1,9 @@
 "use client";
 
-import { ArrowUpRight, Bot, CheckCircle2, ExternalLink, FileText, Lightbulb, Map as MapIcon, Ruler, ShieldCheck } from "lucide-react";
+import { ArrowUpRight, Bot, ExternalLink, FileText, Lightbulb, Map as MapIcon, Ruler, ShieldCheck } from "lucide-react";
 import type { Project } from "@/lib/types";
-import { PhotometryPreviewCard } from "./PhotometryPreviewCard";
 import { DialuxVerificationPanel } from "./DialuxVerificationPanel";
-import { BusyButton, EmptyState, Notice, StatusPill, formatNumber } from "./ui";
-
-const questionLabels: Record<string, string> = {
-  space_type: "空间类型",
-  area_m2: "面积",
-  target_illuminance_lx: "目标照度",
-};
+import { BusyButton, EmptyState, Notice, formatNumber } from "./ui";
 
 export function OverviewPanel({ project, onProject, onStartAgent }: { project: Project; onProject: (project: Project) => void; onStartAgent: () => void }) {
   const latest = project.calculations.at(-1);
@@ -74,7 +67,7 @@ export function OverviewPanel({ project, onProject, onStartAgent }: { project: P
           </ol>
         </section>
 
-      <section className="overview-section overview-plan">
+        <section className="overview-section overview-plan">
           <header><div><p className="eyebrow">FLOOR PLAN</p><h2>平面图依据</h2></div><MapIcon size={18} /></header>
           {project.floor_plan ? (
             <div className="overview-plan-summary">
@@ -85,23 +78,9 @@ export function OverviewPanel({ project, onProject, onStartAgent }: { project: P
           ) : <EmptyState title="尚未确认平面图">在智能对话中上传 DXF 或 DWG 文件，确认边界后将自动更新设计面积与尺寸。</EmptyState>}
         </section>
 
-        <section className="overview-section overview-questions">
-          <header><div><p className="eyebrow">INPUTS</p><h2>待确认事项</h2></div>{project.open_questions.length ? <StatusPill status="warning">{project.open_questions.length} 项</StatusPill> : <StatusPill status="success">已齐备</StatusPill>}</header>
-          {project.open_questions.length ? (
-            <div className="overview-question-list">
-              {project.open_questions.map((question) => (
-                <button key={question} onClick={onStartAgent} title="在智能对话中补充">
-                  <CheckCircle2 size={16} /><span><strong>{questionLabels[question] ?? question}</strong><small>在对话中补充或确认</small></span><ArrowUpRight size={15} />
-                </button>
-              ))}
-            </div>
-          ) : <EmptyState title="核心输入已经齐备">仍需在 DIALux evo 中确认房间反射比、布灯位置和计算网格。</EmptyState>}
-        </section>
       </div>
 
       <DialuxVerificationPanel project={project} onProject={onProject} onStartAgent={onStartAgent} />
-
-      <PhotometryPreviewCard project={project} />
 
       <section className="overview-luminaires" aria-label="最终选定灯具">
         <header>

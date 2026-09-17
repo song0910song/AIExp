@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from zipfile import ZipFile
 
 import pytest
@@ -18,12 +18,14 @@ from lighting_agent.deliverables import (
     build_dialux_task_package,
     read_dialux_task_package,
 )
+from lighting_agent.dialux_results import DialuxVisionError
 from lighting_agent.photometry_assets import PhotometryAssetStore
 from lighting_agent.project_store import ProjectStore, RevisionConflictError
 from lighting_agent.rag import LocalEvidenceStore
 from lighting_agent.schemas import (
     CalculationInput,
     DesignBrief,
+    DialuxVisionAnalysis,
     LuminaireCandidate,
     ProjectState,
     ProjectUpdate,
@@ -44,11 +46,35 @@ class FakeDialux:
         raise AssertionError("test luminaires should not trigger photometry downloads")
 
 
-def make_client(tmp_path) -> TestClient:
+def _vision_reading(
+    _content: bytes,
+    _media_type: str,
+    *,
+    illuminance_lx: float | None = 505,
+    confidence: float = 0.96,
+    is_dialux_result: bool = True,
+) -> DialuxVisionAnalysis:
+    return DialuxVisionAnalysis(
+        is_dialux_result=is_dialux_result,
+        maintained_illuminance_lx=illuminance_lx,
+        confidence=confidence,
+        metric_label="Maintained illuminance Em",
+        calculation_surface="Working plane",
+        explanation="DIALux result table clearly shows the maintained illuminance.",
+        model="test-vision-model",
+    )
+
+
+def make_client(
+    tmp_path,
+    *,
+    dialux_image_analyzer: Callable[[bytes, str], DialuxVisionAnalysis] = _vision_reading,
+) -> TestClient:
     app = create_app(
         project_store=ProjectStore(tmp_path / "projects"),
         evidence_store=LocalEvidenceStore(tmp_path / "rag.json"),
         dialux_api=FakeDialux(),
+        dialux_image_analyzer=dialux_image_analyzer,
     )
     return TestClient(app)
 
@@ -373,13 +399,17 @@ def test_dialux_image_upload_and_lumen_method_jointly_pass(tmp_path) -> None:
 
     imported = client.post(
         f"/api/projects/{project_id}/dialux-results/upload",
-        data={"expected_revision": str(state.revision), "maintained_illuminance_lx": "505"},
+        data={"expected_revision": str(state.revision)},
         files={"file": ("simulation.png", b"\x89PNG\r\n\x1a\nresult", "image/png")},
     )
 
     assert imported.status_code == 201
     payload = imported.json()
     assert payload["simulation_run"]["source_kind"] == "dialux_image"
+    assert payload["simulation_run"]["metric_source"] == "vision"
+    assert payload["simulation_run"]["metrics"]["maintained_illuminance_lx"] == 505
+    assert payload["simulation_run"]["vision_analysis"]["confidence"] == 0.96
+    assert payload["simulation_run"]["parser_version"] == "dialux-image-vision-1"
     assert payload["simulation_run"]["artifacts"][0]["file_name"] == "simulation.png"
     assert payload["verification"]["overall_status"] == "pass"
     assert payload["verification"]["action"] == "target_reached"
@@ -392,8 +422,16 @@ def test_dialux_image_upload_and_lumen_method_jointly_pass(tmp_path) -> None:
     assert artifact.content == b"\x89PNG\r\n\x1a\nresult"
 
 
-def test_dialux_image_upload_requires_explicit_illuminance(tmp_path) -> None:
-    client = make_client(tmp_path)
+def test_dialux_image_upload_rejects_uncertain_vision_reading_without_manual_value(tmp_path) -> None:
+    client = make_client(
+        tmp_path,
+        dialux_image_analyzer=lambda content, media_type: _vision_reading(
+            content,
+            media_type,
+            illuminance_lx=None,
+            confidence=0.35,
+        ),
+    )
     project = client.post("/api/projects", json={"project_name": "图片读数"}).json()
     store = ProjectStore(tmp_path / "projects")
     state = _add_selected_luminaire(store, project["project_id"])
@@ -406,7 +444,82 @@ def test_dialux_image_upload_requires_explicit_illuminance(tmp_path) -> None:
     )
 
     assert imported.status_code == 422
-    assert "维持照度" in imported.json()["detail"]
+    assert "视觉模型未能可靠识别" in imported.json()["detail"]
+
+
+def test_dialux_image_manual_correction_does_not_bypass_vision_analysis(tmp_path) -> None:
+    calls: list[tuple[bytes, str]] = []
+
+    def analyze(content: bytes, media_type: str) -> DialuxVisionAnalysis:
+        calls.append((content, media_type))
+        return _vision_reading(content, media_type, illuminance_lx=480, confidence=0.92)
+
+    client = make_client(tmp_path, dialux_image_analyzer=analyze)
+    project = client.post("/api/projects", json={"project_name": "人工校正"}).json()
+    store = ProjectStore(tmp_path / "projects")
+    state = _add_selected_luminaire(store, project["project_id"])
+    _generate_handoff(client, project["project_id"], state.revision)
+
+    imported = client.post(
+        f"/api/projects/{project['project_id']}/dialux-results/upload",
+        data={"expected_revision": str(state.revision), "maintained_illuminance_lx": "500"},
+        files={"file": ("simulation.png", b"\x89PNG\r\n\x1a\nresult", "image/png")},
+    )
+
+    assert imported.status_code == 201
+    run = imported.json()["simulation_run"]
+    assert calls == [(b"\x89PNG\r\n\x1a\nresult", "image/png")]
+    assert run["metric_source"] == "manual"
+    assert run["metrics"]["maintained_illuminance_lx"] == 500
+    assert run["vision_analysis"]["maintained_illuminance_lx"] == 480
+
+
+def test_dialux_image_upload_rejects_non_dialux_image(tmp_path) -> None:
+    client = make_client(
+        tmp_path,
+        dialux_image_analyzer=lambda content, media_type: _vision_reading(
+            content,
+            media_type,
+            illuminance_lx=None,
+            confidence=0.98,
+            is_dialux_result=False,
+        ),
+    )
+    project = client.post("/api/projects", json={"project_name": "错误图片"}).json()
+    store = ProjectStore(tmp_path / "projects")
+    state = _add_selected_luminaire(store, project["project_id"])
+    _generate_handoff(client, project["project_id"], state.revision)
+
+    imported = client.post(
+        f"/api/projects/{project['project_id']}/dialux-results/upload",
+        data={"expected_revision": str(state.revision), "maintained_illuminance_lx": "500"},
+        files={"file": ("not-dialux.png", b"\x89PNG\r\n\x1a\nresult", "image/png")},
+    )
+
+    assert imported.status_code == 422
+    assert "无法确认该图片是 DIALux" in imported.json()["detail"]
+
+
+def test_dialux_image_upload_reports_vision_service_failure_without_saving_file(tmp_path) -> None:
+    def fail_analysis(_content: bytes, _media_type: str) -> DialuxVisionAnalysis:
+        raise DialuxVisionError("视觉模型解析 DIALux 仿真图片失败")
+
+    client = make_client(tmp_path, dialux_image_analyzer=fail_analysis)
+    project = client.post("/api/projects", json={"project_name": "视觉服务失败"}).json()
+    store = ProjectStore(tmp_path / "projects")
+    state = _add_selected_luminaire(store, project["project_id"])
+    _generate_handoff(client, project["project_id"], state.revision)
+
+    imported = client.post(
+        f"/api/projects/{project['project_id']}/dialux-results/upload",
+        data={"expected_revision": str(state.revision), "maintained_illuminance_lx": "500"},
+        files={"file": ("simulation.png", b"\x89PNG\r\n\x1a\nresult", "image/png")},
+    )
+
+    assert imported.status_code == 503
+    assert "视觉模型解析" in imported.json()["detail"]
+    result_directory = tmp_path / "projects" / f"{project['project_id']}.dialux-results"
+    assert not list(result_directory.glob("*"))
 
 
 def test_dialux_pdf_upload_extracts_labelled_illuminance(tmp_path) -> None:
