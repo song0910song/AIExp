@@ -32,7 +32,9 @@ def _drop_removed_metric_fields(values: Any, fields: frozenset[str]) -> Any:
 
 _REMOVED_BRIEF_METRIC_FIELDS = frozenset({"target_uniformity_u0", "max_lpd_w_m2"})
 _REMOVED_CALCULATION_METRIC_FIELDS = frozenset({"installed_power_density_w_m2"})
-_REMOVED_SIMULATION_METRIC_FIELDS = frozenset({"uniformity_u0", "installed_power_density_w_m2"})
+_REMOVED_SIMULATION_METRIC_FIELDS = frozenset(
+    {"uniformity_u0", "installed_power_density_w_m2", "ugr"}
+)
 _REMOVED_GROUP_FIELDS = frozenset(
     {
         "lighting_groups",
@@ -198,6 +200,7 @@ class CalculationResult(StrictModel):
     inputs: CalculationInput
     required_luminous_flux_lm: float
     luminaire_count: int
+    estimated_illuminance_lx: float = Field(ge=0)
     installed_power_w: float
     assumptions: list[str]
     limitations: list[str]
@@ -207,13 +210,30 @@ class CalculationResult(StrictModel):
     @classmethod
     def drop_removed_metrics(cls, values: Any) -> Any:
         cleaned = _drop_removed_metric_fields(values, _REMOVED_CALCULATION_METRIC_FIELDS)
-        return _drop_removed_metric_fields(cleaned, _REMOVED_GROUP_FIELDS)
+        cleaned = _drop_removed_metric_fields(cleaned, _REMOVED_GROUP_FIELDS)
+        if isinstance(cleaned, dict) and cleaned.get("estimated_illuminance_lx") is None:
+            inputs = cleaned.get("inputs")
+            count = cleaned.get("luminaire_count")
+            if isinstance(inputs, dict) and count is not None:
+                area = inputs.get("area_m2")
+                flux = inputs.get("luminaire_luminous_flux_lm")
+                utilization = inputs.get("utilization_factor")
+                maintenance = inputs.get("maintenance_factor")
+                if all(value is not None for value in (area, flux, utilization, maintenance)):
+                    cleaned["estimated_illuminance_lx"] = (
+                        float(count)
+                        * float(flux)
+                        * float(utilization)
+                        * float(maintenance)
+                        / float(area)
+                    )
+        return cleaned
 
 
 class RuleRequirement(StrictModel):
     """A deterministic rule with explicit provenance; it is not a hard-coded GB rule."""
 
-    metric: Literal["illuminance_lx", "cri", "ugr"]
+    metric: Literal["illuminance_lx"]
     operator: Literal["min", "max"]
     threshold: float = Field(ge=0)
     evidence_id: str | None = None
@@ -234,12 +254,23 @@ class SimulationMetrics(StrictModel):
 
     maintained_illuminance_lx: float | None = Field(default=None, ge=0)
     minimum_illuminance_lx: float | None = Field(default=None, ge=0)
-    ugr: float | None = Field(default=None, ge=0, le=40)
 
     @model_validator(mode="before")
     @classmethod
     def drop_removed_metrics(cls, values: Any) -> Any:
         return _drop_removed_metric_fields(values, _REMOVED_SIMULATION_METRIC_FIELDS)
+
+
+class SimulationArtifact(StrictModel):
+    """A preserved DIALux result file used as simulation evidence."""
+
+    artifact_id: str = Field(default_factory=lambda: uuid4().hex)
+    file_name: str = Field(min_length=1, max_length=180)
+    media_type: str = Field(min_length=1, max_length=120)
+    storage_path: str = Field(min_length=1, max_length=500)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(ge=1, le=50 * 1024 * 1024)
+    uploaded_at: datetime = Field(default_factory=utc_now)
 
 
 class DialuxHandoff(StrictModel):
@@ -268,7 +299,14 @@ class SimulationRun(StrictModel):
     photometry_sha256_by_luminaire: dict[str, str] = Field(default_factory=dict)
     source_file: str | None = None
     source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    source_kind: Literal["dialux_pdf", "dialux_csv", "dialux_json", "manual_form"] | None = None
+    source_kind: Literal[
+        "dialux_pdf",
+        "dialux_image",
+        "dialux_csv",
+        "dialux_json",
+        "manual_form",
+    ] | None = None
+    artifacts: list[SimulationArtifact] = Field(default_factory=list, max_length=20)
     metrics: SimulationMetrics | None = None
     verification_status: Literal["matched", "mismatch", "incomplete", "unverified", "stale"] = "unverified"
     verification_messages: list[str] = Field(default_factory=list, max_length=50)
@@ -519,14 +557,44 @@ class ProjectState(StrictModel):
         """Derive the visible workflow state from persisted project facts."""
 
         latest_run = self.simulation_runs[-1] if self.simulation_runs else None
-        if latest_run is not None and latest_run.verification_status == "matched" and latest_run.status == "succeeded":
+        latest_calculation = self.calculations[-1] if self.calculations else None
+        target = self.brief.target_illuminance_lx
+        dialux_illuminance = (
+            latest_run.metrics.maintained_illuminance_lx
+            if latest_run is not None and latest_run.metrics is not None
+            else None
+        )
+        if (
+            target is not None
+            and latest_calculation is not None
+            and latest_calculation.estimated_illuminance_lx >= target
+            and latest_run is not None
+            and latest_run.verification_status == "matched"
+            and latest_run.status == "succeeded"
+            and dialux_illuminance is not None
+            and dialux_illuminance >= target
+        ):
             self.workflow_status = "simulation_verified"
+        elif (
+            target is not None
+            and (
+                latest_calculation is not None
+                and latest_calculation.estimated_illuminance_lx < target
+                or latest_run is not None
+                and latest_run.verification_status == "matched"
+                and latest_run.status == "succeeded"
+                and dialux_illuminance is not None
+                and dialux_illuminance < target
+            )
+        ):
+            self.workflow_status = "needs_revision"
         elif latest_run is not None and (
             latest_run.verification_status == "mismatch" or latest_run.status == "stale"
         ):
             self.workflow_status = "needs_revision"
         elif latest_run is not None and (
-            latest_run.status == "unverified" or latest_run.verification_status in {"incomplete", "unverified"}
+            latest_run.status in {"succeeded", "unverified"}
+            or latest_run.verification_status in {"incomplete", "unverified", "matched"}
         ):
             self.workflow_status = "simulation_pending"
         elif self.selected_luminaire_ids:

@@ -12,7 +12,11 @@ from pathlib import Path
 from langchain_core.tools import tool
 from pydantic import Field, model_validator
 
-from .calculations import calculate_lumen_method, check_design_rules as run_rule_checks
+from .calculations import (
+    calculate_lumen_method,
+    check_design_rules as run_rule_checks,
+    evaluate_illuminance,
+)
 from . import dialux_protocol
 from .dialux_api import (
     DialuxAPI,
@@ -342,6 +346,10 @@ class ReportInput(DialuxTaskInput):
     pass
 
 
+class IlluminanceVerificationInput(ProjectReference):
+    pass
+
+
 project_store = ProjectStore()
 evidence_store = create_evidence_store()
 # ``None`` means use a lazily-created default client.  Keeping the default
@@ -437,6 +445,13 @@ def get_project(project_id: str) -> dict:
     """Read the current confirmed brief, evidence, calculations and open questions."""
 
     return _data(project_store.get(project_id))
+
+
+@tool("verify_illuminance", args_schema=IlluminanceVerificationInput)
+def verify_illuminance(project_id: str) -> dict:
+    """Jointly check the latest lumen-method and DIALux illuminance results."""
+
+    return _data(evaluate_illuminance(project_store.get(project_id)))
 
 
 @tool("update_project_brief", args_schema=BriefUpdateInput)
@@ -868,9 +883,9 @@ def search_luminaires(
 ) -> dict:
     """Find traceable DIALux candidates after deterministic input validation.
 
-    Key conditions are target illuminance, CCT, CRI and UGR (filled from the
-    confirmed brief). Power, IP and brand conditions are honoured only when
-    the caller states them explicitly.
+    Illuminance is the sole current-phase acceptance metric. CCT, CRI, UGR,
+    power, IP and brand remain product-selection filters and do not determine
+    whether the project passes this phase.
     """
 
     request = _luminaire_request(
@@ -926,7 +941,7 @@ def search_luminaires(
         "status": "ok",
         "candidates": [candidate_summary(item) for item in candidates],
         "search_run": _data(search_run),
-        "notice": "候选灯具需在 DIALux evo 结合空间、反射比、安装高度和布灯方式核验照度及 UGR。",
+        "notice": "候选灯具需通过流明法与 DIALux evo 共同核验照度；其他指标不参与本阶段验收。",
     }
     if project_id is not None:
         updated, saved_count, rebased = project_store.append_luminaires(

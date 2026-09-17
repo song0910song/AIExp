@@ -16,11 +16,13 @@ def calculate_lumen_method(inputs: CalculationInput) -> CalculationResult:
         inputs.luminaire_luminous_flux_lm * inputs.utilization_factor * inputs.maintenance_factor
     )
     luminaire_count = ceil(required_flux / effective_flux_per_luminaire)
+    estimated_illuminance = luminaire_count * effective_flux_per_luminaire / inputs.area_m2
     installed_power = luminaire_count * inputs.luminaire_power_w
     return CalculationResult(
         inputs=inputs,
         required_luminous_flux_lm=round(required_flux, 2),
         luminaire_count=luminaire_count,
+        estimated_illuminance_lx=round(estimated_illuminance, 2),
         installed_power_w=round(installed_power, 2),
         assumptions=[
             "Utilization factor and maintenance factor are confirmed design assumptions.",
@@ -28,7 +30,7 @@ def calculate_lumen_method(inputs: CalculationInput) -> CalculationResult:
         ],
         limitations=[
             "This is a lumen-method estimate, not a point-by-point lighting simulation.",
-            "Glare (UGR), reflectance and luminaire layout require DIALux evo or an equivalent calculation.",
+            "Reflectance and luminaire layout effects require DIALux evo or an equivalent calculation.",
         ],
     )
 

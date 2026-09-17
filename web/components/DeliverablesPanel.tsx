@@ -61,7 +61,7 @@ export function DeliverablesPanel({ project }: { project: Project }) {
           </Panel>
         ))}
       </div>
-      <div className="signoff-note"><strong>签发边界</strong><p>Luminaire Finder 结果与流明法初算均不能替代 DIALux evo 仿真和有资质人员复核。最终交付前必须核验空间几何、反射比、布灯、维持照度和 UGR。</p></div>
+      <div className="signoff-note"><strong>签发边界</strong><p>现阶段仅以照度为计算和验证标准。流明法与当前版本匹配的 DIALux 维持照度均达到目标后才判定通过；其他指标不参与本阶段验收。</p></div>
     </div>
   );
 }

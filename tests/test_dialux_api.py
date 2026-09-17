@@ -179,7 +179,7 @@ def test_luminaire_match_records_failed_requirements() -> None:
     }
 
 
-def test_brief_constraints_fill_omitted_filters() -> None:
+def test_brief_constraints_fill_product_selection_filters() -> None:
     request = LuminaireSearchRequest(keyword="downlight")
     brief = DesignBrief(
         project_name="Meeting room",

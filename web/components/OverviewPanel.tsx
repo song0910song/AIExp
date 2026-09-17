@@ -3,6 +3,7 @@
 import { ArrowUpRight, Bot, CheckCircle2, ExternalLink, FileText, Lightbulb, Map as MapIcon, Ruler, ShieldCheck } from "lucide-react";
 import type { Project } from "@/lib/types";
 import { PhotometryPreviewCard } from "./PhotometryPreviewCard";
+import { DialuxVerificationPanel } from "./DialuxVerificationPanel";
 import { BusyButton, EmptyState, Notice, StatusPill, formatNumber } from "./ui";
 
 const questionLabels: Record<string, string> = {
@@ -11,7 +12,7 @@ const questionLabels: Record<string, string> = {
   target_illuminance_lx: "目标照度",
 };
 
-export function OverviewPanel({ project, onStartAgent }: { project: Project; onStartAgent: () => void }) {
+export function OverviewPanel({ project, onProject, onStartAgent }: { project: Project; onProject: (project: Project) => void; onStartAgent: () => void }) {
   const latest = project.calculations.at(-1);
   const passed = project.rule_checks.filter((item) => item.status === "pass").length;
   const failed = project.rule_checks.filter((item) => item.status === "fail").length;
@@ -97,6 +98,8 @@ export function OverviewPanel({ project, onStartAgent }: { project: Project; onS
           ) : <EmptyState title="核心输入已经齐备">仍需在 DIALux evo 中确认房间反射比、布灯位置和计算网格。</EmptyState>}
         </section>
       </div>
+
+      <DialuxVerificationPanel project={project} onProject={onProject} onStartAgent={onStartAgent} />
 
       <PhotometryPreviewCard project={project} />
 

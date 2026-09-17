@@ -1,4 +1,4 @@
-import type { AgentPlanStep, AgentStepStatus, AgentToolRun, ClarificationRequest, ContextUsage, DesignBrief, FloorPlanImport, Health, Project, ReasoningEffort } from "./types";
+import type { AgentPlanStep, AgentStepStatus, AgentToolRun, ClarificationRequest, ContextUsage, DesignBrief, FloorPlanImport, Health, IlluminanceVerification, Project, ReasoningEffort, SimulationRun } from "./types";
 
 const API_ROOT = "/backend";
 
@@ -193,6 +193,25 @@ export const api = {
       is_current: boolean;
       stale_reasons: string[];
     }>(`/projects/${id}/photometry-preview`),
+  illuminanceVerification: (id: string) =>
+    request<IlluminanceVerification>(`/projects/${id}/illuminance-verification`),
+  uploadDialuxResult: (
+    id: string,
+    expectedRevision: number,
+    file: File,
+    maintainedIlluminanceLx?: number,
+  ) => {
+    const data = new FormData();
+    data.append("file", file);
+    data.append("expected_revision", String(expectedRevision));
+    if (maintainedIlluminanceLx !== undefined) data.append("maintained_illuminance_lx", String(maintainedIlluminanceLx));
+    return request<{ simulation_run: SimulationRun; verification: IlluminanceVerification; project: Project }>(
+      `/projects/${id}/dialux-results/upload`,
+      { method: "POST", body: data },
+    );
+  },
+  dialuxResultArtifactUrl: (id: string, runId: string) =>
+    `${API_ROOT}/projects/${id}/dialux-results/${encodeURIComponent(runId)}/artifact`,
   chat: (payload: ChatPayload) =>
     request<{ session_id: string; answer: string }>("/chat", { method: "POST", body: JSON.stringify(payload) }),
   chatHistory: (sessionId: string, projectId?: string) =>
