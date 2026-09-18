@@ -63,8 +63,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     cache: "no-store",
   });
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(payload.detail ?? `请求失败：${response.status}`);
+    const body = await response.text();
+    let detail = body.trim() || response.statusText;
+    try {
+      const payload = JSON.parse(body) as { detail?: unknown };
+      if (typeof payload.detail === "string" && payload.detail.trim()) detail = payload.detail;
+    } catch {
+      // Preserve a plain-text proxy or upstream error instead of hiding it behind statusText.
+    }
+    throw new Error(detail || `请求失败：${response.status}`);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;

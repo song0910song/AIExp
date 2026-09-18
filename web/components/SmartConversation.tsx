@@ -35,6 +35,14 @@ type Message = {
   retrying?: { attempt: number; max: number; detail?: string } | null;
 };
 
+function isDialuxImage(file: File) {
+  return file.type.startsWith("image/") || /\.(png|jpe?g|webp)$/i.test(file.name);
+}
+
+function verificationLabel(status: "pass" | "fail" | "pending") {
+  return { pass: "已达标", fail: "未达标", pending: "仍待验证" }[status];
+}
+
 const toolLabels: Record<string, string> = {
   get_project: "读取项目",
   create_project: "创建项目",
@@ -295,12 +303,40 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
     setActivity("正在解析上传资料…");
     setError(null);
     let uploadedNames: string[] = [];
+    let documentNames: string[] = [];
     let floorPlans: import("@/lib/types").FloorPlan[] = [];
+    let dialuxContexts: string[] = [];
     let projectRevision = project.revision;
     try {
-      const uploads: Array<{ floorPlan?: import("@/lib/types").FloorPlan; name: string }> = [];
+      const uploads: Array<{
+        floorPlan?: import("@/lib/types").FloorPlan;
+        isDocument?: boolean;
+        dialuxContext?: string;
+        name: string;
+      }> = [];
       for (const file of attachments) {
         const extension = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
+        if (isDialuxImage(file)) {
+          setActivity(`正在解析 DIALux 仿真结果：${file.name}`);
+          const result = await api.uploadDialuxResult(project.project_id, projectRevision, file);
+          projectRevision = result.project.revision;
+          onProject(result.project);
+          const run = result.simulation_run;
+          const vision = run.vision_analysis;
+          const observed = run.metrics?.maintained_illuminance_lx;
+          const reading = observed === null || observed === undefined ? "未识别" : `${observed} lx`;
+          const confidence = vision ? `${Math.round(vision.confidence * 100)}%` : "未提供";
+          uploads.push({
+            name: file.name,
+            dialuxContext: [
+              `已解析 DIALux 仿真结果图片：${file.name}。`,
+              `主要计算面维持照度：${reading}；视觉置信度：${confidence}。`,
+              `联合检验：${verificationLabel(result.verification.overall_status)}。${result.verification.message}`,
+              vision?.calculation_surface ? `识别到的计算面：${vision.calculation_surface}。` : "",
+            ].filter(Boolean).join(""),
+          });
+          continue;
+        }
         if ([".dxf", ".dwg"].includes(extension)) {
           setActivity(`正在解析平面图：${file.name}`);
           const imported = await api.importFloorPlan(
@@ -315,10 +351,12 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
         }
         setActivity(`正在载入项目资料：${file.name}`);
         const document = await api.uploadProjectDocument(project.project_id, file, "project_document");
-        uploads.push({ name: document.source_name });
+        uploads.push({ isDocument: true, name: document.source_name });
       }
       uploadedNames = uploads.map((upload) => upload.name);
+      documentNames = uploads.filter((upload) => upload.isDocument).map((upload) => upload.name);
       floorPlans = uploads.flatMap((upload) => upload.floorPlan ? [upload.floorPlan] : []);
+      dialuxContexts = uploads.flatMap((upload) => upload.dialuxContext ? [upload.dialuxContext] : []);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "资料上传失败");
       setActivity(null);
@@ -337,11 +375,13 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
       return `已解析并写入项目的 CAD 平面图：${plan.asset.source_name}。单位：${plan.drawing_units}；候选闭合边界：${candidateSummary || "未识别"}。${applied}；请提示用户确认或在后续对话中修正。`;
     });
     const content = [
-      instruction || "我已上传项目资料，请读取并用于本轮分析。",
+      instruction || (dialuxContexts.length ? "请结合这张 DIALux 仿真结果图继续检验当前照明方案。" : "我已上传项目资料，请读取并用于本轮分析。"),
       uploadedNames.length ? `已上传文件：${uploadedNames.join("、")}。` : "",
       floorPlanContext.join("\n"),
-      uploadedNames.length > floorPlans.length ? "设计报告和其他项目资料已进入本项目证据范围，可在需要时检索其内容。" : "",
-      uploadedNames.length ? "请先基于已上传资料核对任务书条件和图纸信息，再继续照明分析、选灯和初步计算。" : "",
+      dialuxContexts.join("\n"),
+      documentNames.length ? "设计报告和其他项目资料已进入本项目证据范围，可在需要时检索其内容。" : "",
+      floorPlans.length || documentNames.length ? "请先基于已上传资料核对任务书条件和图纸信息，再继续照明分析、选灯和初步计算。" : "",
+      dialuxContexts.length ? "请明确说明本轮 DIALux 结果是否达到目标照度，以及下一步应继续调整还是结束迭代。" : "",
     ].filter(Boolean).join("\n\n");
     const timestamp = Date.now();
     const assistantId = `assistant-${timestamp}-${Math.random().toString(36).slice(2)}`;
@@ -472,7 +512,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
             model={health?.llm_model}
             reasoningEffort={reasoningEffort}
             reasoningOptions={reasoningOptions}
-            placeholder={clarification ? "请先完成上方问询，再继续。" : "给照明设计助手发送消息"}
+            placeholder={clarification ? "请先完成上方问询，再继续。" : "给照明设计助手发送消息，可直接粘贴 DIALux 截图"}
             onDraftChange={setDraft}
             onReasoningEffortChange={updateReasoningEffort}
             onAttachmentsChange={setAttachments}

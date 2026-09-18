@@ -10,6 +10,10 @@ const allowedDevOrigins = (
 
 const nextConfig: NextConfig = {
   allowedDevOrigins,
+  experimental: {
+    // Vision analysis can legitimately outlive Next's 30-second rewrite default.
+    proxyTimeout: 90_000,
+  },
   async rewrites() {
     return [
       {

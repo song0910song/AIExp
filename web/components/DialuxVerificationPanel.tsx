@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { ArrowUpRight, Check, Download, FileImage, RefreshCw, Upload } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ArrowUpRight, Check, Download, FileImage, RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
 import type { IlluminanceVerification, Project } from "@/lib/types";
 import { BusyButton, Notice, StatusPill, formatNumber } from "./ui";
@@ -23,19 +23,14 @@ function statusTone(status: keyof typeof methodStatus) {
 
 export function DialuxVerificationPanel({
   project,
-  onProject,
   onStartAgent,
 }: {
   project: Project;
-  onProject: (project: Project) => void;
   onStartAgent: () => void;
 }) {
-  const fileInput = useRef<HTMLInputElement>(null);
   const [verification, setVerification] = useState<IlluminanceVerification | null>(null);
-  const [file, setFile] = useState<File | null>(null);
-  const [maintainedLx, setMaintainedLx] = useState("");
   const [taskUrl, setTaskUrl] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"load" | "task" | "upload" | null>("load");
+  const [busy, setBusy] = useState<"load" | "task" | null>("load");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -61,33 +56,8 @@ export function DialuxVerificationPanel({
     }
   }
 
-  async function uploadResult() {
-    if (!file) return;
-    const numericLx = maintainedLx.trim() ? Number(maintainedLx) : undefined;
-    if (numericLx !== undefined && (!Number.isFinite(numericLx) || numericLx < 0)) {
-      setError("维持照度必须是大于或等于 0 的数值");
-      return;
-    }
-    setBusy("upload");
-    setError(null);
-    try {
-      const result = await api.uploadDialuxResult(project.project_id, project.revision, file, numericLx);
-      setVerification(result.verification);
-      setFile(null);
-      setMaintainedLx("");
-      setTaskUrl(null);
-      if (fileInput.current) fileInput.current.value = "";
-      onProject(result.project);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "导入 DIALux 结果失败");
-    } finally {
-      setBusy(null);
-    }
-  }
-
   const latestRun = project.simulation_runs.at(-1);
   const checks = verification ? [verification.lumen_method, verification.dialux] : [];
-  const selectedFileIsImage = file ? file.type.startsWith("image/") : false;
 
   return (
     <section className="illuminance-verification" aria-label="照度联合检验">
@@ -128,21 +98,9 @@ export function DialuxVerificationPanel({
 
       <div className="dialux-evidence-flow">
         <div className="dialux-task-action">
-          <span className="flow-index">01</span>
           <div><strong>准备当前版本任务包</strong><p>在 DIALux 中按任务包完成布灯与仿真。</p></div>
           <BusyButton busy={busy === "task"} className="button button-secondary" type="button" onClick={() => void createTask()}><Download size={15} />生成任务包</BusyButton>
           {taskUrl ? <a className="text-link" href={taskUrl}><Download size={14} />下载</a> : null}
-        </div>
-        <div className="dialux-upload-action">
-          <span className="flow-index">02</span>
-          <div className="dialux-upload-copy"><strong>上传仿真证据</strong><p>图片由视觉模型解析，PDF 从明确标注的结果字段提取。</p></div>
-          <label className="dialux-file-picker">
-            <FileImage size={16} />
-            <span>{file?.name ?? "选择文件"}</span>
-            <input ref={fileInput} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp" hidden onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
-          </label>
-          <label className="dialux-lx-input"><span>{selectedFileIsImage ? "人工校正" : "维持照度"}</span><input type="number" min="0" step="0.1" value={maintainedLx} onChange={(event) => setMaintainedLx(event.target.value)} placeholder={selectedFileIsImage ? "可选；默认采用视觉读数" : "可选；自动提取"} /><small>lx</small></label>
-          <BusyButton busy={busy === "upload"} type="button" disabled={!file} onClick={() => void uploadResult()}><Upload size={15} />解析并检验</BusyButton>
         </div>
       </div>
 
