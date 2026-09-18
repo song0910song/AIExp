@@ -90,6 +90,8 @@ uv run python main.py --help
 LIGHTING_LLM_API_KEY=你的密钥
 LIGHTING_LLM_MODEL=模型名称
 LIGHTING_LLM_BASE_URL=https://你的网关地址/v1
+# ODA 安装在非默认目录时配置完整可执行文件路径
+ODA_FILE_CONVERTER_PATH=F:\oda\ODAFileConverter.exe
 ```
 
 常用变量：
@@ -103,6 +105,7 @@ LIGHTING_LLM_BASE_URL=https://你的网关地址/v1
 | `LIGHTING_VISION_MIN_CONFIDENCE` | `0.7` | 自动采用图片照度读数的最低置信度 |
 | `LIGHTING_VISION_TIMEOUT_SECONDS` | `60` | 单次视觉模型请求超时 |
 | `LIGHTING_VISION_MAX_RETRIES` | `0` | 视觉模型失败后的最大重试次数 |
+| `ODA_FILE_CONVERTER_PATH` | 自动探测 | ODA File Converter 的完整路径；用于自定义安装目录下的 DWG 转换 |
 | `LIGHTING_RAG_BACKEND` | `chroma` | `local` 切换为 SQLite 关键词检索 |
 | `LIGHTING_EMBEDDING_MODEL` | `BAAI/bge-small-zh-v1.5` | Chroma 嵌入模型 |
 | `LIGHTING_EMBEDDING_CACHE_FOLDER` | `.model-cache` | 嵌入模型缓存目录 |
