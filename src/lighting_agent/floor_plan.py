@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import shutil
+import string
 import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import ezdxf
 from ezdxf import bbox
 from ezdxf.addons import odafc
 from ezdxf.document import Drawing
@@ -34,6 +38,7 @@ MAX_AREA_CANDIDATES = 50
 MAX_CANDIDATE_POINTS = 1_000
 MAX_DRAWING_BYTES = 50 * 1024 * 1024
 SUPPORTED_DRAWING_SUFFIXES = frozenset({".dxf", ".dwg"})
+ODA_FILE_CONVERTER_ENV_VAR = "ODA_FILE_CONVERTER_PATH"
 # 匹配面积（㎡/平方米）与功率密度（W/m² 或 W/㎡），用于剥离房间名附近的测量标注。
 _MEASUREMENT_PATTERN = re.compile(
     r"(?:(?<!\d)\d+(?:[.,]\d+)?\s*(?:m²|㎡|平方米|sq\.?\s*m)|"
@@ -113,14 +118,76 @@ def parse_floor_plan(source: Path, *, storage_path: str) -> FloorPlan:
 def _read_document(source: Path) -> tuple[Drawing, bool, list[str]]:
     if source.suffix.casefold() == ".dxf":
         return readfile(source), False, []
-    if not odafc.is_installed():
+    converter = _configure_oda_file_converter()
+    if converter is None:
         raise FloorPlanParseError(
-            "当前主机未安装 ODA File Converter，无法安全转换 DWG。请安装转换器后重试，或将图纸另存为 DXF。"
+            "未找到可用的 ODA File Converter，无法安全转换 DWG。"
+            f"请安装转换器，或通过 {ODA_FILE_CONVERTER_ENV_VAR} 配置 ODAFileConverter.exe 的完整路径。"
         )
     with tempfile.TemporaryDirectory(prefix="lighting-dwg-") as temporary_directory:
         converted = Path(temporary_directory) / f"{source.stem}.dxf"
         odafc.convert(source, converted, replace=True)
         return readfile(converted), True, ["DWG 已在本机转换为临时 DXF 后解析；原始 DWG 未被修改。"]
+
+
+def _configure_oda_file_converter() -> Path | None:
+    """Find ODA File Converter and configure ezdxf for custom installs.
+
+    ``ezdxf`` only checks its configured Windows path in ``is_installed()``;
+    it does not consult PATH and its default does not cover versioned or custom
+    installation directories. Resolve those locations before calling odafc.
+    """
+
+    converter = _find_oda_file_converter()
+    if converter is None:
+        return None
+    option_name = "win_exec_path" if os.name == "nt" else "unix_exec_path"
+    ezdxf.options.set("odafc-addon", option_name, str(converter))
+    return converter
+
+
+def _find_oda_file_converter() -> Path | None:
+    candidates: list[Path] = []
+
+    configured = odafc.get_win_exec_path()
+    if configured:
+        candidates.append(Path(configured))
+
+    explicit = os.getenv(ODA_FILE_CONVERTER_ENV_VAR, "").strip().strip('"')
+    if explicit:
+        candidates.insert(0, Path(explicit).expanduser())
+
+    on_path = shutil.which("ODAFileConverter")
+    if on_path:
+        candidates.append(Path(on_path))
+
+    if os.name == "nt":
+        for variable in ("ProgramFiles", "ProgramFiles(x86)"):
+            value = os.getenv(variable)
+            if not value:
+                continue
+            oda_root = Path(value) / "ODA"
+            candidates.append(oda_root / "ODAFileConverter" / "ODAFileConverter.exe")
+            if oda_root.is_dir():
+                candidates.extend(oda_root.glob("ODAFileConverter*/ODAFileConverter.exe"))
+
+        # The official MSI permits a custom target such as F:\\oda. Checking
+        # this single conventional directory on each drive is bounded and
+        # avoids an expensive recursive filesystem search.
+        candidates.extend(
+            Path(f"{letter}:\\oda\\ODAFileConverter.exe")
+            for letter in string.ascii_uppercase
+        )
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        normalized = candidate.resolve(strict=False)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if normalized.is_file():
+            return normalized
+    return None
 
 
 def _drawing_unit(document: Drawing) -> tuple[str, float | None]:

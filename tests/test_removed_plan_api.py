@@ -104,6 +104,60 @@ def test_floor_plan_rejects_unsupported_file_type(tmp_path) -> None:
     assert response.status_code == 415
 
 
+def test_floor_plan_finds_custom_oda_converter_from_environment(tmp_path, monkeypatch) -> None:
+    from lighting_agent.floor_plan import (
+        ODA_FILE_CONVERTER_ENV_VAR,
+        _find_oda_file_converter,
+    )
+
+    converter = tmp_path / "custom-oda" / "ODAFileConverter.exe"
+    converter.parent.mkdir()
+    converter.write_bytes(b"executable")
+    monkeypatch.setenv(ODA_FILE_CONVERTER_ENV_VAR, str(converter))
+
+    assert _find_oda_file_converter() == converter.resolve()
+
+
+def test_floor_plan_configures_custom_oda_before_dwg_conversion(tmp_path, monkeypatch) -> None:
+    from lighting_agent import floor_plan
+
+    source = tmp_path / "room.dwg"
+    source.write_bytes(b"AC1032")
+    converter = tmp_path / "oda" / "ODAFileConverter.exe"
+    converter.parent.mkdir()
+    converter.write_bytes(b"executable")
+    sentinel_document = object()
+    configured: dict[str, str] = {}
+
+    monkeypatch.setattr(floor_plan, "_find_oda_file_converter", lambda: converter)
+    monkeypatch.setattr(
+        floor_plan.ezdxf.options,
+        "set",
+        lambda section, key, value: configured.update(
+            section=section,
+            key=key,
+            value=value,
+        ),
+    )
+
+    def convert(_source, destination, **_kwargs) -> None:
+        destination.write_text("converted", encoding="utf-8")
+
+    monkeypatch.setattr(floor_plan.odafc, "convert", convert)
+    monkeypatch.setattr(floor_plan, "readfile", lambda _path: sentinel_document)
+
+    document, converted_from_dwg, warnings = floor_plan._read_document(source)
+
+    assert document is sentinel_document
+    assert converted_from_dwg is True
+    assert warnings
+    assert configured == {
+        "section": "odafc-addon",
+        "key": "win_exec_path",
+        "value": str(converter),
+    }
+
+
 def test_room_name_strips_measurement_suffix() -> None:
     """Room name coupled with an area annotation is still found."""
     from lighting_agent.floor_plan import _room_name
