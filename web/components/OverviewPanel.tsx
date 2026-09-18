@@ -3,9 +3,9 @@
 import { ArrowUpRight, Bot, ExternalLink, FileText, Lightbulb, Map as MapIcon, Ruler, ShieldCheck } from "lucide-react";
 import type { Project } from "@/lib/types";
 import { DialuxVerificationPanel } from "./DialuxVerificationPanel";
-import { BusyButton, EmptyState, Notice, formatNumber } from "./ui";
+import { EmptyState, formatNumber } from "./ui";
 
-export function OverviewPanel({ project, onProject, onStartAgent }: { project: Project; onProject: (project: Project) => void; onStartAgent: () => void }) {
+export function OverviewPanel({ project, onStartAgent }: { project: Project; onStartAgent: () => void }) {
   const latest = project.calculations.at(-1);
   const passed = project.rule_checks.filter((item) => item.status === "pass").length;
   const failed = project.rule_checks.filter((item) => item.status === "fail").length;
@@ -80,7 +80,7 @@ export function OverviewPanel({ project, onProject, onStartAgent }: { project: P
 
       </div>
 
-      <DialuxVerificationPanel project={project} onProject={onProject} onStartAgent={onStartAgent} />
+      <DialuxVerificationPanel project={project} onStartAgent={onStartAgent} />
 
       <section className="overview-luminaires" aria-label="最终选定灯具">
         <header>

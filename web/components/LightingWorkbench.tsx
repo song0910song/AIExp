@@ -241,7 +241,7 @@ export function LightingWorkbench() {
               <button className="button button-primary" onClick={() => setCreateOpen(true)}><Plus size={16} />新建项目</button>
             </section>
           ) : section === "overview" ? (
-            <OverviewPanel project={project} onProject={acceptProject} onStartAgent={() => navigate("chat")} />
+            <OverviewPanel project={project} onStartAgent={() => navigate("chat")} />
           ) : (
             <ConversationPanel key={project.project_id} project={project} health={health} onProject={acceptProject} />
           )}
