@@ -24,3 +24,4 @@ data/
 .model-cache/
 dialux_sim.py
 experiments/
+.tmp*

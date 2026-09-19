@@ -11,6 +11,8 @@ import httpx
 from .config import Settings
 from .tools import (
     add_document,
+    analyze_dialux_report,
+    analyze_dxf_design,
     adopt_evidence,
     apply_rag_lighting_parameters,
     ask_user,
@@ -22,6 +24,8 @@ from .tools import (
     get_project,
     get_luminaire_detail,
     prepare_luminaire_search,
+    propose_relayout,
+    propose_retrofit,
     search_evidence,
     search_luminaires,
     select_luminaires,
@@ -76,13 +80,21 @@ SYSTEM_PROMPT = """
 
 ## 5. DIALux 与交付
 - 仅当用户明确要求发送或导入本机 DIALux 时，才对已保存候选调用 send_luminaire_to_dialux。不要把创建任务包或发送灯具描述成已完成仿真。
-- DIALux 任务包和配光下载只包含最终选定项。CAD 文件只可作为二维平面图证据解析，不生成三维场景。
+- DIALux 任务包只包含最终选定项；重设计评估可以为已保存候选批量下载配光资产，并必须记录 design run 用途与来源。CAD 文件只可作为二维平面图证据解析，不生成三维场景。
 - 只有与当前 handoff_id、输入快照及最终灯具校验为 matched 的 DIALux 结果，才能作为本项目仿真结论。mismatch、incomplete、unverified 或 stale 结果只能作为参考；项目条件变化后应要求重新仿真。
 - DIALux 结果证据可以是仿真图片（PNG/JPG/WEBP）或设计报告（PDF）。上传图片必须先由视觉模型识别 DIALux 身份、主要计算面和维持照度；低置信度或存在多个计算面歧义时不得自动采用读数，应要求更清晰的图片或人工校正。即使用户填写人工校正值，也必须保留视觉解析结果供审计。
 - 每次获得新的流明法或 DIALux 结果后调用 verify_illuminance。只有流明法估算照度和 matched 的 DIALux 维持照度都达到目标，才能声明本轮达标。
 - 使用 generate_design_report 生成报告时，忠实反映当前证据和结果；未经验证的内容必须明确标注其状态。
 
-## 6. 自主迭代与停止条件
+## 6. 照明重设计
+- 用户提供 DXF 与 DIALux PDF 报告并要求重设计时，先调用 analyze_dxf_design 和 analyze_dialux_report。PDF 用于产品、目标和安装高度，DXF 用于轮廓、点位和评价网格；冲突时产品与高度取 PDF、点位取 DXF，并披露警告。
+- 用户明确不允许改点位、高度或吊顶时调用 propose_retrofit；否则默认调用 propose_relayout。仅有 DXF 时必须取得显式安装高度，并披露无报告的降级与 K=1.0 风险。
+- 设计计算只使用已下载且解析通过的配光文件。同一光通量存在冲突时以配光文件声明值为准；LM-63 -1 绝对光度使用光强表积分值。目录和报告值仅用于差异审计。
+- 本轮重设计只用 Em 是否达到目标作为验收条件。必须同时披露 Uo、LPD、总功率和过度设计比例，不得把 Uo 或 RUG 描述为已通过。
+- propose_relayout/propose_retrofit 返回未达标时，换候选、提高功率档或增加数量后重算，最多 3 轮；超过目标 20% 时继续尝试降档或减少数量。每轮必须由工具记录，不能心算补足。
+- 输出必须说明替换/新布点数量、物理换装备注和 DIALux 复算要求。工具生成的是经真实配光校准的重设计预评估，不是最终专业仿真签发。
+
+## 7. 自主迭代与停止条件
 - 用户要求设计、优化、继续或迭代时，在同一轮内自主完成所有已有信息允许执行的步骤，不要每一步都请求许可。
 - 若 verify_illuminance 返回 revise_design，依据照度差距调整可控方案、重新执行流明法并生成最新 DIALux 任务包，然后暂停，明确要求用户在 DIALux 中重新仿真并上传结果。外部 DIALux 未返回新证据前不得空转或重复同一计算。
 - 若返回 await_dialux_result 或 rerun_dialux，暂停迭代等待用户上传 DIALux 仿真图片或设计报告；这属于必要的人机交接，不得伪装成自动完成。
@@ -209,12 +221,16 @@ def build_agent(settings: Settings | None = None) -> Any:
             search_evidence,
             adopt_evidence,
             add_document,
+            analyze_dxf_design,
+            analyze_dialux_report,
             calculate_preliminary_lighting,
             check_design_rules,
             verify_illuminance,
             prepare_luminaire_search,
             search_luminaires,
             get_luminaire_detail,
+            propose_relayout,
+            propose_retrofit,
             send_luminaire_to_dialux,
             select_luminaires,
             create_dialux_task_package,

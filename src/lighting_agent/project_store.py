@@ -19,6 +19,7 @@ from .schemas import (
     ProjectState,
     ProjectUpdate,
     SimulationRun,
+    DesignRun,
 )
 from .storage import SQLiteDatabase
 
@@ -162,6 +163,7 @@ class ProjectStore:
                 "selected_luminaire_ids",
                 "floor_plan",
                 "simulation_runs",
+                "design_runs",
                 "open_questions",
             ):
                 value = getattr(update, name)
@@ -215,6 +217,18 @@ class ProjectStore:
                 raise RevisionConflictError("Project was updated by another request; reload and retry")
             self._record_revision(connection, state, "update")
         return state
+
+    def add_design_run(
+        self, project_id: str, expected_revision: int, run: DesignRun
+    ) -> ProjectState:
+        """Append one bounded, auditable redesign run."""
+
+        state = self.get(project_id)
+        runs = [*state.design_runs, run][-100:]
+        return self.update(
+            project_id,
+            ProjectUpdate(expected_revision=expected_revision, design_runs=runs),
+        )
 
     @staticmethod
     def _simulation_stale_reason(
@@ -557,6 +571,7 @@ class ProjectStore:
             self.directory / f"{project_id}.plans",
             self.directory / f"{project_id}.documents",
             self.directory / f"{project_id}.dialux-results",
+            self.directory / f"{project_id}.design-runs",
         ):
             if directory.exists():
                 shutil.rmtree(directory)

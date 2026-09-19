@@ -8,6 +8,7 @@ from .preview import (
     PreviewGeometryError,
     compute_illuminance_preview,
 )
+from .field import Fixture, FixtureKind, calibrate, evaluate, load_fixture_kind, make_fixture, summarize
 
 __all__ = [
     "SOLVER_VERSION",
@@ -22,4 +23,11 @@ __all__ = [
     "evaluate_illuminance",
     "compute_illuminance_preview",
     "parse_photometry",
+    "Fixture",
+    "FixtureKind",
+    "calibrate",
+    "evaluate",
+    "load_fixture_kind",
+    "make_fixture",
+    "summarize",
 ]

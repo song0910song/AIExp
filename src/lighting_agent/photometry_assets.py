@@ -11,6 +11,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Protocol
 
+from .calculations.photometry import PhotometryParseError, parse_photometry_file
 from .schemas import LuminaireCandidate, PhotometryAsset, PhotometryExtractedFile, ProjectState
 
 
@@ -59,6 +60,16 @@ class PhotometryAssetStore:
             raise ValueError(
                 "Only final selected luminaires can download photometry assets"
             )
+        return self._download(state, luminaire_id, purpose="dialux_task")
+
+    def _download(
+        self,
+        state: ProjectState,
+        luminaire_id: str,
+        *,
+        purpose: str,
+        run_id: str | None = None,
+    ) -> PhotometryAsset:
         luminaire = self._luminaire(state, luminaire_id)
         root = self.directory(state.project_id)
         root.mkdir(parents=True, exist_ok=True)
@@ -70,6 +81,8 @@ class PhotometryAssetStore:
                 article_name=luminaire.article_name,
                 status="not_available",
                 error="DIALux does not advertise a photometric ZIP for this luminaire",
+                purposes=[purpose],
+                design_run_ids=[run_id] if run_id else [],
             )
             assets[luminaire_id] = asset
             self._save(state.project_id, assets)
@@ -78,6 +91,7 @@ class PhotometryAssetStore:
         try:
             source_url, content = self.downloader.download_photometry_zip(luminaire.detail_url)
             archive_rel, extracted = self._write_download(root, luminaire, content)
+            quality = self._quality_check(root, extracted, luminaire)
             asset = PhotometryAsset(
                 luminaire_id=luminaire.luminaire_id,
                 article_name=luminaire.article_name,
@@ -88,6 +102,9 @@ class PhotometryAssetStore:
                 zip_file=archive_rel,
                 zip_size_bytes=len(content),
                 extracted_files=extracted,
+                purposes=[purpose],
+                design_run_ids=[run_id] if run_id else [],
+                **quality,
             )
         except Exception as error:
             asset = PhotometryAsset(
@@ -95,11 +112,55 @@ class PhotometryAssetStore:
                 article_name=luminaire.article_name,
                 status="failed",
                 error=str(error) or error.__class__.__name__,
+                purposes=[purpose],
+                design_run_ids=[run_id] if run_id else [],
             )
 
         assets[luminaire_id] = asset
         self._save(state.project_id, assets)
         return asset
+
+    def ensure_design_assets(
+        self,
+        state: ProjectState,
+        luminaire_ids: list[str],
+        run_id: str,
+    ) -> list[PhotometryAsset]:
+        """Download saved candidates for traced design evaluation.
+
+        Unlike DIALux handoff assets these candidates need not be final user
+        selections. They remain project-scoped and are tagged with the design
+        run that requested them.
+        """
+
+        requested = list(dict.fromkeys(luminaire_ids))
+        if len(requested) > 20:
+            raise ValueError("单次设计评估最多下载 20 个候选配光资产")
+        for luminaire_id in requested:
+            self._luminaire(state, luminaire_id)
+        current = self._load(state.project_id)
+        result: list[PhotometryAsset] = []
+        for luminaire_id in requested:
+            asset = current.get(luminaire_id)
+            if asset is None or asset.status != "downloaded" or not self._asset_files_exist(state.project_id, asset):
+                asset = self._download(
+                    state,
+                    luminaire_id,
+                    purpose="design_evaluation",
+                    run_id=run_id,
+                )
+                current = self._load(state.project_id)
+            else:
+                asset = asset.model_copy(
+                    update={
+                        "purposes": list(dict.fromkeys([*asset.purposes, "design_evaluation"])),
+                        "design_run_ids": list(dict.fromkeys([*asset.design_run_ids, run_id]))[-100:],
+                    }
+                )
+                current[luminaire_id] = asset
+                self._save(state.project_id, current)
+            result.append(asset)
+        return result
 
     def ensure_task_assets(self, state: ProjectState) -> list[PhotometryAsset]:
         """Download every advertised photometry file required by a task package.
@@ -117,9 +178,68 @@ class PhotometryAssetStore:
                 continue
             asset = current[luminaire.luminaire_id]
             if asset.status == "downloaded" and self._asset_files_exist(state.project_id, asset):
+                updated = asset.model_copy(
+                    update={"purposes": list(dict.fromkeys([*asset.purposes, "dialux_task"]))}
+                )
+                if updated != asset:
+                    current[luminaire.luminaire_id] = updated
+                    self._save(state.project_id, current)
                 continue
             current[luminaire.luminaire_id] = self.download(state, luminaire.luminaire_id)
         return [current[luminaire.luminaire_id] for luminaire in state.selected_luminaires()]
+
+    @staticmethod
+    def _quality_check(
+        root: Path,
+        extracted: list[PhotometryExtractedFile],
+        luminaire: LuminaireCandidate,
+    ) -> dict[str, object]:
+        parsed_flux: float | None = None
+        parsed_power: float | None = None
+        warnings: list[str] = []
+        compatibility = "unchecked"
+        for item in extracted:
+            if item.file_type not in {"ies", "ldt"}:
+                continue
+            try:
+                distribution = parse_photometry_file(root / item.relative_path, item.file_type)
+            except PhotometryParseError as error:
+                warnings.append(f"{Path(item.relative_path).name}: {error}")
+                if "Type B" in str(error):
+                    compatibility = "unsupported"
+                continue
+            compatibility = "supported"
+            parsed_flux = (
+                distribution.total_flux_lm()
+                if distribution.absolute_flux_declared and distribution.declared_flux_lm is None
+                else distribution.declared_flux_lm
+            )
+            parsed_power = distribution.power_w
+            break
+        mismatches: list[str] = []
+        if parsed_flux is not None and luminaire.luminous_flux_lm:
+            delta = abs(parsed_flux - luminaire.luminous_flux_lm) / luminaire.luminous_flux_lm
+            if delta > 0.10:
+                mismatches.append(
+                    f"目录光通量 {luminaire.luminous_flux_lm:g} lm 与配光文件 {parsed_flux:.1f} lm 偏差 {delta:.1%}。"
+                )
+        if parsed_power is not None and luminaire.power_w is not None:
+            if abs(parsed_power - luminaire.power_w) > 5:
+                mismatches.append(
+                    f"目录功率 {luminaire.power_w:g} W 与配光文件 {parsed_power:g} W 偏差超过 5 W。"
+                )
+        warnings.extend(mismatches)
+        return {
+            "quality_status": (
+                "mismatch" if mismatches
+                else "matched" if parsed_flux is not None or parsed_power is not None
+                else "unchecked"
+            ),
+            "photometry_compatibility": compatibility,
+            "quality_warnings": warnings[:20],
+            "parsed_flux_lm": parsed_flux,
+            "parsed_power_w": parsed_power,
+        }
 
     def remove(self, project_id: str, luminaire_id: str) -> None:
         root = self.directory(project_id)

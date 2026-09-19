@@ -44,7 +44,12 @@ from .config import (
     USER_DOCUMENTS_DIRECTORY,
     ensure_data_directories,
 )
-from .deliverables import build_design_report, build_dialux_task_archive, read_dialux_task_package
+from .deliverables import (
+    build_design_report,
+    build_dialux_task_archive,
+    build_redesign_package,
+    read_dialux_task_package,
+)
 from .dialux_api import DialuxAPI, DialuxAPIError, validate_luminaire_search
 from .dialux_protocol import DialuxProtocolError
 from .dialux_results import (
@@ -58,6 +63,13 @@ from .document_loader import DocumentLoadError, load_document
 from .floor_plan import MAX_DRAWING_BYTES, FloorPlanParseError, parse_floor_plan
 from .project_store import ProjectNotFoundError, ProjectStore, RevisionConflictError
 from .photometry_assets import PhotometryAssetStore
+from .redesign_service import (
+    RedesignError,
+    RelayoutRequest,
+    RetrofitRequest,
+    run_relayout,
+    run_retrofit,
+)
 from .rag import EvidenceNotFoundError, create_evidence_store, format_evidence
 from .schemas import (
     CalculationInput,
@@ -174,6 +186,11 @@ class PhotometryPreviewWebRequest(IlluminancePreviewRequest):
             values = dict(values)
             values.pop("lighting_group_id", None)
         return values
+
+
+class DesignAssetsRequest(StrictModel):
+    luminaire_ids: list[str] = Field(min_length=1, max_length=20)
+    run_id: str = Field(default_factory=lambda: uuid4().hex, min_length=8, max_length=64)
 
 
 
@@ -677,8 +694,8 @@ _AGENT_WORKFLOW_STEPS: tuple[dict[str, Any], ...] = (
     {
         "id": "analysis",
         "title": "分析现状照明",
-        "description": "结合设计资料、空间分区与规范目标识别当前问题和优化方向。",
-        "tools": ["check_design_rules"],
+        "description": "解析 DXF 几何与 DIALux PDF 报告，交叉核对点位、产品、安装高度和目标。",
+        "tools": ["analyze_dxf_design", "analyze_dialux_report", "check_design_rules"],
     },
     {
         "id": "luminaires",
@@ -691,6 +708,12 @@ _AGENT_WORKFLOW_STEPS: tuple[dict[str, Any], ...] = (
         "title": "在三维模型中更换灯具",
         "description": "下载最终灯具 IES/LDT/ULD，并更新 Blender 灯具阵列和渲染图。",
         "tools": [],
+    },
+    {
+        "id": "redesign",
+        "title": "计算重设计方案",
+        "description": "按点位约束运行自由重排或原位替换，逐点验证照度并记录迭代证据。",
+        "tools": ["propose_relayout", "propose_retrofit"],
     },
     {
         "id": "calculation",
@@ -1521,6 +1544,93 @@ def create_app(
             "applied_area_candidate_index": candidate_index,
         }
 
+    # --- Calibrated photometry-based redesign ---
+
+    @app.post("/api/projects/{project_id}/redesign/relayout", status_code=201)
+    def create_relayout(project_id: str, request: RelayoutRequest) -> dict[str, Any]:
+        try:
+            run, updated = run_relayout(
+                projects,
+                project_directory(project_id),
+                project_photometry(project_id),
+                project_id,
+                request,
+            )
+        except (RedesignError, ValueError, FileNotFoundError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "run": run.model_dump(mode="json"),
+            "project_revision": updated.revision,
+            "package_url": f"/api/projects/{project_id}/redesign/runs/{run.run_id}/package",
+        }
+
+    @app.post("/api/projects/{project_id}/redesign/retrofit", status_code=201)
+    def create_retrofit(project_id: str, request: RetrofitRequest) -> dict[str, Any]:
+        try:
+            run, updated = run_retrofit(
+                projects,
+                project_directory(project_id),
+                project_photometry(project_id),
+                project_id,
+                request,
+            )
+        except (RedesignError, ValueError, FileNotFoundError) as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "run": run.model_dump(mode="json"),
+            "project_revision": updated.revision,
+            "package_url": f"/api/projects/{project_id}/redesign/runs/{run.run_id}/package",
+        }
+
+    @app.get("/api/projects/{project_id}/redesign/runs")
+    def list_redesign_runs(project_id: str) -> dict[str, Any]:
+        state = projects.get(project_id)
+        return {
+            "runs": [item.model_dump(mode="json") for item in reversed(state.design_runs)]
+        }
+
+    @app.get("/api/projects/{project_id}/redesign/runs/{run_id}")
+    def get_redesign_run(project_id: str, run_id: str) -> dict[str, Any]:
+        state = projects.get(project_id)
+        run = next((item for item in state.design_runs if item.run_id == run_id), None)
+        if run is None:
+            raise HTTPException(status_code=404, detail="重设计运行不存在")
+        return run.model_dump(mode="json")
+
+    @app.get("/api/projects/{project_id}/redesign/runs/{run_id}/package")
+    def download_redesign_package(project_id: str, run_id: str):
+        state = projects.get(project_id)
+        run = next((item for item in state.design_runs if item.run_id == run_id), None)
+        if run is None:
+            raise HTTPException(status_code=404, detail="重设计运行不存在")
+        try:
+            content = build_redesign_package(project_directory(project_id), run)
+        except (FileNotFoundError, ValueError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        return StreamingResponse(
+            iter([content]),
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="redesign-{run_id}.zip"'},
+        )
+
+    @app.get("/api/projects/{project_id}/redesign/runs/{run_id}/file")
+    def download_redesign_file(project_id: str, run_id: str, name: str):
+        state = projects.get(project_id)
+        run = next((item for item in state.design_runs if item.run_id == run_id), None)
+        if run is None:
+            raise HTTPException(status_code=404, detail="重设计运行不存在")
+        artifact = next((item for item in run.artifacts if item.name == name), None)
+        if artifact is None:
+            raise HTTPException(status_code=404, detail="重设计产物不存在")
+        root = project_directory(project_id).resolve()
+        target = (root / artifact.relative_path).resolve()
+        if root not in target.parents or not target.is_file():
+            raise HTTPException(status_code=404, detail="重设计产物文件缺失")
+        content = target.read_bytes()
+        if hashlib.sha256(content).hexdigest() != artifact.sha256:
+            raise HTTPException(status_code=409, detail="重设计产物哈希校验失败")
+        return FileResponse(target, media_type=artifact.media_type, filename=artifact.name)
+
     '''
     # --- Retired Blender MCP workflow ---
 
@@ -2100,6 +2210,22 @@ def create_app(
                 item.model_dump(mode="json")
                 for item in project_photometry(project_id).list_assets(state)
             ],
+        }
+
+    @app.post("/api/projects/{project_id}/design-assets")
+    def download_design_assets(project_id: str, request: DesignAssetsRequest) -> dict[str, Any]:
+        state = projects.get(project_id)
+        try:
+            assets = project_photometry(project_id).ensure_design_assets(
+                state, request.luminaire_ids, request.run_id
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        return {
+            "run_id": request.run_id,
+            "assets": [item.model_dump(mode="json") for item in assets],
         }
 
     @app.post("/api/projects/{project_id}/luminaires/{luminaire_id}/photometry")

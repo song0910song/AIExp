@@ -259,8 +259,9 @@ def _parse_ies(text: str) -> PhotometryDistribution:
     stream = _NumberStream(lines, header_line_index)
     lamp_count = stream.take_int("number of lamps", minimum=1, maximum=64)
     declared_lumens = stream.take_float("lumens per lamp")
-    if declared_lumens < 0:
-        raise PhotometryParseError("lumens per lamp cannot be negative")
+    absolute_convention = declared_lumens == -1
+    if declared_lumens < 0 and not absolute_convention:
+        raise PhotometryParseError("lumens per lamp must be -1 or non-negative")
     multiplier = stream.take_float("candela multiplier")
     if multiplier <= 0:
         raise PhotometryParseError("candela multiplier must be positive")
@@ -273,15 +274,20 @@ def _parse_ies(text: str) -> PhotometryDistribution:
 
     if horizontal_count * vertical_count > _MAX_CANDATA_CELLS:
         raise PhotometryParseError("IES candela table exceeds the supported size")
+    if system_code == 2:
+        raise PhotometryParseError(
+            "该产品为 Type B 光度（水平角 ±90°），暂不支持，请换型号"
+        )
     if system_code != 1:
         raise PhotometryParseError(
-            "当前仅支持 C-γ（photometric type 1）配光文件；请使用提供该格式的产品数据"
+            "该产品不是受支持的 Type C 光度，暂不支持，请换型号"
         )
 
     distribution = _read_ies_body(
         stream,
         lamp_count=lamp_count,
-        declared_lumens=declared_lumens,
+        declared_lumens=1.0 if absolute_convention else declared_lumens,
+        absolute_convention=absolute_convention,
         multiplier=multiplier,
         vertical_count=vertical_count,
         horizontal_count=horizontal_count,
@@ -295,6 +301,7 @@ def _read_ies_body(
     *,
     lamp_count: int,
     declared_lumens: float,
+    absolute_convention: bool = False,
     multiplier: float,
     vertical_count: int,
     horizontal_count: int,
@@ -351,15 +358,22 @@ def _read_ies_body(
         if any(value < 0 for row in table for value in row):
             raise PhotometryParseError("candela values cannot be negative")
 
-        absolute_flux = declared_lumens > 0
+        absolute_flux = absolute_convention or declared_lumens > 0
         warnings: list[str] = []
-        if not absolute_flux:
+        if absolute_convention:
+            warnings.append(
+                "LM-63 绝对光度约定（lumens per lamp = -1）：光强表即绝对光强，"
+                "换算参考采用表格积分光通量。"
+            )
+        elif not absolute_flux:
             warnings.append(
                 "文件未标注光源光通量，光强按 1000 lm 基准解析；预览时必须另行提供实际光通量。"
             )
         if probe._offset != len(probe._tokens):
             warnings.append("IES 文件末尾包含未使用的附加字段，已忽略。")
         if wattage is not None and wattage == -1:
+            wattage = None
+        if absolute_convention and wattage is not None and wattage <= 1:
             wattage = None
 
         return PhotometryDistribution(
@@ -369,7 +383,11 @@ def _read_ies_body(
             gamma_angles_deg=[round(angle, 3) for angle in gamma],
             intensity_cd=[[round(value * applied_multiplier, 6) for value in row] for row in table],
             lamp_count=lamp_count,
-            declared_flux_lm=(declared_lumens * lamp_count) if absolute_flux else None,
+            declared_flux_lm=(
+                None
+                if absolute_convention
+                else (declared_lumens * lamp_count) if absolute_flux else None
+            ),
             absolute_flux_declared=absolute_flux,
             power_w=wattage,
             units_type="feet" if units_code == 1 else "meters",
@@ -383,6 +401,20 @@ def _read_leading_int(stream: _NumberStream, context: str, minimum: int, maximum
 
 
 def _parse_ldt(text: str) -> PhotometryDistribution:
+    """Parse the historical fixture dialect, then standard EULUMDAT."""
+
+    try:
+        return _parse_legacy_ldt(text)
+    except PhotometryParseError as legacy_error:
+        try:
+            return _parse_standard_eulumdat(text)
+        except PhotometryParseError as standard_error:
+            raise PhotometryParseError(
+                f"LDT 文件既不符合现有方言也不符合标准 EULUMDAT：{standard_error}"
+            ) from legacy_error
+
+
+def _parse_legacy_ldt(text: str) -> PhotometryDistribution:
     raw_lines = [line.rstrip() for line in text.splitlines()]
     if len(raw_lines) < 14:
         raise PhotometryParseError("LDT 文件缺少必需的头部行")
@@ -484,6 +516,184 @@ def _parse_ldt(text: str) -> PhotometryDistribution:
         warnings=warnings,
     )
     return distribution
+
+
+class _LineCursor:
+    """Line-oriented cursor for the fixed-field EULUMDAT layout."""
+
+    def __init__(self, lines: list[str]) -> None:
+        self.lines = lines
+        self.index = 0
+
+    def text(self, label: str) -> str:
+        if self.index >= len(self.lines):
+            raise PhotometryParseError(f"文件在读取 {label} 时提前结束")
+        value = self.lines[self.index].strip()
+        self.index += 1
+        return value
+
+    def number(self, label: str) -> float:
+        while self.index < len(self.lines) and not self.lines[self.index].strip():
+            self.index += 1
+        if self.index >= len(self.lines):
+            raise PhotometryParseError(f"文件在读取 {label} 时提前结束")
+        token = self.lines[self.index].split()[0]
+        self.index += 1
+        return _to_float(token, label)
+
+    def integer(self, label: str) -> int:
+        value = self.number(label)
+        rounded = int(round(value))
+        if abs(value - rounded) > 1e-6:
+            raise PhotometryParseError(f"{label} must be an integer")
+        return rounded
+
+    def tail_numbers(self) -> list[float]:
+        values: list[float] = []
+        for line in self.lines[self.index :]:
+            for token in line.split():
+                try:
+                    values.append(float(token))
+                except ValueError:
+                    continue
+        return values
+
+
+def _fold_c_angles(c_angle: float, symmetry: int) -> list[float]:
+    angle = c_angle % 360.0
+    variants = [angle]
+    if symmetry == 2:
+        variants.append((-angle) % 360.0)
+    elif symmetry == 3:
+        variants.append((180.0 - angle) % 360.0)
+    elif symmetry == 4:
+        variants.extend(
+            [(-angle) % 360.0, (180.0 - angle) % 360.0, (180.0 + angle) % 360.0]
+        )
+    return variants
+
+
+def _expand_eulumdat_symmetry(
+    declared_angles: list[float],
+    stored_rows: list[list[float]],
+    symmetry: int,
+) -> list[list[float]]:
+    if len(stored_rows) == len(declared_angles):
+        return stored_rows
+    if symmetry == 0:
+        raise PhotometryParseError(
+            "EULUMDAT 光强表少于声明的 C 平面，且文件未声明对称性"
+        )
+    if symmetry == 1:
+        if len(stored_rows) != 1:
+            raise PhotometryParseError("旋转对称 EULUMDAT 应只存储一个 C 平面")
+        return [stored_rows[0]] * len(declared_angles)
+    stored_angles = declared_angles[: len(stored_rows)]
+    expanded: list[list[float]] = []
+    for angle in declared_angles:
+        row = next(
+            (
+                candidate
+                for folded in _fold_c_angles(angle, symmetry)
+                for stored, candidate in zip(stored_angles, stored_rows)
+                if abs(folded - stored) < 0.05
+            ),
+            None,
+        )
+        if row is None:
+            raise PhotometryParseError(
+                f"C 平面 {angle:g}° 无法按 lsym={symmetry} 展开"
+            )
+        expanded.append(row)
+    return expanded
+
+
+def _parse_standard_eulumdat(text: str) -> PhotometryDistribution:
+    lines = [line.rstrip() for line in text.splitlines()]
+    if len(lines) < 40:
+        raise PhotometryParseError("标准 EULUMDAT 文件行数过少")
+
+    cursor = _LineCursor(lines)
+    cursor.text("company")
+    type_indicator = cursor.integer("type indicator")
+    symmetry = cursor.integer("symmetry indicator")
+    if symmetry not in range(5):
+        raise PhotometryParseError("EULUMDAT symmetry indicator must be within 0..4")
+    c_count = cursor.integer("C plane count")
+    cursor.number("C plane spacing")
+    gamma_count = cursor.integer("gamma count")
+    cursor.number("gamma spacing")
+    if not 1 <= c_count <= _MAX_ANGLE_SAMPLES or not 2 <= gamma_count <= _MAX_ANGLE_SAMPLES:
+        raise PhotometryParseError("EULUMDAT angle counts exceed the supported range")
+    if c_count * gamma_count > _MAX_CANDATA_CELLS:
+        raise PhotometryParseError("EULUMDAT candela table exceeds the supported size")
+
+    cursor.text("measurement report")
+    luminaire_name = cursor.text("luminaire name")
+    luminaire_number = cursor.text("luminaire number")
+    cursor.text("file name")
+    cursor.text("date/user")
+    for label in (
+        "length", "width", "height", "luminous length", "luminous width",
+        "C0 height", "C90 height", "C180 height", "C270 height",
+    ):
+        cursor.number(label)
+    downward_fraction = cursor.number("DFF")
+    light_output_ratio = cursor.number("LORL")
+    conversion = cursor.number("conversion factor")
+    cursor.number("tilt")
+    standard_sets = cursor.integer("standard sets")
+    lamp_count = cursor.integer("lamp count")
+    cursor.text("lamp type")
+    declared_flux = cursor.number("total luminous flux")
+    cursor.text("color appearance")
+    cursor.number("CRI")
+    wattage = cursor.number("wattage")
+    for _ in range(10):
+        cursor.number("direct ratio")
+    c_angles = [cursor.number("C angle") for _ in range(c_count)]
+    gamma_angles = [cursor.number("gamma angle") for _ in range(gamma_count)]
+    if any(gamma_angles[i] >= gamma_angles[i + 1] for i in range(gamma_count - 1)):
+        raise PhotometryParseError("EULUMDAT gamma angles must ascend")
+    if gamma_angles[0] != 0 or gamma_angles[-1] > 180:
+        raise PhotometryParseError("EULUMDAT gamma angles must start at 0 and end by 180")
+
+    values = cursor.tail_numbers()
+    if not values or len(values) % gamma_count:
+        raise PhotometryParseError(
+            f"EULUMDAT 光强值数量 {len(values)} 不是每平面 {gamma_count} 个的整数倍"
+        )
+    stored_count = len(values) // gamma_count
+    if stored_count > c_count:
+        raise PhotometryParseError("EULUMDAT 存储的 C 平面数多于声明数")
+    rows = [values[index * gamma_count : (index + 1) * gamma_count] for index in range(stored_count)]
+    if 0 < conversion != 1:
+        rows = [[value * conversion for value in row] for row in rows]
+    rows = _expand_eulumdat_symmetry(c_angles, rows, symmetry)
+
+    warnings = [
+        f"标准 EULUMDAT：Ityp={type_indicator}, lsym={symmetry}, "
+        f"声明 {c_count} 个 C 平面 / 实际存储 {stored_count} 个，已按对称性展开。"
+    ]
+    if standard_sets > 1:
+        warnings.append(f"文件含 {standard_sets} 组标准灯数据，当前按第 1 组解析。")
+    return PhotometryDistribution(
+        format="ldt",
+        photometric_system="C",
+        c_angles_deg=[round(value, 3) for value in c_angles],
+        gamma_angles_deg=[round(value, 3) for value in gamma_angles],
+        intensity_cd=[[round(value, 6) for value in row] for row in rows],
+        lamp_count=max(1, lamp_count),
+        declared_flux_lm=declared_flux if declared_flux > 0 else None,
+        absolute_flux_declared=False,
+        power_w=wattage if wattage > 0 else None,
+        units_type="meters",
+        symmetry_note=(
+            f"DIAL 标准 LDT：{luminaire_number or luminaire_name}；"
+            f"DFF {downward_fraction:g}% / LORL {light_output_ratio:g}%"
+        ),
+        warnings=warnings,
+    )
 
 
 def _extract_power_hint(lamp_name: str) -> float | None:

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .photometry_assets import PhotometryAssetStore
 from .calculations.verification import evaluate_illuminance
-from .schemas import ProjectState
+from .schemas import DesignRun, ProjectState
 
 # 
 def _canonical_json(payload: object) -> bytes:
@@ -53,6 +53,42 @@ def read_dialux_task_package(archive_bytes: bytes) -> dict:
     if not isinstance(package, dict) or not isinstance(package.get("handoff_id"), str):
         raise ValueError("DIALux task manifest is invalid")
     return package
+
+
+def build_redesign_package(project_root: Path, run: DesignRun) -> bytes:
+    """Build a verified redesign ZIP from one persisted design run."""
+
+    root = Path(project_root).resolve()
+    files: list[tuple[Path, object]] = []
+    manifest_files: list[dict[str, object]] = []
+    for artifact in run.artifacts:
+        target = (root / artifact.relative_path).resolve()
+        if root not in target.parents or not target.is_file():
+            raise FileNotFoundError(artifact.relative_path)
+        content = target.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        if digest != artifact.sha256 or len(content) != artifact.size_bytes:
+            raise ValueError(f"Redesign artifact integrity check failed: {artifact.name}")
+        files.append((target, artifact))
+        manifest_files.append(
+            {
+                "name": artifact.name,
+                "sha256": digest,
+                "size_bytes": len(content),
+                "media_type": artifact.media_type,
+            }
+        )
+    manifest = {
+        "schema_version": "redesign-package-1",
+        "run": run.model_dump(mode="json", exclude={"artifacts"}),
+        "files": manifest_files,
+    }
+    output = BytesIO()
+    with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("redesign-package.json", _canonical_json(manifest))
+        for target, artifact in files:
+            archive.write(target, artifact.name)
+    return output.getvalue()
 
 
 def build_dialux_task_package(state: ProjectState) -> dict:

@@ -16,6 +16,7 @@
 | 确定性初算 | 使用流明法计算所需光通量、灯具数量、估算照度和装机功率 |
 | 联合检验 | 仅以照度为标准，流明法与当前版本的 DIALux 维持照度均达标才通过 |
 | 灯具选型 | 查询 DIALux Luminaire Finder，补全型号、品牌、功率、IP、ULD 和配光信息 |
+| 照明重设计 | 解析 DXF + DIALux PDF，以真实 IES/LDT 配光执行自由重排或固定点位替换，输出逐点照度验证与可审计方案包 |
 | 交付输出 | 生成 Markdown 报告草稿和 DIALux evo 交接包（ZIP） |
 | 智能对话 | 通过 CLI 或 Web 工作台上传资料、确认条件并编排上述工具 |
 
@@ -25,6 +26,16 @@
 - 流明法用于方案前置估算，DIALux evo 用于仿真复核。两者结果都不低于目标照度时，联合检验才通过。
 - DIALux 证据可上传 PDF 设计报告或 PNG/JPG/WEBP 仿真图片。原文件、哈希、任务包和项目 revision 一并保存；图片必须经视觉模型识别 DIALux 身份、主要计算面和维持照度，PDF 仅从明确标注的结果字段提取。用户可填写人工校正值，但不能绕过图片视觉解析。
 - 未达标时智能体继续调整可控方案并生成最新任务包；需要重新运行 DIALux 时暂停等待用户回传结果。达到目标，或用户明确说停止、结束、取消迭代时，终止循环。
+
+## 重设计工作流
+
+- 输入推荐同时提供 DXF 与 DIALux PDF：DXF 提供房间轮廓、灯具点位和评价网格；PDF 提供灯具表、工作面、安装高度与目标值。
+- 允许调整点位时运行自由重排；点位、高度或吊顶不可变时运行原位替换，并给出产品组合、部分替换 `k` 扫描与最小干预建议。
+- 计算以已下载并解析通过的 IES/LDT 为准；目录或报告参数与配光文件冲突时记录差异，光通量采用配光文件声明值，LM-63 `-1` 文件采用光强表积分值。
+- 当前仅以平均照度 `Em >= target` 验收；Uo、LPD、功率和 RUG 继续披露，但 Uo/RUG 不参与本轮通过判定。最终施工前仍需在 DIALux evo 或等效专业软件中复算。
+- 每次运行持久化为 `DesignRun`，产物包包含报告、候选/场景 CSV、布点或替换清单、PNG 图和带 SHA-256 的 manifest。
+
+主要 API：`POST /api/projects/{id}/redesign/relayout`、`POST /api/projects/{id}/redesign/retrofit`、`GET /api/projects/{id}/redesign/runs`、`GET /api/projects/{id}/redesign/runs/{run_id}/package` 和 `POST /api/projects/{id}/design-assets`。
 
 ## 快速开始
 

@@ -26,13 +26,22 @@ from .dialux_api import (
 )
 from .dialux_protocol import DialuxProtocolError
 from .deliverables import build_design_report, build_dialux_task_archive, build_dialux_task_package
+from .dxf_analysis import extract_design
+from .dialux_report import cross_validate, parse_dialux_report
 from .document_loader import load_document
 from .project_store import ProjectStore, RevisionConflictError
 from .photometry_assets import PhotometryAssetStore
+from .redesign_service import (
+    RelayoutRequest,
+    RetrofitRequest,
+    run_relayout as run_relayout_service,
+    run_retrofit as run_retrofit_service,
+)
 from .rag import create_evidence_store, format_evidence
 from .schemas import (
     CalculationInput,
     DesignBrief,
+    DesignFixtureSpec,
     LightingParameterSource,
     LuminaireSearchRun,
     LuminaireSearchRequest,
@@ -350,6 +359,22 @@ class IlluminanceVerificationInput(ProjectReference):
     pass
 
 
+class DxfAnalysisInput(ProjectReference):
+    source: str | None = Field(default=None, max_length=500)
+
+
+class DialuxReportInput(ProjectReference):
+    source: str | None = Field(default=None, max_length=500)
+
+
+class RelayoutToolInput(RelayoutRequest):
+    project_id: str = Field(min_length=8, max_length=64)
+
+
+class RetrofitToolInput(RetrofitRequest):
+    project_id: str = Field(min_length=8, max_length=64)
+
+
 project_store = ProjectStore()
 evidence_store = create_evidence_store()
 # ``None`` means use a lazily-created default client.  Keeping the default
@@ -431,6 +456,131 @@ def _update_at_latest_revision(
             last_conflict = error
     assert last_conflict is not None
     raise last_conflict
+
+
+def _project_source(project_id: str, source: str, suffix: str) -> Path:
+    root = _project_directory(project_id).resolve()
+    value = Path(source)
+    target = value.resolve() if value.is_absolute() else (root / value).resolve()
+    if target != root and root not in target.parents:
+        raise ValueError("输入文件必须位于当前项目目录内")
+    if not target.is_file() or target.suffix.casefold() != suffix:
+        raise ValueError(f"项目中不存在可用的 {suffix} 文件：{source}")
+    return target
+
+
+@tool("analyze_dxf_design", args_schema=DxfAnalysisInput)
+def analyze_dxf_design(project_id: str, source: str | None = None) -> dict:
+    """Extract room, luminaire positions and evaluation points from a project DXF."""
+
+    state = project_store.get(project_id)
+    resolved = source or (state.floor_plan.asset.storage_path if state.floor_plan else None)
+    if not resolved:
+        return {"status": "needs_input", "message": "请先上传 DXF 平面图。"}
+    return {"status": "ok", "snapshot": extract_design(_project_source(project_id, resolved, ".dxf"))}
+
+
+@tool("analyze_dialux_report", args_schema=DialuxReportInput)
+def analyze_dialux_report(project_id: str, source: str | None = None) -> dict:
+    """Extract targets, mounting heights, luminaires and positions from a DIALux PDF."""
+
+    state = project_store.get(project_id)
+    resolved = source
+    if not resolved:
+        for run in reversed(state.simulation_runs):
+            if run.source_kind == "dialux_pdf":
+                artifact = next(
+                    (item for item in run.artifacts if item.file_name.casefold().endswith(".pdf")),
+                    None,
+                )
+                if artifact:
+                    resolved = artifact.storage_path
+                    break
+    if not resolved:
+        return {"status": "needs_input", "message": "请上传 DIALux PDF 设计报告。"}
+    report = parse_dialux_report(_project_source(project_id, resolved, ".pdf"))
+    validation = None
+    if state.floor_plan:
+        try:
+            dxf = extract_design(_project_source(project_id, state.floor_plan.asset.storage_path, ".dxf"))
+            validation = cross_validate(dxf, report)
+        except ValueError:
+            validation = None
+    return {"status": "ok", "report": report, "cross_validation": validation}
+
+
+@tool("propose_relayout", args_schema=RelayoutToolInput)
+def propose_relayout(
+    project_id: str,
+    expected_revision: int,
+    design_fixtures: list[DesignFixtureSpec],
+    dxf_source: str | None = None,
+    report_source: str | None = None,
+    target_lux: float | None = None,
+    workplane_height_m: float | None = None,
+    calibration_scale: float | None = None,
+    max_attempts: int = 3,
+    existing_panel: DesignFixtureSpec | None = None,
+    existing_downlight: DesignFixtureSpec | None = None,
+    mounting_height_m: float | None = None,
+    margin_m: float = 0.6,
+) -> dict:
+    """Run free-position redesign with real parsed photometry."""
+
+    request = RelayoutRequest(
+        expected_revision=expected_revision, dxf_source=dxf_source, report_source=report_source,
+        target_lux=target_lux, workplane_height_m=workplane_height_m,
+        calibration_scale=calibration_scale, max_attempts=max_attempts,
+        design_fixtures=design_fixtures, existing_panel=existing_panel,
+        existing_downlight=existing_downlight, mounting_height_m=mounting_height_m,
+        margin_m=margin_m,
+    )
+    run, updated = run_relayout_service(
+        project_store,
+        _project_directory(project_id),
+        PhotometryAssetStore(_project_directory(project_id), _dialux_client()),
+        project_id,
+        request,
+    )
+    return {"run": _data(run), "project_revision": updated.revision}
+
+
+@tool("propose_retrofit", args_schema=RetrofitToolInput)
+def propose_retrofit(
+    project_id: str,
+    expected_revision: int,
+    existing_panel: DesignFixtureSpec,
+    existing_downlight: DesignFixtureSpec,
+    candidate_panels: list[DesignFixtureSpec] | None = None,
+    candidate_downlights: list[DesignFixtureSpec] | None = None,
+    dxf_source: str | None = None,
+    report_source: str | None = None,
+    target_lux: float | None = None,
+    workplane_height_m: float | None = None,
+    calibration_scale: float | None = None,
+    max_attempts: int = 3,
+    panel_mounting_height_m: float | None = None,
+    downlight_mounting_height_m: float | None = None,
+) -> dict:
+    """Run fixed-position product replacement and partial-replacement sweep."""
+
+    request = RetrofitRequest(
+        expected_revision=expected_revision, dxf_source=dxf_source, report_source=report_source,
+        target_lux=target_lux, workplane_height_m=workplane_height_m,
+        calibration_scale=calibration_scale, max_attempts=max_attempts,
+        existing_panel=existing_panel, existing_downlight=existing_downlight,
+        candidate_panels=candidate_panels or [], candidate_downlights=candidate_downlights or [],
+        panel_mounting_height_m=panel_mounting_height_m,
+        downlight_mounting_height_m=downlight_mounting_height_m,
+    )
+    run, updated = run_retrofit_service(
+        project_store,
+        _project_directory(project_id),
+        PhotometryAssetStore(_project_directory(project_id), _dialux_client()),
+        project_id,
+        request,
+    )
+    return {"run": _data(run), "project_revision": updated.revision}
 
 
 @tool("create_project", args_schema=CreateProjectInput)

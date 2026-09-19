@@ -221,6 +221,57 @@ export type PhotometryAsset = {
   zip_size_bytes: number | null;
   extracted_files: PhotometryExtractedFile[];
   error: string | null;
+  purposes: ("dialux_task" | "design_evaluation")[];
+  design_run_ids: string[];
+  quality_status: "unchecked" | "matched" | "mismatch";
+  photometry_compatibility: "unchecked" | "supported" | "unsupported";
+  quality_warnings: string[];
+  parsed_flux_lm: number | null;
+  parsed_power_w: number | null;
+};
+
+export type DesignMetrics = {
+  average_lx: number;
+  minimum_lx: number;
+  maximum_lx: number;
+  uniformity_uo: number;
+  diversity_ud: number;
+  installed_power_w: number;
+  lpd_w_m2: number;
+  target_met: boolean;
+  overdesign_pct: number;
+};
+
+export type DesignRun = {
+  run_id: string;
+  mode: "relayout" | "retrofit";
+  status: "running" | "succeeded" | "failed";
+  input_project_revision: number;
+  target_lux: number;
+  calibration_scale: number;
+  dxf_source: string;
+  report_source: string | null;
+  input_sha256: Record<string, string>;
+  iterations: {
+    attempt: number;
+    keyword: string | null;
+    candidate_ids: string[];
+    asset_sha256: Record<string, string>;
+    metrics: DesignMetrics | null;
+    verdict: "target_met" | "under_target" | "overdesigned" | "failed";
+    notes: string[];
+  }[];
+  result: Record<string, unknown>;
+  warnings: string[];
+  artifacts: {
+    name: string;
+    relative_path: string;
+    media_type: string;
+    sha256: string;
+    size_bytes: number;
+  }[];
+  created_at: string;
+  completed_at: string | null;
 };
 
 export type CadPoint = { x: number; y: number };
@@ -293,6 +344,7 @@ export type Project = {
   selected_luminaire_ids: string[];
   floor_plan: FloorPlan | null;
   simulation_runs: SimulationRun[];
+  design_runs: DesignRun[];
   workflow_status: "draft" | "brief_confirmed" | "preliminary_calculated" | "luminaires_selected" | "simulation_pending" | "simulation_verified" | "needs_revision" | "accepted" | "delivered";
   open_questions: string[];
   created_at: string;

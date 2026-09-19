@@ -180,7 +180,7 @@ class Evidence(StrictModel):
     retrieved_at: datetime = Field(default_factory=utc_now)
     score: float | None = Field(default=None, ge=0, le=1)
 
-
+# 照度计算输入
 class CalculationInput(StrictModel):
     area_m2: float = Field(gt=0)
     target_illuminance_lx: float = Field(gt=0)
@@ -479,6 +479,84 @@ class PhotometryAsset(StrictModel):
     zip_size_bytes: int | None = Field(default=None, ge=0)
     extracted_files: list[PhotometryExtractedFile] = Field(default_factory=list)
     error: str | None = None
+    purposes: list[Literal["dialux_task", "design_evaluation"]] = Field(default_factory=list)
+    design_run_ids: list[str] = Field(default_factory=list, max_length=100)
+    quality_status: Literal["unchecked", "matched", "mismatch"] = "unchecked"
+    photometry_compatibility: Literal["unchecked", "supported", "unsupported"] = "unchecked"
+    quality_warnings: list[str] = Field(default_factory=list, max_length=20)
+    parsed_flux_lm: float | None = Field(default=None, ge=0)
+    parsed_power_w: float | None = Field(default=None, ge=0)
+
+
+class DesignFixtureSpec(StrictModel):
+    """One existing or candidate luminaire used by a redesign calculation."""
+
+    role: Literal["existing", "candidate"]
+    label: str = Field(min_length=1, max_length=240)
+    luminaire_id: str | None = Field(default=None, max_length=128)
+    asset_file: str | None = Field(default=None, max_length=500)
+    local_path: str | None = Field(default=None, max_length=500)
+    file_type: Literal["ldt", "ies"] | None = None
+    flux_lm: float = Field(gt=0, le=10_000_000)
+    watts: float = Field(ge=0, le=100_000)
+    maintenance_factor: float = Field(default=0.8, gt=0, le=1)
+    mounting_height_m: float | None = Field(default=None, gt=0, le=100)
+    height_source: Literal["report", "manual", "assumed"] = "assumed"
+    form_note: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def source_is_required(self) -> "DesignFixtureSpec":
+        if not any((self.luminaire_id, self.asset_file, self.local_path)):
+            raise ValueError("fixture requires luminaire_id, asset_file or local_path")
+        return self
+
+
+class DesignMetrics(StrictModel):
+    average_lx: float = Field(ge=0)
+    minimum_lx: float = Field(ge=0)
+    maximum_lx: float = Field(ge=0)
+    uniformity_uo: float = Field(ge=0)
+    diversity_ud: float = Field(ge=0)
+    installed_power_w: float = Field(ge=0)
+    lpd_w_m2: float = Field(ge=0)
+    target_met: bool
+    overdesign_pct: float
+
+
+class DesignIteration(StrictModel):
+    attempt: int = Field(ge=1, le=3)
+    keyword: str | None = Field(default=None, max_length=160)
+    candidate_ids: list[str] = Field(default_factory=list, max_length=100)
+    asset_sha256: dict[str, str] = Field(default_factory=dict)
+    metrics: DesignMetrics | None = None
+    verdict: Literal["target_met", "under_target", "overdesigned", "failed"]
+    notes: list[str] = Field(default_factory=list, max_length=50)
+
+
+class DesignArtifact(StrictModel):
+    name: str = Field(min_length=1, max_length=180)
+    relative_path: str = Field(min_length=1, max_length=500)
+    media_type: str = Field(min_length=1, max_length=120)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(ge=0)
+
+
+class DesignRun(StrictModel):
+    run_id: str = Field(default_factory=lambda: uuid4().hex)
+    mode: Literal["relayout", "retrofit"]
+    status: Literal["running", "succeeded", "failed"] = "running"
+    input_project_revision: int = Field(ge=0)
+    target_lux: float = Field(gt=0)
+    calibration_scale: float = Field(gt=0)
+    dxf_source: str = Field(min_length=1, max_length=500)
+    report_source: str | None = Field(default=None, max_length=500)
+    input_sha256: dict[str, str] = Field(default_factory=dict)
+    iterations: list[DesignIteration] = Field(default_factory=list, max_length=3)
+    result: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list, max_length=100)
+    artifacts: list[DesignArtifact] = Field(default_factory=list, max_length=20)
+    created_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
 
 
 class CadPoint(StrictModel):
@@ -549,6 +627,7 @@ class ProjectState(StrictModel):
     selected_luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
     floor_plan: FloorPlan | None = None
     simulation_runs: list[SimulationRun] = Field(default_factory=list)
+    design_runs: list[DesignRun] = Field(default_factory=list, max_length=100)
     workflow_status: Literal[
         "draft",
         "brief_confirmed",
@@ -663,5 +742,6 @@ class ProjectUpdate(StrictModel):
     selected_luminaire_ids: list[str] | None = None
     floor_plan: FloorPlan | None = None
     simulation_runs: list[SimulationRun] | None = None
+    design_runs: list[DesignRun] | None = None
     open_questions: list[str] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

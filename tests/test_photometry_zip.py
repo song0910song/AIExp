@@ -221,6 +221,30 @@ def test_task_archive_downloads_only_final_selected_luminaires(tmp_path) -> None
         assert all("search-candidate" not in name for name in archive.namelist())
 
 
+def test_design_assets_allow_traced_saved_candidates_without_final_selection(tmp_path) -> None:
+    candidate = LuminaireCandidate(
+        luminaire_id="design-candidate",
+        article_name="Design candidate",
+        detail_url="https://luminaires.dialux.com/zh/article/design-candidate",
+        has_photometry_download=True,
+    )
+    state = ProjectState(
+        brief=DesignBrief(project_name="Design evaluation assets"),
+        luminaires=[candidate],
+    )
+    downloader = Downloader(_vendor_zip())
+    assets = PhotometryAssetStore(tmp_path / "projects", downloader)
+
+    [asset] = assets.ensure_design_assets(state, [candidate.luminaire_id], "design-run-1")
+
+    assert asset.status == "downloaded"
+    assert asset.purposes == ["design_evaluation"]
+    assert asset.design_run_ids == ["design-run-1"]
+    assert downloader.calls == [candidate.detail_url]
+    with pytest.raises(ValueError, match="final selected"):
+        assets.download(state, candidate.luminaire_id)
+
+
 def test_task_archive_skips_photometry_until_a_final_luminaire_is_selected(tmp_path) -> None:
     candidate = LuminaireCandidate(
         luminaire_id="search-candidate",
