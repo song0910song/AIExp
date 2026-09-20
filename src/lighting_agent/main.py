@@ -9,7 +9,12 @@ from typing import Any
 from .agent import interactive_chat, invoke_agent
 from .calculations import calculate_lumen_method
 from .dialux_api import DialuxAPI
-from .deliverables import build_design_report, build_dialux_task_archive, read_dialux_task_package
+from .deliverables import (
+    build_design_report,
+    build_dialux_task_archive,
+    build_simulation_run_from_handoff,
+    read_dialux_task_package,
+)
 from .photometry_assets import PhotometryAssetStore
 from .document_loader import load_document
 from .project_store import ProjectStore
@@ -20,7 +25,6 @@ from .schemas import (
     LuminaireSearchRequest,
     ProjectUpdate,
     SimulationMetrics,
-    SimulationRun,
 )
 
 
@@ -206,34 +210,28 @@ def main(argv: list[str] | None = None) -> None:
         if not handoff_path.exists():
             raise ValueError("No DIALux task package exists for this project; create one first")
         package = read_dialux_task_package(handoff_path.read_bytes())
-        messages: list[str] = []
-        if args.handoff_id != package.get("handoff_id"):
-            messages.append("handoff_id 与当前任务包不匹配")
-        if package.get("input_snapshot", {}).get("project_id") != state.project_id:
-            messages.append("任务包不属于当前项目")
-        if package.get("input_snapshot", {}).get("selected_luminaire_ids", []) != state.selected_luminaire_ids:
-            messages.append("任务包中的最终灯具与当前项目不一致")
         metrics = SimulationMetrics(
             maintained_illuminance_lx=args.maintained_lx,
             minimum_illuminance_lx=args.minimum_lx,
         )
-        status = "matched" if not messages else "mismatch"
-        run = SimulationRun(
-            kind="精算",
-            status="succeeded" if status == "matched" else "unverified",
-            input_project_revision=args.revision,
-            solver_version=args.solver_version,
+        run = build_simulation_run_from_handoff(
+            package,
+            project_id=state.project_id,
+            expected_revision=args.revision,
             handoff_id=args.handoff_id,
-            input_snapshot_sha256=package.get("input_snapshot_sha256"),
-            selected_luminaire_ids=list(package.get("selected_luminaire_ids", [])),
-            photometry_sha256_by_luminaire=dict(package.get("photometry_sha256_by_luminaire", {})),
-            source_kind=args.source_kind,
+            selected_luminaire_ids=state.selected_luminaire_ids,
             metrics=metrics,
-            verification_status=status,
-            verification_messages=messages,
+            source_kind=args.source_kind,
+            solver_version=args.solver_version,
         )
         updated = store.append_simulation_run(state.project_id, args.revision, run)
-        _print({"simulation_run": run, "project_revision": updated.revision, "verification_messages": messages})
+        _print(
+            {
+                "simulation_run": run,
+                "project_revision": updated.revision,
+                "verification_messages": run.verification_messages,
+            }
+        )
         return
     if args.command == "chat":
         if args.interactive or args.message is None:

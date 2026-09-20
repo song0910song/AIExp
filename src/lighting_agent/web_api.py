@@ -48,6 +48,7 @@ from .deliverables import (
     build_design_report,
     build_dialux_task_archive,
     build_redesign_package,
+    build_simulation_run_from_handoff,
     read_dialux_task_package,
 )
 from .dialux_api import DialuxAPI, DialuxAPIError, validate_luminaire_search
@@ -150,28 +151,6 @@ class DialuxResultRequest(StrictModel):
     ] = "manual_form"
     solver_version: str | None = Field(default=None, max_length=120)
     parser_version: str = Field(default="manual-form-1", max_length=80)
-
-
-# Deprecated Blender endpoints remain as explicit 410 responses for clients
-# that have not yet migrated. Their request shapes are intentionally opaque.
-class BlenderWorkflowParametersRequest(StrictModel):
-    expected_revision: int = Field(ge=0)
-    parameters: dict[str, Any] = Field(default_factory=dict)
-
-
-class BlenderModelRequest(StrictModel):
-    expected_revision: int = Field(ge=0)
-    model_path: str | None = Field(default=None, max_length=1_000)
-    reuse_existing: bool = True
-
-
-class BlenderEstimateRequest(StrictModel):
-    expected_revision: int = Field(ge=0)
-    allow_provisional: bool = True
-
-
-class BlenderReportRequest(StrictModel):
-    expected_revision: int = Field(ge=0)
 
 
 class PhotometryPreviewWebRequest(IlluminancePreviewRequest):
@@ -686,12 +665,6 @@ _AGENT_WORKFLOW_STEPS: tuple[dict[str, Any], ...] = (
         "tools": ["apply_rag_lighting_parameters", "ask_user", "update_project_brief"],
     },
     {
-        "id": "model",
-        "title": "建立并保存三维模型",
-        "description": "证据充分后连接 Blender MCP 建模、渲染，并复用匹配的项目模型。",
-        "tools": [],
-    },
-    {
         "id": "analysis",
         "title": "分析现状照明",
         "description": "解析 DXF 几何与 DIALux PDF 报告，交叉核对点位、产品、安装高度和目标。",
@@ -704,12 +677,6 @@ _AGENT_WORKFLOW_STEPS: tuple[dict[str, Any], ...] = (
         "tools": ["prepare_luminaire_search", "search_luminaires", "get_luminaire_detail", "select_luminaires"],
     },
     {
-        "id": "relight",
-        "title": "在三维模型中更换灯具",
-        "description": "下载最终灯具 IES/LDT/ULD，并更新 Blender 灯具阵列和渲染图。",
-        "tools": [],
-    },
-    {
         "id": "redesign",
         "title": "计算重设计方案",
         "description": "按点位约束运行自由重排或原位替换，逐点验证照度并记录迭代证据。",
@@ -718,7 +685,7 @@ _AGENT_WORKFLOW_STEPS: tuple[dict[str, Any], ...] = (
     {
         "id": "calculation",
         "title": "照度初算",
-        "description": "运行流明法与工作面网格初算，输出照度热力图及限制。",
+        "description": "运行流明法初算，输出估算照度与适用限制。",
         "tools": ["calculate_preliminary_lighting"],
     },
     {
@@ -730,14 +697,9 @@ _AGENT_WORKFLOW_STEPS: tuple[dict[str, Any], ...] = (
     {
         "id": "deliverables",
         "title": "给出优化后的方案",
-        "description": "生成包含真实三维渲染和照度热力图的方案报告，并声明专业复核边界。",
+        "description": "生成方案报告与 DIALux 交接任务包，并声明专业复核边界。",
         "tools": ["generate_design_report", "create_dialux_task_package"],
     },
-)
-
-# Blender-specific workflow stages were retired with the Blender MCP feature.
-_AGENT_WORKFLOW_STEPS = tuple(
-    step for step in _AGENT_WORKFLOW_STEPS if step["id"] not in {"model", "relight"}
 )
 
 _AGENT_TOOL_STEPS = {
@@ -963,42 +925,20 @@ def create_app(
         metric_source: Literal["manual", "pdf_text", "vision"] | None = None,
         vision_analysis: DialuxVisionAnalysis | None = None,
     ) -> SimulationRun:
-        messages: list[str] = []
-        expected_snapshot = package.get("input_snapshot_sha256")
-        if handoff_id != package.get("handoff_id"):
-            messages.append("handoff_id 与当前任务包不匹配")
-        if input_snapshot_sha256 and input_snapshot_sha256 != expected_snapshot:
-            messages.append("input_snapshot_sha256 与当前任务包不匹配")
-        package_snapshot = package.get("input_snapshot", {})
-        if package_snapshot.get("project_id") != project_id:
-            messages.append("任务包不属于当前项目")
-        if package_snapshot.get("selected_luminaire_ids", []) != state.selected_luminaire_ids:
-            messages.append("任务包中的最终灯具与当前项目不一致")
-        if package_snapshot.get("project_revision") != expected_revision:
-            messages.append("任务包中的项目 revision 与导入 revision 不一致")
-        status = "matched" if not messages else "mismatch"
-        evidence = artifacts or []
-        return SimulationRun(
-            kind="精算",
-            status="succeeded" if status == "matched" else "unverified",
-            input_project_revision=expected_revision,
-            solver_version=solver_version,
-            artifact_path=evidence[0].storage_path if evidence else None,
+        return build_simulation_run_from_handoff(
+            package,
+            project_id=project_id,
+            expected_revision=expected_revision,
             handoff_id=handoff_id,
-            input_snapshot_sha256=input_snapshot_sha256 or expected_snapshot,
-            selected_luminaire_ids=list(package.get("selected_luminaire_ids", [])),
-            photometry_sha256_by_luminaire=dict(package.get("photometry_sha256_by_luminaire", {})),
-            source_file=evidence[0].file_name if evidence else None,
-            source_sha256=evidence[0].sha256 if evidence else None,
-            source_kind=source_kind,
-            artifacts=evidence,
+            selected_luminaire_ids=state.selected_luminaire_ids,
+            input_snapshot_sha256=input_snapshot_sha256,
             metrics=metrics,
+            source_kind=source_kind,
+            solver_version=solver_version,
+            parser_version=parser_version,
+            artifacts=artifacts,
             metric_source=metric_source,
             vision_analysis=vision_analysis,
-            verification_status=status,
-            verification_messages=messages,
-            parser_version=parser_version,
-            completed_at=datetime.now(UTC),
         )
 
     def chat_agent(request: ChatRequest, runtime_settings: Settings) -> Any:
@@ -1631,461 +1571,6 @@ def create_app(
             raise HTTPException(status_code=409, detail="重设计产物哈希校验失败")
         return FileResponse(target, media_type=artifact.media_type, filename=artifact.name)
 
-    '''
-    # --- Retired Blender MCP workflow ---
-
-    @app.get("/api/projects/{project_id}/blender-workflow")
-    def get_blender_workflow(project_id: str) -> dict[str, Any]:
-        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
-        state = projects.get(project_id)
-        workflow = state.blender_workflow
-        status, message = probe_blender()
-        if workflow.blender_status != status:
-            workflow = workflow.model_copy(update={"blender_status": status})
-        return {
-            "workflow": workflow.model_dump(mode="json"),
-            "blender": {"status": status, "message": message},
-            "project_revision": state.revision,
-        }
-
-    @app.post("/api/projects/{project_id}/blender-workflow/open")
-    def open_blender_for_workflow(project_id: str) -> dict[str, Any]:
-        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
-        state = projects.get(project_id)
-        model_path = None
-        if state.blender_workflow.model:
-            candidate = (project_directory(project_id) / state.blender_workflow.model.model_path).resolve()
-            if candidate.is_file():
-                model_path = candidate
-        try:
-            message, started = ensure_blender_running(open_file=model_path)
-        except BlenderConnectionError as error:
-            raise HTTPException(status_code=503, detail=str(error)) from error
-        return {"status": "connected", "started": started, "message": message}
-
-    @app.post("/api/projects/{project_id}/blender-workflow/source", status_code=201)
-    async def upload_blender_workflow_source(
-        project_id: str,
-        file: Annotated[UploadFile, File()],
-        expected_revision: Annotated[int, Form(ge=0)],
-        auto_model_enabled: Annotated[bool, Form()] = True,
-    ) -> dict[str, Any]:
-        """Save and index a PDF/DXF/DWG source specifically for the workflow."""
-
-        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
-
-        state = projects.get(project_id)
-        if state.revision != expected_revision:
-            raise RevisionConflictError(
-                f"Project revision is {state.revision}, but request expected {expected_revision}"
-            )
-        safe_name = _safe_upload_name(file.filename or "drawing.pdf")
-        suffix = Path(safe_name).suffix.casefold()
-        if suffix not in {".pdf", ".dxf", ".dwg"}:
-            raise HTTPException(status_code=415, detail="工作流源文件仅支持 .pdf、.dxf 与 .dwg")
-        content = await file.read()
-        if len(content) > 200 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="工作流源文件不能超过 200 MB")
-        if suffix in {".dxf", ".dwg"} and len(content) > MAX_DRAWING_BYTES:
-            raise HTTPException(status_code=413, detail="CAD 平面图不能超过 50 MB")
-        project_root = project_directory(project_id)
-        root = workflow_root(project_root, project_id)
-        source_dir = root / "sources"
-        target = _unique_upload_target(source_dir, safe_name)
-        await run_in_threadpool(target.write_bytes, content)
-        digest = hashlib.sha256(content).hexdigest()
-        page_count: int | None = None
-        extracted_preview: str | None = None
-        floor_plan = None
-        candidate_index: int | None = None
-        pdf_text: str | None = None
-        try:
-            if suffix == ".pdf":
-                document = await run_in_threadpool(load_document, target, allowed_root=source_dir)
-                page_count = document.page_count
-                extracted_preview = document.content[:4_000]
-                pdf_text = document.content
-                # Keep the source in the project evidence scope for RAG and
-                # provenance; duplicate uploads are harmlessly replaced.
-                evidence.add_document(document, source_type="project_document", project_id=project_id)
-            else:
-                floor_plan = await run_in_threadpool(
-                    parse_floor_plan,
-                    target,
-                    storage_path=target.relative_to(project_root).as_posix(),
-                )
-                candidate_index = next(
-                    (index for index, candidate in enumerate(floor_plan.area_candidates) if candidate.area_m2 is not None),
-                    None,
-                )
-                floor_plan = floor_plan.model_copy(update={"selected_area_candidate_index": candidate_index})
-                extracted_preview = (
-                    f"{suffix[1:].upper()} 图纸已解析；识别到 {len(floor_plan.area_candidates)} 个闭合边界候选。"
-                )
-        except (DocumentLoadError, FloorPlanParseError, OSError) as error:
-            await run_in_threadpool(target.unlink, missing_ok=True)
-            raise HTTPException(status_code=422, detail=f"无法读取工作流源文件：{error}") from error
-
-        preview_paths = await run_in_threadpool(
-            render_source_previews,
-            target,
-            source_type=suffix[1:],
-            project_root=project_root,
-            project_id=project_id,
-            floor_plan=floor_plan,
-        )
-
-        source = BlenderSourceAsset(
-            source_name=target.name,
-            source_type=suffix[1:],
-            storage_path=target.relative_to(project_root).as_posix(),
-            sha256=digest,
-            size_bytes=len(content),
-            page_count=page_count,
-            extracted_text_preview=extracted_preview,
-            preview_paths=preview_paths,
-        )
-        sources = [item for item in state.blender_workflow.source_assets if item.sha256 != digest]
-        next_sources = [*sources, source]
-        previous_source_fingerprint = workflow_source_fingerprint(state.blender_workflow)
-        candidate_workflow = state.blender_workflow.model_copy(update={"source_assets": next_sources})
-        source_changed = workflow_source_fingerprint(candidate_workflow) != previous_source_fingerprint
-        blender_status, _blender_message = probe_blender()
-        workflow_updates: dict[str, Any] = {
-            "source_assets": next_sources,
-            "blender_status": blender_status,
-        }
-        if source_changed:
-            stale_model = state.blender_workflow.model
-            if stale_model is not None:
-                stale_model = stale_model.model_copy(
-                    update={
-                        "status": "missing",
-                        "reused": False,
-                        "message": "源资料已变化，需要重新同步 Blender 模型。",
-                    }
-                )
-            workflow_updates.update(
-                {
-                    "model": stale_model,
-                    "estimate": None,
-                    "report_markdown_path": None,
-                    "report_pdf_path": None,
-                    "report_render_paths": [],
-                }
-            )
-        workflow = state.blender_workflow.model_copy(update=workflow_updates)
-        workflow = update_node(
-            workflow,
-            "source",
-            status="succeeded",
-            message=f"已保存 {source.source_name}",
-            output_refs=[source.storage_path, *source.preview_paths],
-        )
-        if source_changed:
-            workflow = update_node(
-                workflow,
-                "model",
-                status="pending",
-                message="源资料已变化，等待重新建模或复用校验",
-                output_refs=[],
-            )
-            workflow = update_node(
-                workflow,
-                "estimate",
-                status="pending",
-                message="源资料已变化，等待基于当前模型重新初算",
-                output_refs=[],
-            )
-            workflow = update_node(
-                workflow,
-                "report",
-                status="pending",
-                message="源资料已变化，等待重新生成方案",
-                output_refs=[],
-            )
-        brief = state.brief
-        brief_updates: dict[str, Any] = {}
-        confirmed = set(brief.confirmed_fields)
-        if floor_plan is not None:
-            if candidate_index is not None:
-                candidate = floor_plan.area_candidates[candidate_index]
-                brief_updates.update(
-                    area_m2=candidate.area_m2,
-                    length_m=candidate.length_m,
-                    width_m=candidate.width_m,
-                    confirmed_fields=confirmed | {"area_m2", "length_m", "width_m"},
-                )
-            if not brief.space_type and floor_plan.room_name:
-                brief_updates["space_type"] = floor_plan.room_name
-                brief_updates["confirmed_fields"] = set(brief_updates.get("confirmed_fields", confirmed)) | {"space_type"}
-        if brief_updates:
-            brief = brief.model_copy(update=brief_updates)
-        # The source hash is normally sufficient to detect a geometry change,
-        # but a CAD intake can also fill previously missing dimensions in the
-        # task brief.  Do not keep a render built from the old dimensions just
-        # because the uploaded bytes happen to be unchanged.
-        if brief != state.brief and not source_changed:
-            stale_model = workflow.model
-            if stale_model is not None:
-                stale_model = stale_model.model_copy(
-                    update={
-                        "status": "missing",
-                        "reused": False,
-                        "message": "任务书几何条件已变化，需要重新同步 Blender 模型。",
-                    }
-                )
-            workflow = workflow.model_copy(
-                update={
-                    "model": stale_model,
-                    "estimate": None,
-                    "report_markdown_path": None,
-                    "report_pdf_path": None,
-                    "report_render_paths": [],
-                }
-            )
-            workflow = update_node(workflow, "model", status="pending", message="任务书几何条件已变化，等待重新建模或复用校验", output_refs=[])
-            workflow = update_node(workflow, "estimate", status="pending", message="任务书几何条件已变化，等待重新初算", output_refs=[])
-            workflow = update_node(workflow, "report", status="pending", message="任务书几何条件已变化，等待重新生成方案", output_refs=[])
-        updated = projects.update(
-            project_id,
-            ProjectUpdate(
-                expected_revision=expected_revision,
-                brief=brief if brief != state.brief else None,
-                floor_plan=floor_plan,
-                blender_workflow=workflow,
-            ),
-        )
-        auto_model = {"status": "awaiting_evidence", "missing_fields": modeling_missing_fields(updated)}
-        if auto_model_enabled and not auto_model["missing_fields"]:
-            try:
-                model = await run_in_threadpool(
-                    create_or_reuse_blender_model,
-                    updated,
-                    project_root=project_root,
-                    project_id=project_id,
-                )
-                workflow = updated.blender_workflow.model_copy(update={"model": model, "blender_status": model.mcp_status})
-                workflow = update_node(workflow, "model", status="succeeded", message=model.message, output_refs=[model.model_path, *model.render_paths])
-                updated = projects.update(
-                    project_id,
-                    ProjectUpdate(expected_revision=updated.revision, blender_workflow=workflow),
-                )
-                auto_model = {"status": "reused" if model.reused else "created", "missing_fields": []}
-            except BlenderConnectionError as error:
-                workflow = update_node(updated.blender_workflow, "model", status="blocked", message=str(error), output_refs=[])
-                workflow = workflow.model_copy(update={"blender_status": "unavailable"})
-                updated = projects.update(
-                    project_id,
-                    ProjectUpdate(expected_revision=updated.revision, blender_workflow=workflow),
-                )
-                auto_model = {"status": "blender_unavailable", "missing_fields": [], "message": str(error)}
-            except BlenderWorkflowError as error:
-                workflow = update_node(
-                    updated.blender_workflow,
-                    "model",
-                    status="failed",
-                    message=str(error),
-                    output_refs=[],
-                )
-                updated = projects.update(
-                    project_id,
-                    ProjectUpdate(expected_revision=updated.revision, blender_workflow=workflow),
-                )
-                auto_model = {"status": "failed", "missing_fields": [], "message": str(error)}
-        elif not auto_model_enabled:
-            auto_model = {"status": "deferred", "missing_fields": auto_model["missing_fields"]}
-        return {
-            "source": source.model_dump(mode="json"),
-            "workflow": updated.blender_workflow.model_dump(mode="json"),
-            "project": updated.model_dump(mode="json"),
-            "auto_model": auto_model,
-            "floor_plan": floor_plan.model_dump(mode="json") if floor_plan else None,
-        }
-
-    @app.post("/api/projects/{project_id}/blender-workflow/model", status_code=201)
-    def register_blender_model(project_id: str, request: BlenderModelRequest) -> dict[str, Any]:
-        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
-        state = projects.get(project_id)
-        if state.revision != request.expected_revision:
-            raise RevisionConflictError(
-                f"Project revision is {state.revision}, but request expected {request.expected_revision}"
-            )
-        project_root = project_directory(project_id)
-        workflow = state.blender_workflow
-        existing = workflow.model
-        raw_path = request.model_path
-        try:
-            if raw_path:
-                model = register_model(
-                    source=Path(raw_path),
-                    project_root=project_root,
-                    project_id=project_id,
-                    source_sha256=None,
-                    previous=existing,
-                )
-            else:
-                model = create_or_reuse_blender_model(
-                    state,
-                    project_root=project_root,
-                    project_id=project_id,
-                    force=not request.reuse_existing,
-                )
-        except (BlenderWorkflowError, OSError, ValueError) as error:
-            status, _ = probe_blender()
-            workflow = workflow.model_copy(update={"blender_status": status})
-            workflow = update_node(workflow, "model", status="failed", message=str(error))
-            projects.update(project_id, ProjectUpdate(expected_revision=request.expected_revision, blender_workflow=workflow))
-            raise HTTPException(status_code=422, detail=f"Blender 建模失败：{error}") from error
-        workflow = workflow.model_copy(update={"model": model, "blender_status": model.mcp_status})
-        workflow = update_node(workflow, "model", status="succeeded", message=model.message, output_refs=[model.model_path, *model.render_paths])
-        updated = projects.update(project_id, ProjectUpdate(expected_revision=request.expected_revision, blender_workflow=workflow))
-        return {"model": model.model_dump(mode="json"), "workflow": updated.blender_workflow.model_dump(mode="json"), "project": updated.model_dump(mode="json"), "reused": model.reused}
-
-    @app.put("/api/projects/{project_id}/blender-workflow/parameters")
-    def update_blender_workflow_parameters(project_id: str, request: BlenderWorkflowParametersRequest) -> dict[str, Any]:
-        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
-        state = projects.get(project_id)
-        if state.revision != request.expected_revision:
-            raise RevisionConflictError(
-                f"Project revision is {state.revision}, but request expected {request.expected_revision}"
-            )
-        questions: list[str] = []
-        for field, label in (
-            ("maintenance_factor", "维护系数 MF"),
-            ("floor_reflectance", "地面反射率"),
-            ("wall_reflectance", "墙面反射率"),
-            ("ceiling_reflectance", "顶棚反射率"),
-        ):
-            if getattr(request.parameters, field) is None:
-                questions.append(f"请确认{label}")
-        parameters = request.parameters.model_copy(update={"questions": questions})
-        old_parameters = state.blender_workflow.parameters
-        parameters_changed = parameters.model_dump(exclude={"questions"}) != old_parameters.model_dump(exclude={"questions"})
-        model_parameters_changed = any(
-            getattr(parameters, field) != getattr(old_parameters, field)
-            for field in (
-                "workplane_height_m",
-                "grid_spacing_m",
-                "floor_reflectance",
-                "wall_reflectance",
-                "ceiling_reflectance",
-            )
-        )
-        model = state.blender_workflow.model
-        if model_parameters_changed and model is not None:
-            model = model.model_copy(
-                update={
-                    "status": "missing",
-                    "reused": False,
-                    "message": "工作面或反射率参数已变化，需要同步更新 Blender 模型。",
-                }
-            )
-        workflow = state.blender_workflow.model_copy(
-            update={
-                "parameters": parameters,
-                "model": model,
-                "estimate": None if parameters_changed else state.blender_workflow.estimate,
-                "report_markdown_path": None if parameters_changed else state.blender_workflow.report_markdown_path,
-                "report_pdf_path": None if parameters_changed else state.blender_workflow.report_pdf_path,
-                "report_render_paths": [] if parameters_changed else state.blender_workflow.report_render_paths,
-            }
-        )
-        workflow = update_node(workflow, "parameters", status="succeeded" if not questions else "blocked", message="参数已保存" if not questions else "仍有参数待确认")
-        if model_parameters_changed:
-            workflow = update_node(workflow, "model", status="pending", message="参数已变化，等待模型同步", output_refs=[])
-        if parameters_changed:
-            workflow = update_node(workflow, "estimate", status="pending", message="参数已变化，等待重新初算", output_refs=[])
-            workflow = update_node(workflow, "report", status="pending", message="参数已变化，等待重新生成方案", output_refs=[])
-        updated = projects.update(project_id, ProjectUpdate(expected_revision=request.expected_revision, blender_workflow=workflow))
-        return {"workflow": updated.blender_workflow.model_dump(mode="json"), "project": updated.model_dump(mode="json")}
-
-    @app.post("/api/projects/{project_id}/blender-workflow/estimate", status_code=201)
-    def create_blender_estimate(project_id: str, request: BlenderEstimateRequest) -> dict[str, Any]:
-        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
-        state = projects.get(project_id)
-        if state.revision != request.expected_revision:
-            raise RevisionConflictError(
-                f"Project revision is {state.revision}, but request expected {request.expected_revision}"
-            )
-        model = state.blender_workflow.model
-        if not state.selected_luminaire_ids:
-            raise HTTPException(status_code=422, detail="照度初算前必须先确认最终灯具")
-        if model is None or model.status != "ready":
-            raise HTTPException(status_code=422, detail="照度初算前必须先完成并保存当前 Blender 模型")
-        if model.scene_summary.get("selected_luminaire_ids") != state.selected_luminaire_ids:
-            raise HTTPException(status_code=422, detail="最终灯具尚未同步到当前 Blender 模型")
-        if state.blender_workflow.parameters.selected_luminaire_ids != state.selected_luminaire_ids:
-            raise HTTPException(status_code=422, detail="当前模型参数尚未记录最终灯具，请先同步灯具")
-        project_root = project_directory(project_id)
-        try:
-            estimate = estimate_workplane(
-                state,
-                state.blender_workflow.parameters,
-                project_root=project_root,
-                project_id=project_id,
-                allow_provisional=request.allow_provisional,
-            )
-        except BlenderWorkflowError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        workflow = state.blender_workflow.model_copy(update={"estimate": estimate})
-        workflow = update_node(workflow, "estimate", status="succeeded" if estimate.status == "succeeded" else "blocked", message=estimate.message or "已生成近似照度估算", output_refs=[estimate.heatmap_path] if estimate.heatmap_path else [])
-        updated = projects.update(project_id, ProjectUpdate(expected_revision=request.expected_revision, blender_workflow=workflow))
-        return {"estimate": estimate.model_dump(mode="json"), "workflow": updated.blender_workflow.model_dump(mode="json"), "project": updated.model_dump(mode="json")}
-
-    @app.post("/api/projects/{project_id}/blender-workflow/report", status_code=201)
-    def create_blender_workflow_report(project_id: str, request: BlenderReportRequest) -> dict[str, Any]:
-        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
-        state = projects.get(project_id)
-        if state.revision != request.expected_revision:
-            raise RevisionConflictError(
-                f"Project revision is {state.revision}, but request expected {request.expected_revision}"
-            )
-        project_root = project_directory(project_id)
-        workflow = state.blender_workflow
-        markdown_target = workflow_root(project_root, project_id) / "reports" / f"{project_id}-blender-estimate.md"
-        markdown_target.parent.mkdir(parents=True, exist_ok=True)
-        pdf_target = workflow_root(project_root, project_id) / "reports" / f"{project_id}-blender-estimate.pdf"
-        try:
-            render_paths = render_workflow_report_pdf(state, project_root, pdf_target)
-        except BlenderWorkflowError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        workflow = workflow.model_copy(update={
-            "report_markdown_path": markdown_target.relative_to(project_root).as_posix(),
-            "report_pdf_path": pdf_target.relative_to(project_root).as_posix(),
-            "report_render_paths": render_paths,
-        })
-        workflow = update_node(workflow, "report", status="succeeded", message="已生成 Markdown 与 PDF 报告", output_refs=[workflow.report_markdown_path, workflow.report_pdf_path, *render_paths])
-        report_state = state.model_copy(update={"blender_workflow": workflow})
-        markdown = build_workflow_report_markdown(report_state, project_root)
-        markdown_target.write_text(markdown, encoding="utf-8")
-        updated = projects.update(project_id, ProjectUpdate(expected_revision=request.expected_revision, blender_workflow=workflow))
-        return {"workflow": updated.blender_workflow.model_dump(mode="json"), "project": updated.model_dump(mode="json"), "download_url": f"/api/projects/{project_id}/blender-workflow/report"}
-
-    @app.get("/api/projects/{project_id}/blender-workflow/report")
-    def download_blender_workflow_report(project_id: str):
-        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
-        state = projects.get(project_id)
-        relative = state.blender_workflow.report_pdf_path
-        if not relative:
-            raise HTTPException(status_code=404, detail="尚未生成 Blender 工作流报告")
-        target = (project_directory(project_id) / relative).resolve()
-        if not target.is_file():
-            raise HTTPException(status_code=404, detail="报告文件不存在，请重新生成")
-        return FileResponse(target, media_type="application/pdf", filename=target.name)
-
-    @app.get("/api/projects/{project_id}/blender-workflow/assets/{asset_path:path}")
-    def download_blender_workflow_asset(project_id: str, asset_path: str):
-        raise HTTPException(status_code=410, detail="Blender MCP 三维建模功能已取消")
-        projects.get(project_id)
-        root = project_directory(project_id)
-        target = (root / asset_path).resolve()
-        workflow_root_path = workflow_root(root, project_id).resolve()
-        if workflow_root_path not in target.parents or not target.is_file():
-            raise HTTPException(status_code=404, detail="工作流资产不存在")
-        return FileResponse(target, filename=target.name)
-
-    '''
 
     @app.post("/api/projects/{project_id}/rule-checks")
     def rules(project_id: str, request: RuleCheckRequest) -> dict[str, Any]:

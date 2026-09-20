@@ -5,14 +5,23 @@ from __future__ import annotations
 import json
 import hashlib
 import zipfile
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
+from typing import Any, Literal
 
 from .photometry_assets import PhotometryAssetStore
 from .calculations.verification import evaluate_illuminance
-from .schemas import DesignRun, ProjectState
+from .schemas import (
+    DesignRun,
+    DialuxVisionAnalysis,
+    ProjectState,
+    SimulationArtifact,
+    SimulationMetrics,
+    SimulationRun,
+)
 
-# 
+
 def _canonical_json(payload: object) -> bytes:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -53,6 +62,85 @@ def read_dialux_task_package(archive_bytes: bytes) -> dict:
     if not isinstance(package, dict) or not isinstance(package.get("handoff_id"), str):
         raise ValueError("DIALux task manifest is invalid")
     return package
+
+
+def verify_dialux_handoff(
+    package: dict[str, Any],
+    *,
+    project_id: str,
+    expected_revision: int,
+    handoff_id: str,
+    selected_luminaire_ids: list[str],
+    input_snapshot_sha256: str | None = None,
+) -> list[str]:
+    """Return human-readable mismatches between a DIALux result and its task package."""
+
+    messages: list[str] = []
+    expected_snapshot = package.get("input_snapshot_sha256")
+    if handoff_id != package.get("handoff_id"):
+        messages.append("handoff_id 与当前任务包不匹配")
+    if input_snapshot_sha256 and input_snapshot_sha256 != expected_snapshot:
+        messages.append("input_snapshot_sha256 与当前任务包不匹配")
+    package_snapshot = package.get("input_snapshot", {})
+    if package_snapshot.get("project_id") != project_id:
+        messages.append("任务包不属于当前项目")
+    if package_snapshot.get("selected_luminaire_ids", []) != selected_luminaire_ids:
+        messages.append("任务包中的最终灯具与当前项目不一致")
+    if package_snapshot.get("project_revision") != expected_revision:
+        messages.append("任务包中的项目 revision 与导入 revision 不一致")
+    return messages
+
+
+def build_simulation_run_from_handoff(
+    package: dict[str, Any],
+    *,
+    project_id: str,
+    expected_revision: int,
+    handoff_id: str,
+    selected_luminaire_ids: list[str],
+    metrics: SimulationMetrics,
+    source_kind: str,
+    solver_version: str | None = None,
+    parser_version: str | None = None,
+    input_snapshot_sha256: str | None = None,
+    artifacts: list[SimulationArtifact] | None = None,
+    metric_source: Literal["manual", "pdf_text", "vision"] | None = None,
+    vision_analysis: DialuxVisionAnalysis | None = None,
+) -> SimulationRun:
+    """Verify one DIALux result against its task package and build the run record."""
+
+    messages = verify_dialux_handoff(
+        package,
+        project_id=project_id,
+        expected_revision=expected_revision,
+        handoff_id=handoff_id,
+        selected_luminaire_ids=selected_luminaire_ids,
+        input_snapshot_sha256=input_snapshot_sha256,
+    )
+    status = "matched" if not messages else "mismatch"
+    evidence = list(artifacts or [])
+    return SimulationRun(
+        kind="精算",
+        status="succeeded" if status == "matched" else "unverified",
+        input_project_revision=expected_revision,
+        solver_version=solver_version,
+        artifact_path=evidence[0].storage_path if evidence else None,
+        handoff_id=handoff_id,
+        input_snapshot_sha256=input_snapshot_sha256 or package.get("input_snapshot_sha256"),
+        selected_luminaire_ids=list(package.get("selected_luminaire_ids", [])),
+        photometry_sha256_by_luminaire=dict(package.get("photometry_sha256_by_luminaire", {})),
+        source_file=evidence[0].file_name if evidence else None,
+        source_sha256=evidence[0].sha256 if evidence else None,
+        source_kind=source_kind,
+        artifacts=evidence,
+        metrics=metrics,
+        metric_source=metric_source,
+        vision_analysis=vision_analysis,
+        verification_status=status,
+        verification_messages=messages,
+        parser_version=parser_version,
+        completed_at=datetime.now(UTC),
+    )
 
 
 def build_redesign_package(project_root: Path, run: DesignRun) -> bytes:

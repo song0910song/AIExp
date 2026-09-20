@@ -139,7 +139,7 @@ def compute_illuminance_preview(
     grid_columns, xs = _evaluation_axis(width)
     grid_rows, ys = _evaluation_axis(length)
 
-    interp = _IntensityInterpolator(distribution)
+    interp = IntensityInterpolator(distribution)
     direct = [[0.0] * grid_columns for _ in range(grid_rows)]
     for j, y in enumerate(ys):
         for i, x in enumerate(xs):
@@ -235,7 +235,7 @@ def _evaluation_axis(room_size: float) -> tuple[int, list[float]]:
     return count, axis
 
 
-class _IntensityInterpolator:
+class IntensityInterpolator:
     """Bilinear candela lookup across C planes with periodic wrap support."""
 
     def __init__(self, distribution: PhotometryDistribution) -> None:
@@ -295,6 +295,7 @@ __all__ = [
     "SOLVER_VERSION",
     "IlluminancePreviewRequest",
     "IlluminancePreviewResult",
+    "IntensityInterpolator",
     "PreviewGeometryError",
     "PhotometryParseError",
     "compute_illuminance_preview",

@@ -9,7 +9,7 @@ from typing import Iterable
 import numpy as np
 
 from .photometry import PhotometryDistribution, parse_photometry_file
-from .preview import _IntensityInterpolator
+from .preview import IntensityInterpolator
 
 
 @dataclass(slots=True)
@@ -22,12 +22,12 @@ class FixtureKind:
     integrated_flux_lm: float = field(init=False)
     reference_flux_lm: float = field(init=False)
     table_scale: float = field(init=False)
-    _interpolator: _IntensityInterpolator = field(init=False, repr=False)
+    _interpolator: IntensityInterpolator = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.flux_lm = float(self.flux_lm)
         self.maintenance_factor = float(self.maintenance_factor)
-        self._interpolator = _IntensityInterpolator(self.distribution)
+        self._interpolator = IntensityInterpolator(self.distribution)
         self.integrated_flux_lm = self.distribution.total_flux_lm()
         reference = self.integrated_flux_lm if self.distribution.absolute_flux_declared else 1000.0
         self.reference_flux_lm = reference

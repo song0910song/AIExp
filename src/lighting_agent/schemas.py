@@ -285,18 +285,6 @@ class DialuxVisionAnalysis(StrictModel):
     model: str = Field(min_length=1, max_length=160)
 
 
-class DialuxHandoff(StrictModel):
-    """Immutable identity and input snapshot for one DIALux handoff."""
-
-    handoff_id: str = Field(min_length=8, max_length=128)
-    project_id: str = Field(min_length=8, max_length=64)
-    project_revision: int = Field(ge=0)
-    input_snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    selected_luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
-    photometry_sha256_by_luminaire: dict[str, str] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=utc_now)
-
-
 class SimulationRun(StrictModel):
     run_id: str = Field(default_factory=lambda: uuid4().hex)
     kind: Literal["preview", "精算", "dialux_handoff"] = "preview"
