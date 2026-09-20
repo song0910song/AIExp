@@ -31,6 +31,7 @@ from .dialux_report import cross_validate, parse_dialux_report
 from .document_loader import load_document
 from .project_store import ProjectStore, RevisionConflictError
 from .photometry_assets import PhotometryAssetStore
+from .project_files import resolve_project_file
 from .redesign_service import (
     RelayoutRequest,
     RetrofitRequest,
@@ -458,15 +459,18 @@ def _update_at_latest_revision(
     raise last_conflict
 
 
-def _project_source(project_id: str, source: str, suffix: str) -> Path:
-    root = _project_directory(project_id).resolve()
-    value = Path(source)
-    target = value.resolve() if value.is_absolute() else (root / value).resolve()
-    if target != root and root not in target.parents:
-        raise ValueError("输入文件必须位于当前项目目录内")
-    if not target.is_file() or target.suffix.casefold() != suffix:
-        raise ValueError(f"项目中不存在可用的 {suffix} 文件：{source}")
-    return target
+def _project_source(
+    project_id: str,
+    source: str,
+    suffix: str | set[str] | frozenset[str],
+) -> Path:
+    suffixes = {suffix} if isinstance(suffix, str) else suffix
+    return resolve_project_file(
+        _project_directory(project_id),
+        project_id,
+        source,
+        suffixes=suffixes,
+    )
 
 
 @tool("analyze_dxf_design", args_schema=DxfAnalysisInput)
@@ -477,7 +481,17 @@ def analyze_dxf_design(project_id: str, source: str | None = None) -> dict:
     resolved = source or (state.floor_plan.asset.storage_path if state.floor_plan else None)
     if not resolved:
         return {"status": "needs_input", "message": "请先上传 DXF 平面图。"}
-    return {"status": "ok", "snapshot": extract_design(_project_source(project_id, resolved, ".dxf"))}
+    path = _project_source(project_id, resolved, {".dxf", ".dwg"})
+    if path.suffix.casefold() == ".dwg":
+        return {
+            "status": "needs_dxf_export",
+            "message": (
+                f"已找到 DWG 文件：{path.name}。当前 DIALux 灯位、评价网格和结果表的"
+                "深度提取仅支持 DXF，请将该图另存为 DXF 后上传。"
+            ),
+            "floor_plan": _data(state.floor_plan) if state.floor_plan else None,
+        }
+    return {"status": "ok", "snapshot": extract_design(path)}
 
 
 @tool("analyze_dialux_report", args_schema=DialuxReportInput)

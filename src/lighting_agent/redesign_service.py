@@ -20,6 +20,7 @@ from .calculations.field import calibrate, evaluate, load_fixture_kind, make_fix
 from .dialux_report import cross_validate, parse_dialux_report
 from .dxf_analysis import extract_design
 from .photometry_assets import PhotometryAssetStore
+from .project_files import ProjectFileResolutionError, resolve_project_file
 from .project_store import RevisionConflictError
 from .relayout import plan_relayout
 from .retrofit import plan_retrofit
@@ -81,37 +82,63 @@ class RetrofitRequest(RedesignBaseRequest):
         return self
 
 
-def _safe_source(root: Path, source: str, *, suffixes: set[str]) -> Path:
-    candidate = Path(source)
-    target = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
-    root_resolved = root.resolve()
-    if target != root_resolved and root_resolved not in target.parents:
-        raise RedesignError("输入文件必须位于当前项目目录内")
-    if not target.is_file():
-        raise RedesignError(f"输入文件不存在：{source}")
-    if target.suffix.casefold() not in suffixes:
-        raise RedesignError(f"输入文件类型不受支持：{target.suffix}")
-    return target
+def _safe_source(
+    root: Path,
+    source: str,
+    *,
+    suffixes: set[str],
+    project_id: str | None = None,
+) -> Path:
+    if project_id is None:
+        candidate = Path(source)
+        target = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+        root_resolved = root.resolve()
+        if target != root_resolved and root_resolved not in target.parents:
+            raise RedesignError("输入文件必须位于当前项目目录内")
+        if not target.is_file():
+            raise RedesignError(f"输入文件不存在：{source}")
+        if target.suffix.casefold() not in suffixes:
+            raise RedesignError(f"输入文件类型不受支持：{target.suffix}")
+        return target
+    try:
+        return resolve_project_file(root, project_id, source, suffixes=suffixes)
+    except ProjectFileResolutionError as error:
+        raise RedesignError(str(error)) from error
 
 
 def _resolve_dxf(root: Path, state: ProjectState, source: str | None) -> Path:
     resolved = source or (state.floor_plan.asset.storage_path if state.floor_plan else None)
     if not resolved:
         raise RedesignError("项目缺少 DXF；请先上传平面图或提供 dxf_source")
-    path = _safe_source(root, resolved, suffixes={".dxf"})
+    path = _safe_source(
+        root,
+        resolved,
+        suffixes={".dxf"},
+        project_id=state.project_id,
+    )
     return path
 
 
 def _resolve_report(root: Path, state: ProjectState, source: str | None) -> Path | None:
     if source:
-        return _safe_source(root, source, suffixes={".pdf"})
+        return _safe_source(
+            root,
+            source,
+            suffixes={".pdf"},
+            project_id=state.project_id,
+        )
     for run in reversed(state.simulation_runs):
         if run.source_kind != "dialux_pdf":
             continue
         for artifact in run.artifacts:
             if artifact.file_name.casefold().endswith(".pdf"):
                 try:
-                    return _safe_source(root, artifact.storage_path, suffixes={".pdf"})
+                    return _safe_source(
+                        root,
+                        artifact.storage_path,
+                        suffixes={".pdf"},
+                        project_id=state.project_id,
+                    )
                 except RedesignError:
                     continue
     return None
