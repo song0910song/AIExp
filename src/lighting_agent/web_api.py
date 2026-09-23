@@ -863,6 +863,7 @@ def create_app(
     dialux_api: DialuxAPI | None = None,
     directory_picker: Callable[[], Path | None] | None = None,
     dialux_image_analyzer: Callable[[bytes, str], DialuxVisionAnalysis] | None = None,
+    user_documents_directory: Path | None = None,
 ) -> FastAPI:
     ensure_data_directories()
     projects = project_store or WorkspaceProjectStore()
@@ -886,6 +887,7 @@ def create_app(
         settings,
     )
     picker = directory_picker or choose_workspace_directory
+    global_documents_directory = user_documents_directory or USER_DOCUMENTS_DIRECTORY
     workspace_selections: dict[str, Path] = {}
     workspace_selection_lock = Lock()
     agent_holder: dict[str, Any] = {}
@@ -1321,8 +1323,8 @@ def create_app(
             document = evidence.delete_document(source_hash)
         except EvidenceNotFoundError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
-        target = (USER_DOCUMENTS_DIRECTORY / Path(document.source_name).name).resolve()
-        root = USER_DOCUMENTS_DIRECTORY.resolve()
+        target = (global_documents_directory / Path(document.source_name).name).resolve()
+        root = global_documents_directory.resolve()
         if target.parent == root:
             target.unlink(missing_ok=True)
 
@@ -1365,13 +1367,19 @@ def create_app(
         if len(content) > MAX_DRAWING_BYTES:
             raise HTTPException(status_code=413, detail="文件不能超过 50 MB")
         storage_directory = (
-            USER_DOCUMENTS_DIRECTORY
+            global_documents_directory
             if project_id is None
             else project_directory(project_id) / f"{project_id}.documents"
         )
         storage_directory.mkdir(parents=True, exist_ok=True)
-        target = _unique_upload_target(storage_directory, safe_name)
-        await run_in_threadpool(target.write_bytes, content)
+        target, already_stored = await run_in_threadpool(
+            _document_upload_target,
+            storage_directory,
+            safe_name,
+            content,
+        )
+        if not already_stored:
+            await run_in_threadpool(target.write_bytes, content)
 
         def index_upload():
             document = load_document(target, allowed_root=storage_directory)
@@ -1380,7 +1388,8 @@ def create_app(
         try:
             document, chunk_count = await run_in_threadpool(index_upload)
         except DocumentLoadError as error:
-            await run_in_threadpool(target.unlink, missing_ok=True)
+            if not already_stored:
+                await run_in_threadpool(target.unlink, missing_ok=True)
             raise HTTPException(status_code=422, detail=str(error)) from error
         return {
             "source_name": document.source_name,
@@ -2356,6 +2365,19 @@ def _unique_upload_target(directory: Path, filename: str) -> Path:
     if not candidate.exists():
         return candidate
     return directory / f"{candidate.stem}-{uuid4().hex[:8]}{candidate.suffix}"
+
+
+def _document_upload_target(directory: Path, filename: str, content: bytes) -> tuple[Path, bool]:
+    """Reuse an identical upload instead of creating a random-suffixed copy."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    candidate = directory / filename
+    related = [candidate, *directory.glob(f"{candidate.stem}-*{candidate.suffix}")]
+    for existing in related:
+        if existing.is_file() and existing.stat().st_size == len(content):
+            if existing.read_bytes() == content:
+                return existing, True
+    return _unique_upload_target(directory, filename), False
 
 
 app = create_app()
