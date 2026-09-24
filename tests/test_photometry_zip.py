@@ -7,7 +7,6 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 
-from lighting_agent.deliverables import build_dialux_task_archive
 from lighting_agent.dialux_api import DialuxAPI, DialuxAPIError
 from lighting_agent.photometry_assets import PhotometryAssetStore
 from lighting_agent.schemas import DesignBrief, LuminaireCandidate, ProjectState
@@ -103,68 +102,8 @@ def test_dialux_rejects_cross_host_redirects_before_download() -> None:
         )
 
 
-def test_task_archive_embeds_persisted_assets_using_luminaire_article_name(tmp_path) -> None:
-    state = ProjectState(
-        brief=DesignBrief(project_name="Task archive"),
-        luminaires=[
-            LuminaireCandidate(
-                luminaire_id="fixture1",
-                article_name="Panel/4000: 16W",
-                detail_url="https://luminaires.dialux.com/zh/article/fixture1",
-                has_photometry_download=True,
-            )
-        ],
-        selected_luminaire_ids=["fixture1"],
-    )
-
-    assets = PhotometryAssetStore(tmp_path / "projects", Downloader(_vendor_zip()))
-    asset = assets.download(state, "fixture1")
-    assert asset.status == "downloaded"
-    assert len(asset.extracted_files) == 2
-
-    archive_bytes = build_dialux_task_archive(state, assets)
-
-    with ZipFile(BytesIO(archive_bytes)) as archive:
-        assert set(archive.namelist()) == {
-            "dialux-task.json",
-            "manifest.json",
-            "README.txt",
-            "photometry/Panel_4000_ 16W-fixture1.zip",
-            "photometry/extracted/Panel_4000_ 16W-fixture1/fixture.uld",
-            "photometry/extracted/Panel_4000_ 16W-fixture1/fixture.ies",
-        }
-        manifest = json.loads(archive.read("dialux-task.json"))
-        assert manifest["candidates"][0]["photometry"]["bundle_file"] == "photometry/Panel_4000_ 16W-fixture1.zip"
-        assert archive.read("photometry/Panel_4000_ 16W-fixture1.zip") == _vendor_zip()
 
 
-def test_task_archive_downloads_missing_photometry_before_export(tmp_path) -> None:
-    state = ProjectState(
-        brief=DesignBrief(project_name="Automatic photometry export"),
-        luminaires=[
-            LuminaireCandidate(
-                luminaire_id="fixture1",
-                article_name="Automatic fixture",
-                detail_url="https://luminaires.dialux.com/zh/article/fixture1",
-                has_photometry_download=True,
-            )
-        ],
-        selected_luminaire_ids=["fixture1"],
-    )
-    downloader = Downloader(_vendor_zip())
-    assets = PhotometryAssetStore(tmp_path / "projects", downloader)
-
-    archive_bytes = build_dialux_task_archive(state, assets)
-
-    assert downloader.calls == ["https://luminaires.dialux.com/zh/article/fixture1"]
-    with ZipFile(BytesIO(archive_bytes)) as archive:
-        names = set(archive.namelist())
-        assert "photometry/Automatic fixture-fixture1.zip" in names
-        assert "photometry/extracted/Automatic fixture-fixture1/fixture.ies" in names
-        assert "photometry/extracted/Automatic fixture-fixture1/fixture.uld" in names
-        manifest = json.loads(archive.read("dialux-task.json"))
-        assert manifest["photometry_downloads"]["unavailable"] == []
-        assert manifest["candidates"][0]["photometry"]["bundle_status"] == "downloaded"
 
 
 def test_failed_download_is_persisted_and_can_be_retried(tmp_path) -> None:
@@ -190,35 +129,6 @@ def test_failed_download_is_persisted_and_can_be_retried(tmp_path) -> None:
     assert assets.list_assets(state)[0].status == "downloaded"
 
 
-def test_task_archive_downloads_only_final_selected_luminaires(tmp_path) -> None:
-    selected = LuminaireCandidate(
-        luminaire_id="final-fixture",
-        article_name="Final fixture",
-        detail_url="https://luminaires.dialux.com/zh/article/final-fixture",
-        has_photometry_download=True,
-    )
-    candidate = LuminaireCandidate(
-        luminaire_id="search-candidate",
-        article_name="Search candidate",
-        detail_url="https://luminaires.dialux.com/zh/article/search-candidate",
-        has_photometry_download=True,
-    )
-    state = ProjectState(
-        brief=DesignBrief(project_name="Final selection export"),
-        luminaires=[candidate, selected],
-        selected_luminaire_ids=[selected.luminaire_id],
-    )
-    downloader = Downloader(_vendor_zip())
-    assets = PhotometryAssetStore(tmp_path / "projects", downloader)
-
-    archive_bytes = build_dialux_task_archive(state, assets)
-
-    assert downloader.calls == [selected.detail_url]
-    with ZipFile(BytesIO(archive_bytes)) as archive:
-        manifest = json.loads(archive.read("dialux-task.json"))
-        assert manifest["selected_luminaire_ids"] == [selected.luminaire_id]
-        assert [item["luminaire_id"] for item in manifest["candidates"]] == [selected.luminaire_id]
-        assert all("search-candidate" not in name for name in archive.namelist())
 
 
 def test_design_assets_allow_traced_saved_candidates_without_final_selection(tmp_path) -> None:
@@ -245,23 +155,6 @@ def test_design_assets_allow_traced_saved_candidates_without_final_selection(tmp
         assets.download(state, candidate.luminaire_id)
 
 
-def test_task_archive_skips_photometry_until_a_final_luminaire_is_selected(tmp_path) -> None:
-    candidate = LuminaireCandidate(
-        luminaire_id="search-candidate",
-        article_name="Search candidate",
-        detail_url="https://luminaires.dialux.com/zh/article/search-candidate",
-        has_photometry_download=True,
-    )
-    state = ProjectState(brief=DesignBrief(project_name="Selection required"), luminaires=[candidate])
-    downloader = Downloader(_vendor_zip())
-
-    archive_bytes = build_dialux_task_archive(state, PhotometryAssetStore(tmp_path / "projects", downloader))
-
-    assert downloader.calls == []
-    with ZipFile(BytesIO(archive_bytes)) as archive:
-        manifest = json.loads(archive.read("dialux-task.json"))
-        assert manifest["selection"]["status"] == "pending"
-        assert manifest["candidates"] == []
 
 
 def test_photometry_store_rejects_compression_bombs(tmp_path) -> None:

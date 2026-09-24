@@ -9,13 +9,7 @@ from typing import Any
 from .agent import interactive_chat, invoke_agent
 from .calculations import calculate_lumen_method
 from .dialux_api import DialuxAPI
-from .deliverables import (
-    build_design_report,
-    build_dialux_task_archive,
-    build_simulation_run_from_handoff,
-    read_dialux_task_package,
-)
-from .photometry_assets import PhotometryAssetStore
+from .deliverables import build_unverified_simulation_run
 from .document_loader import load_document
 from .project_store import ProjectStore
 from .rag import create_evidence_store, format_evidence
@@ -93,18 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
     luminaire.add_argument("--min-ip-rating")
     luminaire.add_argument("--max-results", type=int, default=5)
 
-    task = subcommands.add_parser("create-dialux-task", help="create a DIALux evo handoff package")
-    task.add_argument("project_id")
-    task.add_argument("--revision", type=int, required=True)
-
-    report = subcommands.add_parser("generate-report", help="create a reviewable Markdown design report")
-    report.add_argument("project_id")
-    report.add_argument("--revision", type=int, required=True)
-
-    result = subcommands.add_parser("import-dialux-result", help="import a structured DIALux result and verify it against the current handoff")
+    result = subcommands.add_parser("import-dialux-result", help="import DIALux evidence as an unverified record")
     result.add_argument("project_id")
     result.add_argument("--revision", type=int, required=True)
-    result.add_argument("--handoff-id", required=True)
     result.add_argument("--source-kind", choices=["dialux_pdf", "dialux_csv", "dialux_json", "manual_form"], default="manual_form")
     result.add_argument("--maintained-lx", type=float)
     result.add_argument("--minimum-lx", type=float)
@@ -189,40 +174,16 @@ def main(argv: list[str] | None = None) -> None:
         )
         _print({"candidates": DialuxAPI().search(request), "notice": "候选灯具仍需 DIALux evo 仿真核验。"})
         return
-    if args.command in {"create-dialux-task", "generate-report"}:
-        state = store.get(args.project_id)
-        if state.revision != args.revision:
-            raise ValueError(f"Project revision is {state.revision}, but command expected {args.revision}")
-        if args.command == "create-dialux-task":
-            target = store.directory / f"{state.project_id}.dialux-task.zip"
-            target.write_bytes(build_dialux_task_archive(state, PhotometryAssetStore(store.directory, DialuxAPI())))
-            _print({"task_package": str(target), "project_revision": state.revision})
-        else:
-            target = store.directory / f"{state.project_id}.design-report.md"
-            target.write_text(build_design_report(state), encoding="utf-8")
-            _print({"report": str(target), "project_revision": state.revision})
-        return
     if args.command == "import-dialux-result":
         state = store.get(args.project_id)
         if state.revision != args.revision:
             raise ValueError(f"Project revision is {state.revision}, but command expected {args.revision}")
-        handoff_path = store.directory / f"{state.project_id}.dialux-task.zip"
-        if not handoff_path.exists():
-            raise ValueError("No DIALux task package exists for this project; create one first")
-        package = read_dialux_task_package(handoff_path.read_bytes())
         metrics = SimulationMetrics(
             maintained_illuminance_lx=args.maintained_lx,
             minimum_illuminance_lx=args.minimum_lx,
         )
-        run = build_simulation_run_from_handoff(
-            package,
-            project_id=state.project_id,
-            expected_revision=args.revision,
-            handoff_id=args.handoff_id,
-            selected_luminaire_ids=state.selected_luminaire_ids,
-            metrics=metrics,
-            source_kind=args.source_kind,
-            solver_version=args.solver_version,
+        run = build_unverified_simulation_run(
+            state, metrics=metrics, source_kind=args.source_kind, solver_version=args.solver_version,
         )
         updated = store.append_simulation_run(state.project_id, args.revision, run)
         _print(

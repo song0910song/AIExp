@@ -96,7 +96,7 @@ def _dialux_check(state: ProjectState, target: float | None) -> IlluminanceMetho
             status="unverified",
             target_illuminance_lx=target,
             source_id=run.run_id,
-            explanation="DIALux 结果与当前任务包或项目版本不匹配。",
+            explanation="DIALux 结果尚未验证与当前方案一致；存量资料仅作为现状分析证据。",
         )
     observed = run.metrics.maintained_illuminance_lx if run.metrics is not None else None
     if observed is None:
@@ -153,10 +153,10 @@ def evaluate_illuminance(state: ProjectState) -> IlluminanceVerification:
         message = "先完成流明法初算，再与 DIALux 结果共同检验。"
     elif dialux.status == "stale":
         overall, action = "pending", "rerun_dialux"
-        message = "项目输入已变化，请基于最新任务包重新运行 DIALux。"
+        message = "项目输入已变化，请基于最新设计方案重新运行 DIALux。"
     elif dialux.status == "unverified":
         overall, action = "pending", "rerun_dialux"
-        message = "当前 DIALux 证据无法对应到最新任务包，请重新导出并上传。"
+        message = "当前 DIALux 资料作为现状证据；请结合 DXF 平面图进行存量重设计，最终方案需在 DIALux 中复算。"
     else:
         overall, action = "pending", "await_dialux_result"
         message = "流明法已完成，等待上传含维持照度的 DIALux 仿真图片或设计报告。"

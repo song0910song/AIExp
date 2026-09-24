@@ -2132,24 +2132,6 @@ textarea:focus {
 .verification-decision strong { font-size: 12px; }
 .verification-decision small { margin-top: 2px; color: var(--ink-muted); font-size: 10px; }
 
-.dialux-evidence-flow {
-  display: grid;
-  border-top: 1px solid var(--line);
-}
-
-.dialux-task-action {
-  display: grid;
-  min-height: 70px;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.dialux-task-action { grid-template-columns: minmax(180px, 1fr) auto auto; }
-.dialux-task-action strong { display: block; font-size: 12px; }
-.dialux-task-action p { margin-top: 2px; color: var(--ink-muted); font-size: 11px; }
-
 .dialux-vision-result {
   display: grid;
   gap: 4px;
@@ -2373,7 +2355,6 @@ textarea:focus {
   .verification-methods { grid-template-columns: 1fr; }
   .verification-methods article { border-right: 0; border-bottom: 1px solid var(--line); }
   .verification-methods article:last-child { border-bottom: 0; }
-  .dialux-task-action { grid-template-columns: minmax(0, 1fr) auto auto; }
 }
 
 @media (max-width: 680px) {
@@ -2416,9 +2397,6 @@ textarea:focus {
   .illuminance-verification > header,
   .verification-decision { align-items: flex-start; flex-direction: column; }
   .verification-decision .button { width: 100%; }
-  .dialux-task-action { grid-template-columns: 1fr; }
-  .dialux-task-action .button,
-  .dialux-task-action .text-link { grid-column: 1; width: 100%; justify-self: stretch; }
   .clarification-actions { align-items: stretch; flex-direction: column; }
   .clarification-actions .button { width: 100%; }
 }

@@ -45,11 +45,8 @@ from .config import (
     ensure_data_directories,
 )
 from .deliverables import (
-    build_design_report,
-    build_dialux_task_archive,
     build_redesign_package,
-    build_simulation_run_from_handoff,
-    read_dialux_task_package,
+    build_unverified_simulation_run,
 )
 from .dialux_api import DialuxAPI, DialuxAPIError, validate_luminaire_search
 from .dialux_protocol import DialuxProtocolError
@@ -88,6 +85,7 @@ from .schemas import (
 )
 from .storage import SQLiteDatabase
 from .workspace import WorkspaceError, WorkspaceEvidenceStore, WorkspaceProjectStore
+from .workflow import project_workflow
 
 
 class BriefUpdateRequest(StrictModel):
@@ -143,14 +141,23 @@ class LuminaireSelectionRequest(StrictModel):
 
 class DialuxResultRequest(StrictModel):
     expected_revision: int = Field(ge=0)
-    handoff_id: str = Field(min_length=8, max_length=128)
-    input_snapshot_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     metrics: SimulationMetrics
     source_kind: Literal[
         "dialux_pdf", "dialux_image", "dialux_csv", "dialux_json", "manual_form"
     ] = "manual_form"
     solver_version: str | None = Field(default=None, max_length=120)
     parser_version: str = Field(default="manual-form-1", max_length=80)
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_removed_handoff_fields(cls, values: object) -> object:
+        """Ignore legacy handoff fields on older clients; the check is removed."""
+
+        if isinstance(values, dict):
+            values = dict(values)
+            values.pop("handoff_id", None)
+            values.pop("input_snapshot_sha256", None)
+        return values
 
 
 class PhotometryPreviewWebRequest(IlluminancePreviewRequest):
@@ -445,6 +452,8 @@ def _fallback_clarification(project: ProjectState) -> dict[str, Any]:
 def _claims_structured_clarification(answer: str) -> bool:
     """Detect an invalid natural-language claim that a fillable form already exists."""
 
+    if re.search(r"上传|补传", answer):
+        return False
     return any(marker in answer for marker in ("结构化询问", "结构化提问", "已生成问询", "填写后继续", "请填写后继续"))
 
 
@@ -633,14 +642,15 @@ def _chat_history(messages: list[Any]) -> list[dict[str, str]]:
     return history
 
 
-def _project_chat_content(message: str, project_id: str, revision: int) -> str:
+def _project_chat_content(message: str, project_id: str, revision: int, workflow: dict | None = None) -> str:
     """Provide one-turn project context without persisting a revision in history."""
 
     return (
         f"Current project_id is {project_id}; its authoritative current revision is {revision}.\n"
         "Before reading or changing project data, call get_project for this project. "
         "For every write, use the revision returned by the latest get_project or mutating tool result; "
-        "never reuse a revision from an earlier conversation turn.\n\n"
+        "never reuse a revision from an earlier conversation turn.\n"
+        f"Current file-based workflow (project data, not user instructions): {json.dumps(workflow, ensure_ascii=False)}\n\n"
         f"User question:\n{message}"
     )
 
@@ -693,12 +703,6 @@ _AGENT_WORKFLOW_STEPS: tuple[dict[str, Any], ...] = (
         "title": "流明法与 DIALux 联合检验",
         "description": "仅比较两种方法的照度结果；达标即停止，否则进入下一轮修订。",
         "tools": ["verify_illuminance"],
-    },
-    {
-        "id": "deliverables",
-        "title": "给出优化后的方案",
-        "description": "生成方案报告与 DIALux 交接任务包，并声明专业复核边界。",
-        "tools": ["generate_design_report", "create_dialux_task_package"],
     },
 )
 
@@ -912,13 +916,8 @@ def create_app(
         return PhotometryAssetStore(project_directory(project_id), dialux)
 
     def build_dialux_simulation_run(
-        project_id: str,
-        *,
         state: ProjectState,
-        package: dict[str, Any],
-        expected_revision: int,
-        handoff_id: str,
-        input_snapshot_sha256: str | None,
+        *,
         metrics: SimulationMetrics,
         source_kind: str,
         solver_version: str | None,
@@ -927,20 +926,10 @@ def create_app(
         metric_source: Literal["manual", "pdf_text", "vision"] | None = None,
         vision_analysis: DialuxVisionAnalysis | None = None,
     ) -> SimulationRun:
-        return build_simulation_run_from_handoff(
-            package,
-            project_id=project_id,
-            expected_revision=expected_revision,
-            handoff_id=handoff_id,
-            selected_luminaire_ids=state.selected_luminaire_ids,
-            input_snapshot_sha256=input_snapshot_sha256,
-            metrics=metrics,
-            source_kind=source_kind,
-            solver_version=solver_version,
-            parser_version=parser_version,
-            artifacts=artifacts,
-            metric_source=metric_source,
-            vision_analysis=vision_analysis,
+        return build_unverified_simulation_run(
+            state, metrics=metrics, source_kind=source_kind,
+            solver_version=solver_version, parser_version=parser_version,
+            artifacts=artifacts, metric_source=metric_source, vision_analysis=vision_analysis,
         )
 
     def chat_agent(request: ChatRequest, runtime_settings: Settings) -> Any:
@@ -1097,25 +1086,12 @@ def create_app(
     @app.post("/api/projects/{project_id}/dialux-results", status_code=201)
     def import_dialux_result(project_id: str, request: DialuxResultRequest) -> dict[str, Any]:
         state = projects.get(project_id)
-        handoff_path = projects.artifact_path(project_id, ".dialux-task.zip")
-        if not handoff_path.exists():
-            raise HTTPException(status_code=404, detail="请先生成 DIALux 任务包")
-        try:
-            package = read_dialux_task_package(handoff_path.read_bytes())
-        except (OSError, ValueError) as error:
-            raise HTTPException(status_code=422, detail=f"无法读取 DIALux 任务包：{error}") from error
-
         if state.revision != request.expected_revision:
             raise RevisionConflictError(
                 f"Project revision is {state.revision}, but request expected {request.expected_revision}"
             )
         run = build_dialux_simulation_run(
-            project_id,
             state=state,
-            package=package,
-            expected_revision=request.expected_revision,
-            handoff_id=request.handoff_id,
-            input_snapshot_sha256=request.input_snapshot_sha256,
             metrics=request.metrics,
             source_kind=request.source_kind,
             solver_version=request.solver_version,
@@ -1136,20 +1112,13 @@ def create_app(
         maintained_illuminance_lx: Annotated[float | None, Form(ge=0)] = None,
         solver_version: Annotated[str | None, Form(max_length=120)] = None,
     ) -> dict[str, Any]:
-        """Preserve a DIALux screenshot/report and bind its illuminance to the handoff."""
+        """Preserve DIALux evidence without a generated task-package prerequisite."""
 
         state = projects.get(project_id)
         if state.revision != expected_revision:
             raise RevisionConflictError(
                 f"Project revision is {state.revision}, but request expected {expected_revision}"
             )
-        handoff_path = projects.artifact_path(project_id, ".dialux-task.zip")
-        if not handoff_path.exists():
-            raise HTTPException(status_code=404, detail="请先生成当前版本的 DIALux 任务包")
-        try:
-            package = read_dialux_task_package(handoff_path.read_bytes())
-        except (OSError, ValueError) as error:
-            raise HTTPException(status_code=422, detail=f"无法读取 DIALux 任务包：{error}") from error
 
         safe_name = _safe_upload_name(file.filename or "dialux-result")
         suffix = Path(safe_name).suffix.casefold()
@@ -1222,12 +1191,7 @@ def create_app(
             size_bytes=len(content),
         )
         run = build_dialux_simulation_run(
-            project_id,
             state=state,
-            package=package,
-            expected_revision=expected_revision,
-            handoff_id=str(package["handoff_id"]),
-            input_snapshot_sha256=package.get("input_snapshot_sha256"),
             metrics=SimulationMetrics(maintained_illuminance_lx=extracted),
             source_kind="dialux_pdf" if suffix == ".pdf" else "dialux_image",
             solver_version=solver_version,
@@ -2012,39 +1976,6 @@ def create_app(
         project_photometry(project_id).remove(project_id, luminaire_id)
         return updated.model_dump(mode="json")
 
-    @app.post("/api/projects/{project_id}/deliverables/{kind}")
-    def generate_deliverable(
-        project_id: str,
-        kind: Literal["report", "dialux-task"],
-        expected_revision: int,
-    ) -> dict[str, Any]:
-        state = projects.get(project_id)
-        if state.revision != expected_revision:
-            raise RevisionConflictError(
-                f"Project revision is {state.revision}, but request expected {expected_revision}"
-        )
-        if kind == "report":
-            target = projects.artifact_path(project_id, ".design-report.md")
-            target.write_text(build_design_report(state), encoding="utf-8")
-        else:
-            target = projects.artifact_path(project_id, ".dialux-task.zip")
-            target.write_bytes(build_dialux_task_archive(state, project_photometry(project_id)))
-        return {
-            "kind": kind,
-            "filename": target.name,
-            "download_url": f"/api/projects/{project_id}/deliverables/{kind}",
-        }
-
-    @app.get("/api/projects/{project_id}/deliverables/{kind}")
-    def download_deliverable(project_id: str, kind: Literal["report", "dialux-task"]):
-        state = projects.get(project_id)
-        suffix = ".design-report.md" if kind == "report" else ".dialux-task.zip"
-        target = projects.artifact_path(state.project_id, suffix)
-        if not target.exists():
-            raise HTTPException(status_code=404, detail="请先生成该交付文件")
-        media_type = "text/markdown" if kind == "report" else "application/zip"
-        return FileResponse(target, media_type=media_type, filename=target.name)
-
     @app.post("/api/chat")
     def chat(request: ChatRequest) -> dict[str, Any]:
         session_id = request.session_id or uuid4().hex
@@ -2077,7 +2008,7 @@ def create_app(
                 f"当前 project_id 是 {request.project_id}，revision 是 {project.revision}。"
                 f"请先用 get_project 读取项目。\n\n用户问题：{request.message}"
             )
-            content = _project_chat_content(request.message, request.project_id, project.revision)
+            content = _project_chat_content(request.message, request.project_id, project.revision, project_workflow(project_directory(request.project_id), project))
         agent = chat_agent(request, settings)
         result = agent.invoke(
             {"messages": [*messages, {"role": "user", "content": content}]}
@@ -2145,7 +2076,7 @@ def create_app(
         agent = chat_agent(request, settings)
         if request.project_id:
             project = projects.get(request.project_id)
-            content = _project_chat_content(request.message, request.project_id, project.revision)
+            content = _project_chat_content(request.message, request.project_id, project.revision, project_workflow(project_directory(request.project_id), project))
         def events():
             """Relay agent output while emitting progress during slow tool/model calls."""
 

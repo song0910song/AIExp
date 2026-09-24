@@ -60,7 +60,7 @@ class PhotometryAssetStore:
             raise ValueError(
                 "Only final selected luminaires can download photometry assets"
             )
-        return self._download(state, luminaire_id, purpose="dialux_task")
+        return self._download(state, luminaire_id, purpose="design_evaluation")
 
     def _download(
         self,
@@ -128,8 +128,8 @@ class PhotometryAssetStore:
     ) -> list[PhotometryAsset]:
         """Download saved candidates for traced design evaluation.
 
-        Unlike DIALux handoff assets these candidates need not be final user
-        selections. They remain project-scoped and are tagged with the design
+        These candidates need not be final user selections.
+        They remain project-scoped and are tagged with the design
         run that requested them.
         """
 
@@ -162,31 +162,6 @@ class PhotometryAssetStore:
             result.append(asset)
         return result
 
-    def ensure_task_assets(self, state: ProjectState) -> list[PhotometryAsset]:
-        """Download every advertised photometry file required by a task package.
-
-        A task handoff must be self-contained.  Earlier exports only embedded
-        assets that had been downloaded manually through the luminaire endpoint,
-        which silently produced ZIPs without IES/LDT/ULD files.  Reuse complete
-        saved assets, but retry missing, failed, or partially deleted ones when
-        a new DIALux task package is requested.
-        """
-
-        current = {asset.luminaire_id: asset for asset in self.list_assets(state)}
-        for luminaire in state.selected_luminaires():
-            if not luminaire.has_photometry_download:
-                continue
-            asset = current[luminaire.luminaire_id]
-            if asset.status == "downloaded" and self._asset_files_exist(state.project_id, asset):
-                updated = asset.model_copy(
-                    update={"purposes": list(dict.fromkeys([*asset.purposes, "dialux_task"]))}
-                )
-                if updated != asset:
-                    current[luminaire.luminaire_id] = updated
-                    self._save(state.project_id, current)
-                continue
-            current[luminaire.luminaire_id] = self.download(state, luminaire.luminaire_id)
-        return [current[luminaire.luminaire_id] for luminaire in state.selected_luminaires()]
 
     @staticmethod
     def _quality_check(

@@ -22,6 +22,7 @@ from .dxf_analysis import extract_design
 from .photometry_assets import PhotometryAssetStore
 from .project_files import ProjectFileResolutionError, resolve_project_file
 from .project_store import RevisionConflictError
+from .workflow import dialux_report_sources
 from .relayout import plan_relayout
 from .retrofit import plan_retrofit
 from .schemas import (
@@ -127,21 +128,10 @@ def _resolve_report(root: Path, state: ProjectState, source: str | None) -> Path
             suffixes={".pdf"},
             project_id=state.project_id,
         )
-    for run in reversed(state.simulation_runs):
-        if run.source_kind != "dialux_pdf":
-            continue
-        for artifact in run.artifacts:
-            if artifact.file_name.casefold().endswith(".pdf"):
-                try:
-                    return _safe_source(
-                        root,
-                        artifact.storage_path,
-                        suffixes={".pdf"},
-                        project_id=state.project_id,
-                    )
-                except RedesignError:
-                    continue
-    return None
+    sources = dialux_report_sources(root, state)
+    if len(sources) > 1:
+        raise RedesignError("项目中存在多份 DIALux PDF 报告，请确认后提供 report_source")
+    return _safe_source(root, sources[0], suffixes={".pdf"}, project_id=state.project_id) if sources else None
 
 
 def _fixture_path(

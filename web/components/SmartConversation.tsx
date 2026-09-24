@@ -55,8 +55,10 @@ const toolLabels: Record<string, string> = {
   check_design_rules: "规则校核",
   search_luminaires: "检索 DIALux 灯具",
   select_luminaires: "确认最终选定灯具",
-  generate_design_report: "生成设计报告",
-  create_dialux_task_package: "生成 DIALux 任务包",
+  analyze_dxf_design: "分析现状平面图",
+  analyze_dialux_report: "分析 DIALux 报告",
+  propose_relayout: "存量照明自由重排",
+  propose_retrofit: "存量照明原位替换",
 };
 
 function statusLabel(status: AgentToolRun["status"]) {
@@ -380,7 +382,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
       floorPlanContext.join("\n"),
       dialuxContexts.join("\n"),
       documentNames.length ? "设计报告和其他项目资料已进入本项目证据范围，可在需要时检索其内容。" : "",
-      floorPlans.length || documentNames.length ? "请先基于已上传资料核对任务书条件和图纸信息，再继续照明分析、选灯和初步计算。" : "",
+      floorPlans.length || documentNames.length ? "请读取当前项目并检查本次和此前上传的资料。若 DIALux DXF 平面图和 PDF 报告齐全，先解析并交叉校验，直接进入存量照明重设计；若选型已完成但文件未齐，只用文字询问缺失文件，不生成表格或问询卡片。" : "",
       dialuxContexts.length ? "请明确说明本轮 DIALux 结果是否达到目标照度，以及下一步应继续调整还是结束迭代。" : "",
     ].filter(Boolean).join("\n\n");
     const timestamp = Date.now();

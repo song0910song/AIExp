@@ -116,7 +116,6 @@ export type SimulationRun = {
   status: "pending" | "running" | "succeeded" | "failed" | "stale" | "unverified" | "cancelled";
   input_project_revision: number;
   solver_version: string | null;
-  handoff_id: string | null;
   source_file: string | null;
   source_kind: "dialux_pdf" | "dialux_image" | "dialux_csv" | "dialux_json" | "manual_form" | null;
   artifacts: SimulationArtifact[];

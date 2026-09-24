@@ -118,7 +118,7 @@ export function OverviewPanel({ project, onStartAgent }: { project: Project; onS
             ))}
           </div>
         ) : (
-          <EmptyState title="尚无最终选定灯具">在智能对话中完成灯具选型并确认最终型号后，将在此以卡片展示；配光文件可通过 DIALux 任务包手动使用。</EmptyState>
+          <EmptyState title="尚无最终选定灯具">在智能对话中完成灯具选型并确认最终型号后，将在此以卡片展示；上传 DXF 平面图和 DIALux PDF 报告后可继续存量照明重设计。</EmptyState>
         )}
       </section>
     </div>

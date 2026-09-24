@@ -237,7 +237,7 @@ export function LightingWorkbench() {
               <div className="app-logo app-logo-large" aria-hidden="true"><span /><span /><span /></div>
               <p className="eyebrow">LIGHTING DESIGN AGENT</p>
               <h1>开始一个照明设计项目</h1>
-              <p>创建项目后，可在会话中导入 CAD 平面图、检索规范、完成初步计算、灯具筛选和 DIALux 任务包交付。</p>
+              <p>可先通过文字说明完成灯具选型，再上传 DXF 平面图和 DIALux PDF 报告；资料齐全后，分析现状并进入存量照明重设计。</p>
               <button className="button button-primary" onClick={() => setCreateOpen(true)}><Plus size={16} />新建项目</button>
             </section>
           ) : section === "overview" ? (

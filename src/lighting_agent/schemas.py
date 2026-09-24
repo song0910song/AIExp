@@ -293,10 +293,7 @@ class SimulationRun(StrictModel):
     solver_version: str | None = None
     artifact_path: str | None = None
     error: str | None = None
-    handoff_id: str | None = Field(default=None, min_length=8, max_length=128)
-    input_snapshot_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     selected_luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
-    photometry_sha256_by_luminaire: dict[str, str] = Field(default_factory=dict)
     source_file: str | None = None
     source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     source_kind: Literal[
@@ -319,9 +316,12 @@ class SimulationRun(StrictModel):
 
     @model_validator(mode="before")
     @classmethod
-    def drop_legacy_scene_revision(cls, values: Any) -> Any:
+    def drop_removed_fields(cls, values: Any) -> Any:
         if isinstance(values, dict):
             values.pop("input_scene_revision", None)
+            values.pop("handoff_id", None)
+            values.pop("input_snapshot_sha256", None)
+            values.pop("photometry_sha256_by_luminaire", None)
         return values
 
 

@@ -1,25 +1,17 @@
-"""First-phase tests: simulation runs, handoff identity and DIALux result import."""
+"""First-phase tests: simulation runs and DIALux result import."""
 
 from __future__ import annotations
 
 import json
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable
-from zipfile import ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
 
 from lighting_agent import main as cli
 
-from lighting_agent.deliverables import (
-    build_dialux_task_archive,
-    build_dialux_task_package,
-    read_dialux_task_package,
-)
 from lighting_agent.dialux_results import DialuxVisionError
-from lighting_agent.photometry_assets import PhotometryAssetStore
 from lighting_agent.project_store import ProjectStore, RevisionConflictError
 from lighting_agent.rag import LocalEvidenceStore
 from lighting_agent.schemas import (
@@ -80,7 +72,7 @@ def make_client(
 
 
 def _add_selected_luminaire(store: ProjectStore, project_id: str) -> ProjectState:
-    """Save one final-selected luminaire so a DIALux handoff can be generated."""
+    """Save one final-selected luminaire for current and historical result tests."""
     candidate = LuminaireCandidate(
         luminaire_id="fixture-1",
         article_name="Fixture 1",
@@ -89,15 +81,6 @@ def _add_selected_luminaire(store: ProjectStore, project_id: str) -> ProjectStat
     )
     saved, _, _ = store.append_luminaires(project_id, 0, [candidate])
     return store.set_selected_luminaires(project_id, saved.revision, ["fixture-1"])
-
-
-def _generate_handoff(client: TestClient, project_id: str, revision: int) -> dict:
-    generated = client.post(
-        f"/api/projects/{project_id}/deliverables/dialux-task",
-        params={"expected_revision": revision},
-    )
-    assert generated.status_code == 200
-    return generated.json()
 
 
 def _matching_run(revision: int = 0) -> SimulationRun:
@@ -123,10 +106,21 @@ def test_simulation_run_json_round_trip_and_legacy_drop() -> None:
     assert restored.run_id == run.run_id
     assert restored.verification_status == "matched"
     assert restored.metrics is not None
+    assert "handoff_id" not in payload
 
-    legacy = {**payload, "input_scene_revision": 3}
+    legacy = {
+        **payload,
+        "input_scene_revision": 3,
+        "handoff_id": "handoff-0123456789abcdef",
+        "input_snapshot_sha256": "a" * 64,
+        "photometry_sha256_by_luminaire": {"fixture-1": "b" * 64},
+    }
     legacy_restored = SimulationRun.model_validate(legacy)
-    assert "input_scene_revision" not in legacy_restored.model_dump(mode="json")
+    dumped = legacy_restored.model_dump(mode="json")
+    assert "input_scene_revision" not in dumped
+    assert "handoff_id" not in dumped
+    assert "input_snapshot_sha256" not in dumped
+    assert "photometry_sha256_by_luminaire" not in dumped
 
 
 def test_store_append_simulation_run_records_revision(tmp_path) -> None:
@@ -193,123 +187,29 @@ def test_selected_luminaire_change_marks_simulation_stale(tmp_path) -> None:
     assert changed.workflow_status == "needs_revision"
 
 
-def test_handoff_package_has_stable_identity() -> None:
-    state = __import__("lighting_agent.schemas", fromlist=["ProjectState"]).ProjectState(
-        brief=DesignBrief(project_name="交接身份", area_m2=30),
-    )
-    package = build_dialux_task_package(state)
-
-    assert package["handoff_id"].startswith("handoff-")
-    assert len(package["input_snapshot_sha256"]) == 64
-    assert package["input_snapshot"]["project_id"] == state.project_id
-    assert package["input_snapshot"]["project_revision"] == state.revision
-    # The handoff id is derived from the snapshot, so identical inputs stay stable.
-    assert build_dialux_task_package(state)["handoff_id"] == package["handoff_id"]
 
 
-def test_handoff_archive_embeds_identity_readable_back(tmp_path) -> None:
-    state = __import__("lighting_agent.schemas", fromlist=["ProjectState"]).ProjectState(
-        brief=DesignBrief(project_name="交接归档"),
-        luminaires=[
-            LuminaireCandidate(
-                luminaire_id="fixture-1",
-                article_name="Fixture 1",
-                detail_url="https://example.test/fixture-1",
-            )
-        ],
-        selected_luminaire_ids=["fixture-1"],
-    )
-    assets = PhotometryAssetStore(tmp_path / "projects", downloader=object())
-    archive_bytes = build_dialux_task_archive(state, assets)
-
-    package = read_dialux_task_package(archive_bytes)
-
-    assert package["handoff_id"].startswith("handoff-")
-    assert len(package["input_snapshot_sha256"]) == 64
-    assert package["project_id"] == state.project_id
 
 
-def _read_handoff_package(tmp_path, project_id: str) -> dict:
-    zip_path = tmp_path / "projects" / f"{project_id}.dialux-task.zip"
-    with ZipFile(zip_path) as archive:
-        return json.loads(archive.read("dialux-task.json"))
-
-
-def test_dialux_result_import_matches_current_handoff(tmp_path) -> None:
+def test_dialux_result_import_is_unverified(tmp_path) -> None:
     client = make_client(tmp_path)
-    project = client.post("/api/projects", json={"project_name": "结果回灌"}).json()
-    project_id = project["project_id"]
-
-    store = ProjectStore(tmp_path / "projects")
-    state = _add_selected_luminaire(store, project_id)
-    _generate_handoff(client, project_id, state.revision)
-    package = _read_handoff_package(tmp_path, project_id)
-
-    imported = client.post(
-        f"/api/projects/{project_id}/dialux-results",
-        json={
-            "expected_revision": state.revision,
-            "handoff_id": package["handoff_id"],
-            "input_snapshot_sha256": package["input_snapshot_sha256"],
-            "source_kind": "manual_form",
-            "metrics": {
-                "maintained_illuminance_lx": 750.0,
-                "minimum_illuminance_lx": 450.0,
-            },
-        },
-    )
-
-    assert imported.status_code == 201
-    payload = imported.json()
-    run = payload["simulation_run"]
-    assert run["verification_status"] == "matched"
-    assert run["status"] == "succeeded"
-    assert run["handoff_id"] == package["handoff_id"]
-    assert payload["project"]["workflow_status"] == "simulation_pending"
-    assert payload["project"]["revision"] == state.revision + 1
-
-
-def test_dialux_result_import_requires_handoff_first(tmp_path) -> None:
-    client = make_client(tmp_path)
-    project = client.post("/api/projects", json={"project_name": "无交接包"}).json()
+    project = client.post("/api/projects", json={"project_name": "未验证证据"}).json()
 
     imported = client.post(
         f"/api/projects/{project['project_id']}/dialux-results",
         json={
             "expected_revision": 0,
-            "handoff_id": "handoff-00000000000000000000000000000000",
-            "metrics": {"maintained_illuminance_lx": 750.0},
-        },
-    )
-
-    assert imported.status_code == 404
-
-
-def test_dialux_result_import_mismatch_is_not_matched(tmp_path) -> None:
-    client = make_client(tmp_path)
-    project = client.post("/api/projects", json={"project_name": "不匹配回灌"}).json()
-    project_id = project["project_id"]
-
-    store = ProjectStore(tmp_path / "projects")
-    state = _add_selected_luminaire(store, project_id)
-    _generate_handoff(client, project_id, state.revision)
-
-    imported = client.post(
-        f"/api/projects/{project_id}/dialux-results",
-        json={
-            "expected_revision": state.revision,
+            # Legacy handoff fields are ignored; the consistency check is removed.
             "handoff_id": "handoff-00000000000000000000000000000000",
             "metrics": {"maintained_illuminance_lx": 750.0},
         },
     )
 
     assert imported.status_code == 201
-    payload = imported.json()
-    run = payload["simulation_run"]
-    assert run["verification_status"] == "mismatch"
+    run = imported.json()["simulation_run"]
+    assert run["verification_status"] == "unverified"
     assert run["status"] == "unverified"
-    assert run["verification_messages"]
-    assert payload["project"]["workflow_status"] == "needs_revision"
+    assert "handoff_id" not in run
 
 
 def test_dialux_result_import_conflict_on_stale_revision(tmp_path) -> None:
@@ -319,8 +219,7 @@ def test_dialux_result_import_conflict_on_stale_revision(tmp_path) -> None:
 
     store = ProjectStore(tmp_path / "projects")
     state = _add_selected_luminaire(store, project_id)
-    _generate_handoff(client, project_id, state.revision)
-    # Advance the project revision after the handoff was generated.
+    # Advance the project revision before the import request arrives.
     store.update(
         project_id,
         ProjectUpdate(
@@ -333,7 +232,6 @@ def test_dialux_result_import_conflict_on_stale_revision(tmp_path) -> None:
         f"/api/projects/{project_id}/dialux-results",
         json={
             "expected_revision": state.revision,
-            "handoff_id": "handoff-00000000000000000000000000000000",
             "metrics": {"maintained_illuminance_lx": 750.0},
         },
     )
@@ -352,13 +250,10 @@ def test_dialux_result_list_and_get(tmp_path) -> None:
 
     store = ProjectStore(tmp_path / "projects")
     state = _add_selected_luminaire(store, project_id)
-    _generate_handoff(client, project_id, state.revision)
-    package = _read_handoff_package(tmp_path, project_id)
     client.post(
         f"/api/projects/{project_id}/dialux-results",
         json={
             "expected_revision": state.revision,
-            "handoff_id": package["handoff_id"],
             "metrics": {"maintained_illuminance_lx": 750.0},
         },
     )
@@ -372,7 +267,7 @@ def test_dialux_result_list_and_get(tmp_path) -> None:
     assert detail.json()["run_id"] == run_id
 
 
-def test_dialux_image_upload_and_lumen_method_jointly_pass(tmp_path) -> None:
+def test_dialux_image_upload_does_not_verify_new_design_by_itself(tmp_path) -> None:
     client = make_client(tmp_path)
     project = client.post(
         "/api/projects",
@@ -395,7 +290,6 @@ def test_dialux_image_upload_and_lumen_method_jointly_pass(tmp_path) -> None:
         project_id,
         ProjectUpdate(expected_revision=state.revision, calculations=[calculation]),
     )
-    _generate_handoff(client, project_id, state.revision)
 
     imported = client.post(
         f"/api/projects/{project_id}/dialux-results/upload",
@@ -411,9 +305,10 @@ def test_dialux_image_upload_and_lumen_method_jointly_pass(tmp_path) -> None:
     assert payload["simulation_run"]["vision_analysis"]["confidence"] == 0.96
     assert payload["simulation_run"]["parser_version"] == "dialux-image-vision-1"
     assert payload["simulation_run"]["artifacts"][0]["file_name"] == "simulation.png"
-    assert payload["verification"]["overall_status"] == "pass"
-    assert payload["verification"]["action"] == "target_reached"
-    assert payload["project"]["workflow_status"] == "simulation_verified"
+    assert payload["simulation_run"]["verification_status"] == "unverified"
+    assert payload["verification"]["overall_status"] == "pending"
+    assert payload["verification"]["action"] == "rerun_dialux"
+    assert payload["project"]["workflow_status"] == "simulation_pending"
 
     artifact = client.get(
         f"/api/projects/{project_id}/dialux-results/{payload['simulation_run']['run_id']}/artifact"
@@ -435,7 +330,6 @@ def test_dialux_image_upload_rejects_uncertain_vision_reading_without_manual_val
     project = client.post("/api/projects", json={"project_name": "图片读数"}).json()
     store = ProjectStore(tmp_path / "projects")
     state = _add_selected_luminaire(store, project["project_id"])
-    _generate_handoff(client, project["project_id"], state.revision)
 
     imported = client.post(
         f"/api/projects/{project['project_id']}/dialux-results/upload",
@@ -458,7 +352,6 @@ def test_dialux_image_manual_correction_does_not_bypass_vision_analysis(tmp_path
     project = client.post("/api/projects", json={"project_name": "人工校正"}).json()
     store = ProjectStore(tmp_path / "projects")
     state = _add_selected_luminaire(store, project["project_id"])
-    _generate_handoff(client, project["project_id"], state.revision)
 
     imported = client.post(
         f"/api/projects/{project['project_id']}/dialux-results/upload",
@@ -488,7 +381,6 @@ def test_dialux_image_upload_rejects_non_dialux_image(tmp_path) -> None:
     project = client.post("/api/projects", json={"project_name": "错误图片"}).json()
     store = ProjectStore(tmp_path / "projects")
     state = _add_selected_luminaire(store, project["project_id"])
-    _generate_handoff(client, project["project_id"], state.revision)
 
     imported = client.post(
         f"/api/projects/{project['project_id']}/dialux-results/upload",
@@ -508,7 +400,6 @@ def test_dialux_image_upload_reports_vision_service_failure_without_saving_file(
     project = client.post("/api/projects", json={"project_name": "视觉服务失败"}).json()
     store = ProjectStore(tmp_path / "projects")
     state = _add_selected_luminaire(store, project["project_id"])
-    _generate_handoff(client, project["project_id"], state.revision)
 
     imported = client.post(
         f"/api/projects/{project['project_id']}/dialux-results/upload",
@@ -532,7 +423,6 @@ def test_dialux_pdf_upload_extracts_labelled_illuminance(tmp_path) -> None:
     ).json()
     store = ProjectStore(tmp_path / "projects")
     state = _add_selected_luminaire(store, project["project_id"])
-    _generate_handoff(client, project["project_id"], state.revision)
     pdf = fitz.open()
     page = pdf.new_page()
     page.insert_text((72, 72), "Maintained average illuminance: 518 lx")
@@ -567,7 +457,6 @@ def test_dialux_upload_rejects_spoofed_file_signature(tmp_path) -> None:
     project = client.post("/api/projects", json={"project_name": "文件校验"}).json()
     store = ProjectStore(tmp_path / "projects")
     state = _add_selected_luminaire(store, project["project_id"])
-    _generate_handoff(client, project["project_id"], state.revision)
 
     imported = client.post(
         f"/api/projects/{project['project_id']}/dialux-results/upload",
@@ -578,7 +467,7 @@ def test_dialux_upload_rejects_spoofed_file_signature(tmp_path) -> None:
     assert imported.status_code == 415
 
 
-def test_cli_import_dialux_result_verifies_handoff(tmp_path, monkeypatch, capsys) -> None:
+def test_cli_import_dialux_result_saves_unverified_evidence(tmp_path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli, "ProjectStore", lambda: ProjectStore(tmp_path))
     monkeypatch.setattr(cli, "create_evidence_store", lambda: LocalEvidenceStore(tmp_path / "index.json"))
 
@@ -588,12 +477,6 @@ def test_cli_import_dialux_result_verifies_handoff(tmp_path, monkeypatch, capsys
 
     store = ProjectStore(tmp_path)
     state = _add_selected_luminaire(store, project_id)
-    cli.main(["create-dialux-task", project_id, "--revision", str(state.revision)])
-    capsys.readouterr()
-
-    zip_path = tmp_path / f"{project_id}.dialux-task.zip"
-    with ZipFile(zip_path) as archive:
-        package = json.loads(archive.read("dialux-task.json"))
 
     cli.main(
         [
@@ -601,15 +484,12 @@ def test_cli_import_dialux_result_verifies_handoff(tmp_path, monkeypatch, capsys
             project_id,
             "--revision",
             str(state.revision),
-            "--handoff-id",
-            package["handoff_id"],
             "--maintained-lx",
             "750",
         ]
     )
     response = json.loads(capsys.readouterr().out)
 
-    assert response["simulation_run"]["verification_status"] == "matched"
-    assert response["simulation_run"]["status"] == "succeeded"
-    assert response["verification_messages"] == []
+    assert response["simulation_run"]["verification_status"] == "unverified"
+    assert response["simulation_run"]["status"] == "unverified"
     assert store.get(project_id).workflow_status == "simulation_pending"

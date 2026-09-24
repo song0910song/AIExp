@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ArrowUpRight, Check, Download, FileImage, RefreshCw } from "lucide-react";
+import { ArrowUpRight, Check, FileImage, RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
 import type { IlluminanceVerification, Project } from "@/lib/types";
-import { BusyButton, Notice, StatusPill, formatNumber } from "./ui";
+import { Notice, StatusPill, formatNumber } from "./ui";
 
 const methodStatus = {
   pass: "达标",
@@ -29,8 +29,7 @@ export function DialuxVerificationPanel({
   onStartAgent: () => void;
 }) {
   const [verification, setVerification] = useState<IlluminanceVerification | null>(null);
-  const [taskUrl, setTaskUrl] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"load" | "task" | null>("load");
+  const [busy, setBusy] = useState<"load" | null>("load");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -42,19 +41,6 @@ export function DialuxVerificationPanel({
       .finally(() => { if (active) setBusy(null); });
     return () => { active = false; };
   }, [project.project_id, project.revision]);
-
-  async function createTask() {
-    setBusy("task");
-    setError(null);
-    try {
-      const result = await api.generateDeliverable(project.project_id, "dialux-task", project.revision);
-      setTaskUrl(result.download_url.replace(/^\/api/, "/backend"));
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "生成 DIALux 任务包失败");
-    } finally {
-      setBusy(null);
-    }
-  }
 
   const latestRun = project.simulation_runs.at(-1);
   const checks = verification ? [verification.lumen_method, verification.dialux] : [];
@@ -96,13 +82,7 @@ export function DialuxVerificationPanel({
         </>
       ) : null}
 
-      <div className="dialux-evidence-flow">
-        <div className="dialux-task-action">
-          <div><strong>准备当前版本任务包</strong><p>在 DIALux 中按任务包完成布灯与仿真。</p></div>
-          <BusyButton busy={busy === "task"} className="button button-secondary" type="button" onClick={() => void createTask()}><Download size={15} />生成任务包</BusyButton>
-          {taskUrl ? <a className="text-link" href={taskUrl}><Download size={14} />下载</a> : null}
-        </div>
-      </div>
+      <p>在智能对话中上传 DIALux 导出的 DXF 平面图和 PDF 报告，分析后继续存量照明重设计；最终方案仍需在 DIALux 中复算。</p>
 
       {latestRun?.vision_analysis ? (
         <div className="dialux-vision-result" aria-label="视觉模型解析结果">

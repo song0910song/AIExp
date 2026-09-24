@@ -17,18 +17,20 @@
 | 联合检验 | 仅以照度为标准，流明法与当前版本的 DIALux 维持照度均达标才通过 |
 | 灯具选型 | 查询 DIALux Luminaire Finder，补全型号、品牌、功率、IP、ULD 和配光信息 |
 | 照明重设计 | 解析 DXF + DIALux PDF，以真实 IES/LDT 配光执行自由重排或固定点位替换，输出逐点照度验证与可审计方案包 |
-| 交付输出 | 生成 Markdown 报告草稿和 DIALux evo 交接包（ZIP） |
+| 交付输出 | 生成存量重设计成果包，不再生成设计报告草稿或 DIALux 交接任务包 |
 | 智能对话 | 通过 CLI 或 Web 工作台上传资料、确认条件并编排上述工具 |
 
 ## 当前验收口径
 
 - 现阶段仅以照度作为计算、验证与迭代停止标准；UGR、显色指数、色温、功率等不参与本阶段通过/不通过判定。
 - 流明法用于方案前置估算，DIALux evo 用于仿真复核。两者结果都不低于目标照度时，联合检验才通过。
-- DIALux 证据可上传 PDF 设计报告或 PNG/JPG/WEBP 仿真图片。原文件、哈希、任务包和项目 revision 一并保存；图片必须经视觉模型识别 DIALux 身份、主要计算面和维持照度，PDF 仅从明确标注的结果字段提取。用户可填写人工校正值，但不能绕过图片视觉解析。
-- 未达标时智能体继续调整可控方案并生成最新任务包；需要重新运行 DIALux 时暂停等待用户回传结果。达到目标，或用户明确说停止、结束、取消迭代时，终止循环。
+- DIALux 证据可直接上传 PDF 设计报告或 PNG/JPG/WEBP 仿真图片，不需要先保存最终选型或生成任务包。保留原文件、哈希与项目 revision；图片必须经视觉模型解析。存量资料标为现状证据，不能仅凭上传就证明新方案达标。
+- 未达标时智能体根据已上传 DXF 和 PDF 继续存量重设计；缺少文件时用纯文字询问，最终方案仍须在 DIALux 中复算。用户明确说停止、结束、取消迭代时，终止循环。
 
 ## 重设计工作流
 
+- 新建时只有文字说明：补全必要参数、完成初算和灯具选型，然后用纯文字提醒上传 DXF 平面图及 DIALux PDF 报告，不生成表格或结构化问询卡片。
+- 新建时已上传两类文件，或选型后补传齐全：先解析与交叉校验，自动进入存量照明重设计，无需用户再次要求“重设计”。分轮上传仅询问缺失项；普通 PDF 不算 DIALux 报告，多份报告需确认采用哪份。
 - 输入推荐同时提供 DXF 与 DIALux PDF：DXF 提供房间轮廓、灯具点位和评价网格；PDF 提供灯具表、工作面、安装高度与目标值。
 - 允许调整点位时运行自由重排；点位、高度或吊顶不可变时运行原位替换，并给出产品组合、部分替换 `k` 扫描与最小干预建议。
 - 计算以已下载并解析通过的 IES/LDT 为准；目录或报告参数与配光文件冲突时记录差异，光通量采用配光文件声明值，LM-63 `-1` 文件采用光强表积分值。
@@ -76,12 +78,11 @@ uv run python main.py show-project <project_id>
 uv run python main.py add-document .\src\data\user_docs\GB-50034-2024.md --source-type standard
 uv run python main.py search-evidence "会议室 照度 显色指数"
 
-# 初步计算、查询灯具、生成交付物
+# 初步计算、查询灯具
 uv run python main.py calculate <project_id> --revision 0 `
   --area-m2 30 --target-lx 500 `
   --lumens 3200 --power-w 24 --utilization-factor 0.6 --maintenance-factor 0.8
 uv run python main.py search-luminaires "嵌入式 LED 筒灯" --target-cct-k 4000 --min-cri 80
-uv run python main.py generate-report <project_id> --revision <revision>
 
 # 需要 LLM 时使用
 uv run python main.py chat --interactive
@@ -144,9 +145,9 @@ $env:LIGHTING_RAG_BACKEND = "local"
 
 - CAD 仅解析**二维平面图**，不提供三维建模。
 - DIALux Luminaire Finder 是灯具产品目录，不是仿真服务；搜索结果只是候选。
-- 只有明确确认的最终灯具才会进入 DIALux 交接包并尝试下载配光文件。
+- 保留候选灯具和用户明确确认的最终选型；重设计可按 DesignRun 下载候选的真实配光，不再提供“保存选型并生成任务包”流程。
 - 本阶段的照度必须在 DIALux evo 或等效专业软件中复核；其他指标不参与当前验收。
-- 仿真结果会与交接包的 `handoff_id` 和输入快照校验；输入发生变化时，旧结果会标记为过期。
+- 新上传结果保留为未验证的现状证据；不提供任务包生成、下载或一致性校验。输入发生变化时，旧结果会标记为过期。
 
 ## 数据位置
 
@@ -172,12 +173,13 @@ uv run python main.py --help
 ```text
 src/lighting_agent/
   agent.py              # LLM 对话与工具编排
-  tools.py              # 项目、检索、计算、选型和交付工具
+  tools.py              # 项目、检索、计算、选型与重设计工具
   project_store.py      # ProjectState 版本化持久化
   rag.py                # Chroma / SQLite 证据检索
   floor_plan.py         # DXF / DWG 二维平面图解析
   dialux_api.py         # DIALux Luminaire Finder 客户端
-  deliverables.py       # 报告与 DIALux 交接包
+  deliverables.py       # 重设计成果包与未验证仿真记录
+  workflow.py           # 按当前项目文件分流及纯文字补传提示
   web_api.py            # FastAPI 接口
   calculations/         # 流明法与规则校核
 web/                    # Next.js 工作台

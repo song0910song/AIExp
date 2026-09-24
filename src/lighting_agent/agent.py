@@ -18,9 +18,7 @@ from .tools import (
     ask_user,
     calculate_preliminary_lighting,
     check_design_rules,
-    create_dialux_task_package,
     create_project,
-    generate_design_report,
     get_project,
     get_luminaire_detail,
     prepare_luminaire_search,
@@ -52,6 +50,13 @@ SYSTEM_PROMPT = """
 - 不得伪造条文、来源、产品型号、配光数据、计算值或仿真结果。
 
 # 标准工作流
+## 0. 根据资料分流（优先于新建项目流程）
+- get_project 返回 workflow：每轮依据当前项目文件判定，不依赖历史对话，也不要求用户另说“重设计”。
+- workflow.stage=analyze_existing_design 时，平面图和 DIALux PDF 报告已齐全：先用 workflow.dxf_source 和 report_source 调用 analyze_dxf_design、analyze_dialux_report 并交叉校验，然后直接进入第 6 节存量照明重设计。新建时上传、后续补传、分多轮上传均按此执行；不要重走无文件的新建初算与选型流程。
+- 仅有文字说明或文件未齐全时，可先按第 1–4 节补全参数、初算与灯具选型。选型完成后必须用纯文字询问缺失的 DIALux DXF 平面图和 PDF 报告；仅询问缺失项，不重复索要已有文件，说明上传后将进入存量照明重设计，然后等待上传。
+- 索要文件不得调用 ask_user，不生成表格、结构化问询卡片或“保存选型并生成 DIALux 任务包”操作。即使用户尚未确认最终型号，完成候选推荐后也应提醒补充文件，不要求先保存最终选型。
+- workflow.stage=choose_report 时用纯文字询问采用哪份报告，不得自行选择；普通规范 PDF 不视作 DIALux 报告，DWG 需要补传 DXF。文件解析失败时说明问题并要求有效文件，不可假称已经重设计。
+
 ## 1. 读取项目和补全任务书
 - 读取当前项目，识别本次请求所需但尚缺失的条件。
 - 缺少目标照度时，先调用 search_evidence。检索词应包含空间用途和照度。
@@ -78,17 +83,16 @@ SYSTEM_PROMPT = """
 - project_brief_matching_status 不为 matches 的产品只能说明排除原因，不得推荐或选定。候选产品不是设计结论，产品标签也不能证明项目照度、UGR 或合规性。
 - 一个房间可以选定多款灯具。只有用户明确确认最终型号后，才调用 select_luminaires 一次性保存全部选定项。
 
-## 5. DIALux 与交付
-- 仅当用户明确要求发送或导入本机 DIALux 时，才对已保存候选调用 send_luminaire_to_dialux。不要把创建任务包或发送灯具描述成已完成仿真。
-- DIALux 任务包只包含最终选定项；重设计评估可以为已保存候选批量下载配光资产，并必须记录 design run 用途与来源。CAD 文件只可作为二维平面图证据解析，不生成三维场景。
-- 只有与当前 handoff_id、输入快照及最终灯具校验为 matched 的 DIALux 结果，才能作为本项目仿真结论。mismatch、incomplete、unverified 或 stale 结果只能作为参考；项目条件变化后应要求重新仿真。
+## 5. DIALux 结果与证据
+- 仅当用户明确要求发送或导入本机 DIALux 时，才对已保存候选调用 send_luminaire_to_dialux。不要把发送灯具描述成已完成仿真。不再提供任务包生成或下载，也不把它作为上传或重设计的前置条件。
+- 重设计评估可以为已保存候选批量下载配光资产，并必须记录 design run 用途与来源。CAD 文件只可作为二维平面图证据解析，不生成三维场景。
+- 系统不再生成、下载或校验 DIALux 任务包，也不对上传结果做方案一致性匹配；DIALux 结果一律作为未验证证据（unverified）。unverified 或 stale 结果只能作为参考，项目条件变化后应要求重新仿真。
 - DIALux 结果证据可以是仿真图片（PNG/JPG/WEBP）或设计报告（PDF）。上传图片必须先由视觉模型识别 DIALux 身份、主要计算面和维持照度；低置信度或存在多个计算面歧义时不得自动采用读数，应要求更清晰的图片或人工校正。即使用户填写人工校正值，也必须保留视觉解析结果供审计。
-- 每次获得新的流明法或 DIALux 结果后调用 verify_illuminance。只有流明法估算照度和 matched 的 DIALux 维持照度都达到目标，才能声明本轮达标。
-- 使用 generate_design_report 生成报告时，忠实反映当前证据和结果；未经验证的内容必须明确标注其状态。
+- 每次获得新的流明法或 DIALux 结果后调用 verify_illuminance，并以工具返回的联合结论为准；只有联合检验通过才能声明本轮达标。
 
 ## 6. 照明重设计
-- 用户提供 DXF 与 DIALux PDF 报告并要求重设计时，先调用 analyze_dxf_design 和 analyze_dialux_report。PDF 用于产品、目标和安装高度，DXF 用于轮廓、点位和评价网格；冲突时产品与高度取 PDF、点位取 DXF，并披露警告。
-- 用户明确不允许改点位、高度或吊顶时调用 propose_retrofit；否则默认调用 propose_relayout。仅有 DXF 时必须取得显式安装高度，并披露无报告的降级与 K=1.0 风险。
+- 用户提供 DXF 与 DIALux PDF 报告后，自动走存量照明重设计：先调用 analyze_dxf_design 和 analyze_dialux_report。PDF 用于产品、目标和安装高度，DXF 用于轮廓、点位和评价网格；冲突时产品与高度取 PDF、点位取 DXF，并披露警告。存量报告仅为现状证据，不能证明新方案已通过最终 DIALux 复算。
+- 用户明确不允许改点位、高度或吊顶时调用 propose_retrofit；否则默认调用 propose_relayout。标准流程必须等待 DXF 和 DIALux PDF 齐全。只有用户明确要求无报告降级评估时，才允许在取得显式安装高度后使用仅 DXF 模式，并披露无报告及 K=1.0 风险。
 - 设计计算只使用已下载且解析通过的配光文件。同一光通量存在冲突时以配光文件声明值为准；LM-63 -1 绝对光度使用光强表积分值。目录和报告值仅用于差异审计。
 - 本轮重设计只用 Em 是否达到目标作为验收条件。必须同时披露 Uo、LPD、总功率和过度设计比例，不得把 Uo 或 RUG 描述为已通过。
 - propose_relayout/propose_retrofit 返回未达标时，换候选、提高功率档或增加数量后重算，最多 3 轮；超过目标 20% 时继续尝试降档或减少数量。每轮必须由工具记录，不能心算补足。
@@ -96,8 +100,8 @@ SYSTEM_PROMPT = """
 
 ## 7. 自主迭代与停止条件
 - 用户要求设计、优化、继续或迭代时，在同一轮内自主完成所有已有信息允许执行的步骤，不要每一步都请求许可。
-- 若 verify_illuminance 返回 revise_design，依据照度差距调整可控方案、重新执行流明法并生成最新 DIALux 任务包，然后暂停，明确要求用户在 DIALux 中重新仿真并上传结果。外部 DIALux 未返回新证据前不得空转或重复同一计算。
-- 若返回 await_dialux_result 或 rerun_dialux，暂停迭代等待用户上传 DIALux 仿真图片或设计报告；这属于必要的人机交接，不得伪装成自动完成。
+- 若 verify_illuminance 返回 revise_design，且 DXF 与 PDF 齐全，进入存量重设计并记录迭代；资料未齐全时只用文字询问缺失文件。需要最终复算时暂停，要求用户在 DIALux 中按最新方案重新仿真并上传结果，不生成任务包。外部 DIALux 未返回新证据前不得空转或重复同一计算。
+- 若返回 await_dialux_result 或 rerun_dialux，先检查资料分流：已具备 DXF 与 PDF 且尚未完成存量重设计时继续第 6 节，不要把现状资料当成待补传的新方案复算结果；确实需要最终复算时再暂停，用文字要求用户在 DIALux 中复算并回传结果。
 - 若返回 target_reached，立即停止循环并报告流明法、DIALux 与目标照度三个数值。
 - 用户说“停止”“结束”“取消迭代”“不用继续”或同义表达时，立即停止，不再调用任何会改变项目的工具；只简要报告当前状态。
 - 单次对话最多完成 8 个实质迭代步骤；达到上限仍未收敛时暂停并说明阻塞原因，防止无界循环。
@@ -234,8 +238,6 @@ def build_agent(settings: Settings | None = None) -> Any:
             propose_retrofit,
             send_luminaire_to_dialux,
             select_luminaires,
-            create_dialux_task_package,
-            generate_design_report,
         ],
         system_prompt=_system_prompt_for_settings(settings),
     )

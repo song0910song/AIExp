@@ -25,13 +25,13 @@ from .dialux_api import (
     validate_luminaire_search,
 )
 from .dialux_protocol import DialuxProtocolError
-from .deliverables import build_design_report, build_dialux_task_archive, build_dialux_task_package
 from .dxf_analysis import extract_design
 from .dialux_report import cross_validate, parse_dialux_report
 from .document_loader import load_document
 from .project_store import ProjectStore, RevisionConflictError
 from .photometry_assets import PhotometryAssetStore
 from .project_files import resolve_project_file
+from .workflow import dialux_report_sources, project_workflow
 from .redesign_service import (
     RelayoutRequest,
     RetrofitRequest,
@@ -348,14 +348,6 @@ class AskUserInput(StrictModel):
     fields: list[ClarificationField] = Field(min_length=1, max_length=6)
 
 
-class DialuxTaskInput(ProjectReference):
-    expected_revision: int = Field(ge=0)
-
-
-class ReportInput(DialuxTaskInput):
-    pass
-
-
 class IlluminanceVerificationInput(ProjectReference):
     pass
 
@@ -412,13 +404,6 @@ def _project_directory(project_id: str) -> Path:
     if callable(directory_for):
         return directory_for(project_id)
     return project_store.directory
-
-
-def _artifact_path(project_id: str, suffix: str) -> Path:
-    artifact_path = getattr(project_store, "artifact_path", None)
-    if callable(artifact_path):
-        return artifact_path(project_id, suffix)
-    return _project_directory(project_id) / f"{project_id}{suffix}"
 
 
 def _get_scoped_evidence(evidence_ids: list[str], project_id: str) -> list:
@@ -491,7 +476,11 @@ def analyze_dxf_design(project_id: str, source: str | None = None) -> dict:
             ),
             "floor_plan": _data(state.floor_plan) if state.floor_plan else None,
         }
-    return {"status": "ok", "snapshot": extract_design(path)}
+    try:
+        snapshot = extract_design(path)
+    except ValueError as error:
+        return {"status": "needs_valid_dxf", "message": f"平面图尚不能用于存量重设计：{error}。请上传含房间轮廓、灯位和评价网格的 DIALux DXF。"}
+    return {"status": "ok", "snapshot": snapshot}
 
 
 @tool("analyze_dialux_report", args_schema=DialuxReportInput)
@@ -501,25 +490,23 @@ def analyze_dialux_report(project_id: str, source: str | None = None) -> dict:
     state = project_store.get(project_id)
     resolved = source
     if not resolved:
-        for run in reversed(state.simulation_runs):
-            if run.source_kind == "dialux_pdf":
-                artifact = next(
-                    (item for item in run.artifacts if item.file_name.casefold().endswith(".pdf")),
-                    None,
-                )
-                if artifact:
-                    resolved = artifact.storage_path
-                    break
+        sources = dialux_report_sources(_project_directory(project_id), state)
+        if len(sources) > 1:
+            return {"status": "needs_input", "message": "请用文字确认本次采用哪份 DIALux PDF 报告。", "report_sources": sources}
+        resolved = sources[0] if sources else None
     if not resolved:
         return {"status": "needs_input", "message": "请上传 DIALux PDF 设计报告。"}
-    report = parse_dialux_report(_project_source(project_id, resolved, ".pdf"))
+    try:
+        report = parse_dialux_report(_project_source(project_id, resolved, ".pdf"))
+    except ValueError as error:
+        return {"status": "needs_valid_report", "message": f"报告解析未完成：{error}。请上传可解析的 DIALux PDF 设计报告。"}
     validation = None
     if state.floor_plan:
         try:
             dxf = extract_design(_project_source(project_id, state.floor_plan.asset.storage_path, ".dxf"))
             validation = cross_validate(dxf, report)
-        except ValueError:
-            validation = None
+        except ValueError as error:
+            validation = {"checks": {}, "warnings": [f"DXF 尚不能用于交叉校验：{error}。请补充可解析的 DIALux DXF。"]}
     return {"status": "ok", "report": report, "cross_validation": validation}
 
 
@@ -608,7 +595,8 @@ def create_project(brief: DesignBrief) -> dict:
 def get_project(project_id: str) -> dict:
     """Read the current confirmed brief, evidence, calculations and open questions."""
 
-    return _data(project_store.get(project_id))
+    state = project_store.get(project_id)
+    return {**_data(state), "workflow": project_workflow(_project_directory(project_id), state)}
 
 
 @tool("verify_illuminance", args_schema=IlluminanceVerificationInput)
@@ -1134,6 +1122,7 @@ def search_luminaires(
         result["project_revision"] = updated.revision
         result["saved_count"] = saved_count
         result["rebased"] = rebased
+        result["workflow"] = project_workflow(_project_directory(project_id), updated)
     return result
 
 
@@ -1207,7 +1196,7 @@ def select_luminaires(
     expected_revision: int,
     luminaire_ids: list[str],
 ) -> dict:
-    """Confirm final project luminaires for DIALux task-package photometry downloads.
+    """Record the user's final luminaire choices without generating a task package.
 
     A project may combine several luminaire types, so the list may hold
     multiple final selections.
@@ -1220,6 +1209,7 @@ def select_luminaires(
         "selected_luminaire_ids": updated.selected_luminaire_ids,
         "project_revision": updated.revision,
         "rebased": False,
+        "workflow": project_workflow(_project_directory(project_id), updated),
     }
 
 
@@ -1227,6 +1217,15 @@ def select_luminaires(
 def ask_user(title: str, question: str, fields: list[ClarificationField]) -> dict:
     """Request missing user input as a structured, fillable form and pause the workflow."""
 
+    if re.search(r"上传|补传", title + question) or any(
+        re.search(r"upload|file|dxf|pdf|report_source", field.field_id, re.I)
+        for field in fields
+    ):
+        return {
+            "status": "awaiting_file_upload",
+            "message": question,
+            "instruction": "仅用纯文字向用户询问缺失文件并等待上传，不生成表格或结构化问询卡片。",
+        }
     return {
         "status": "awaiting_user_input",
         "title": title,
@@ -1236,35 +1235,4 @@ def ask_user(title: str, question: str, fields: list[ClarificationField]) -> dic
 
 
 
-@tool("create_dialux_task_package", args_schema=DialuxTaskInput)
-def create_dialux_task_package(project_id: str, expected_revision: int) -> dict:
-    """Create a ZIP handoff with the task manifest and named photometry ZIP files."""
-
-    state = project_store.get(project_id)
-    if state.revision != expected_revision:
-        raise RevisionConflictError(
-            f"Project revision is {state.revision}, but request expected {expected_revision}"
-        )
-    target = _artifact_path(project_id, ".dialux-task.zip")
-    target.write_bytes(build_dialux_task_archive(state, PhotometryAssetStore(_project_directory(project_id), _dialux_client())))
-    return {
-        "task_package": str(target),
-        "handoff": build_dialux_task_package(state),
-        "project_revision": state.revision,
-        "rebased": False,
-    }
-
-
-@tool("generate_design_report", args_schema=ReportInput)
-def generate_design_report(project_id: str, expected_revision: int) -> dict:
-    """Generate a Markdown report that contains only saved facts, evidence and explicit limitations."""
-
-    state = project_store.get(project_id)
-    target = _artifact_path(project_id, ".design-report.md")
-    target.write_text(build_design_report(state), encoding="utf-8")
-    return {
-        "report": str(target),
-        "project_revision": state.revision,
-        "rebased": state.revision != expected_revision,
-    }
 dialux_search_lights = search_luminaires

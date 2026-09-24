@@ -18,8 +18,7 @@ wheels/
 data/
 .tmp/
 .cache/
-.pytest_cache/
-.pytest-basetemp/
+.pytest*
 .uv-cache/
 .model-cache/
 dialux_sim.py

@@ -2,7 +2,6 @@ import hashlib
 import json
 from pathlib import Path
 
-from lighting_agent.deliverables import build_design_report, build_dialux_task_package
 from lighting_agent import agent
 from lighting_agent.project_store import ProjectStore
 from lighting_agent.schemas import DesignBrief
@@ -29,11 +28,10 @@ def test_phase0_agent_tool_inventory_matches_documented_baseline() -> None:
             agent.search_luminaires,
             agent.get_luminaire_detail,
             agent.select_luminaires,
-            agent.create_dialux_task_package,
-            agent.generate_design_report,
         )
     ]
-    assert len(names) == 16
+    assert len(names) == 14
+    assert not hasattr(agent, "create_dialux_task_package")
     assert "import_selected_luminaires_to_dialux" not in names
 
 
@@ -49,15 +47,14 @@ def test_phase0_fixture_set_is_complete_and_redacted() -> None:
     assert all("脱敏" in json.loads(path.read_text(encoding="utf-8"))["project_name"] for path in projects)
 
 
-def test_phase0_same_input_has_stable_revision_package_and_report(tmp_path) -> None:
+def test_phase0_same_input_creates_a_stable_revision(tmp_path) -> None:
     payload = json.loads((FIXTURES / "projects" / "project-05.json").read_text(encoding="utf-8"))
     payload.pop("template_id")
     brief = DesignBrief.model_validate(payload)
     state = ProjectStore(tmp_path / "project").create(brief)
 
     assert state.revision == 0
-    assert build_dialux_task_package(state) == build_dialux_task_package(state)
-    assert build_design_report(state) == build_design_report(state)
+    assert state.brief == brief
 
 
 def test_phase0_fixture_hashes_are_repeatable() -> None:

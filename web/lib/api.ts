@@ -180,11 +180,6 @@ export const api = {
       `/projects/${id}/luminaires/${encodeURIComponent(luminaireId)}?expected_revision=${expectedRevision}`,
       { method: "DELETE" },
     ),
-  generateDeliverable: (id: string, kind: "report" | "dialux-task", revision: number) =>
-    request<{ kind: string; filename: string; download_url: string }>(
-      `/projects/${id}/deliverables/${kind}?expected_revision=${revision}`,
-      { method: "POST" },
-    ),
   parseLuminairePhotometry: (id: string, luminaireId: string) =>
     request<import("./types").PhotometryParseSummary>(
       `/projects/${id}/luminaires/${encodeURIComponent(luminaireId)}/photometry/parse`,
