@@ -6,7 +6,6 @@ import argparse
 import json
 from typing import Any
 
-from .agent import interactive_chat, invoke_agent
 from .calculations import calculate_lumen_method
 from .dialux_api import DialuxAPI
 from .deliverables import build_unverified_simulation_run
@@ -95,9 +94,6 @@ def build_parser() -> argparse.ArgumentParser:
     result.add_argument("--minimum-lx", type=float)
     result.add_argument("--solver-version")
 
-    chat = subcommands.add_parser("chat", help="run the LLM agent; requires LIGHTING_LLM_API_KEY")
-    chat.add_argument("message", nargs="?", help="single-turn message; omit it or use --interactive for a continuous session")
-    chat.add_argument("-i", "--interactive", action="store_true", help="start a continuous terminal chat")
     return parser
 
 
@@ -193,11 +189,5 @@ def main(argv: list[str] | None = None) -> None:
                 "verification_messages": run.verification_messages,
             }
         )
-        return
-    if args.command == "chat":
-        if args.interactive or args.message is None:
-            interactive_chat()
-            return
-        print(invoke_agent(args.message))
         return
     raise AssertionError(f"Unhandled command: {args.command}")

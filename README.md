@@ -18,7 +18,7 @@
 | 灯具选型 | 查询 DIALux Luminaire Finder，补全型号、品牌、功率、IP、ULD 和配光信息 |
 | 照明重设计 | 解析 DXF + DIALux PDF，以真实 IES/LDT 配光执行自由重排或固定点位替换，输出逐点照度验证与可审计方案包 |
 | 交付输出 | 生成存量重设计成果包，不再生成设计报告草稿或 DIALux 交接任务包 |
-| 智能对话 | 通过 CLI 或 Web 工作台上传资料、确认条件并编排上述工具 |
+| 智能对话 | 通过 Web 工作台上传资料、确认条件并编排上述工具 |
 
 ## 当前验收口径
 
@@ -83,9 +83,6 @@ uv run python main.py calculate <project_id> --revision 0 `
   --area-m2 30 --target-lx 500 `
   --lumens 3200 --power-w 24 --utilization-factor 0.6 --maintenance-factor 0.8
 uv run python main.py search-luminaires "嵌入式 LED 筒灯" --target-cct-k 4000 --min-cri 80
-
-# 需要 LLM 时使用
-uv run python main.py chat --interactive
 ```
 
 所有命令的完整参数可用以下命令查看：
@@ -96,7 +93,7 @@ uv run python main.py --help
 
 ## 配置
 
-在项目根目录创建 `.env`。离线命令不需要 LLM 密钥；`chat` 和 Web 智能对话需要配置网关。
+在项目根目录创建 `.env`。CLI 命令不需要 LLM 密钥；Web 智能对话需要配置网关。
 
 ```dotenv
 LIGHTING_LLM_API_KEY=你的密钥
@@ -173,6 +170,7 @@ uv run python main.py --help
 ```text
 src/lighting_agent/
   agent.py              # LLM 对话与工具编排
+  system_prompt.md      # 智能体系统提示词
   tools.py              # 项目、检索、计算、选型与重设计工具
   project_store.py      # ProjectState 版本化持久化
   rag.py                # Chroma / SQLite 证据检索

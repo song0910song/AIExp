@@ -6,6 +6,7 @@ import os
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -36,6 +37,13 @@ def _model_supports_prompt_cache(model: str | None) -> bool:
 
     match = re.match(r"^gpt-(\d+)\.(\d+)", (model or "").strip().casefold())
     return bool(match) and (int(match.group(1)), int(match.group(2))) >= (5, 6)
+
+
+def _uses_openai_api(base_url: str | None) -> bool:
+    if not base_url:
+        return True
+    endpoint = urlsplit(base_url)
+    return endpoint.scheme == "https" and endpoint.hostname == "api.openai.com"
 
 
 # The configured New API gateway accepts this set for agnes-2.5-flash.  Keep
@@ -80,8 +88,8 @@ class Settings:
     llm_context_window_tokens: int = int(os.getenv("LIGHTING_LLM_CONTEXT_WINDOW_TOKENS", "1000000"))
     # Keep this key stable across projects and sessions so the provider can
     # route requests with the same system prompt to an existing cache.
-    # None selects the safe model-aware default: GPT-5.6+ is enabled,
-    # while another OpenAI-compatible gateway must opt in explicitly.
+    # None enables cache extensions only for GPT-5.6+ on the OpenAI API.
+    # Compatible gateways may reject them even when they expose that model name.
     llm_prompt_cache_enabled: bool | None = _env_optional_bool(
         "LIGHTING_LLM_PROMPT_CACHE_ENABLED"
     )
@@ -165,7 +173,9 @@ class Settings:
         """Return provider cache options, normalizing unsupported TTL values."""
 
         enabled = self.llm_prompt_cache_enabled
-        if enabled is False or (enabled is None and not _model_supports_prompt_cache(self.llm_model)):
+        if enabled is False or (enabled is None and not (
+            _model_supports_prompt_cache(self.llm_model) and _uses_openai_api(self.llm_base_url)
+        )):
             return None
         ttl = self.llm_prompt_cache_ttl if self.llm_prompt_cache_ttl == "30m" else "30m"
         return {"mode": "implicit", "ttl": ttl}

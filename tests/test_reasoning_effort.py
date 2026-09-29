@@ -28,7 +28,10 @@ def test_settings_normalize_reasoning_efforts() -> None:
 
 
 def test_prompt_cache_settings_are_stable_and_model_aware() -> None:
-    gpt_settings = Settings(llm_model="gpt-5.6-terra", llm_api_key="test-key")
+    gpt_settings = Settings(
+        llm_model="gpt-5.6-terra", llm_base_url="https://api.openai.com/v1",
+        llm_api_key="test-key", llm_prompt_cache_enabled=None,
+    )
     assert gpt_settings.llm_prompt_cache_key == "lighting-design-agent-v1"
     assert gpt_settings.prompt_cache_options() == {"mode": "implicit", "ttl": "30m"}
     assert agent_module._prompt_cache_model_params(gpt_settings) == {
@@ -36,12 +39,23 @@ def test_prompt_cache_settings_are_stable_and_model_aware() -> None:
         "model_kwargs": {"prompt_cache_key": "lighting-design-agent-v1"},
     }
 
-    other_settings = Settings(llm_model="other-model", llm_api_key="test-key")
+    gateway_settings = Settings(
+        llm_model="gpt-5.6-terra", llm_base_url="https://gateway.example/v1",
+        llm_api_key="test-key", llm_prompt_cache_enabled=None,
+    )
+    assert gateway_settings.prompt_cache_options() is None
+    assert agent_module._prompt_cache_model_params(gateway_settings) == {}
+
+    other_settings = Settings(
+        llm_model="other-model", llm_base_url="https://api.openai.com/v1",
+        llm_api_key="test-key", llm_prompt_cache_enabled=None,
+    )
     assert other_settings.prompt_cache_options() is None
     assert agent_module._prompt_cache_model_params(other_settings) == {}
 
     explicit_settings = Settings(
         llm_model="other-model",
+        llm_base_url="https://gateway.example/v1",
         llm_api_key="test-key",
         llm_prompt_cache_enabled=True,
         llm_prompt_cache_ttl="unsupported",
@@ -49,23 +63,30 @@ def test_prompt_cache_settings_are_stable_and_model_aware() -> None:
     assert explicit_settings.prompt_cache_options() == {"mode": "implicit", "ttl": "30m"}
 
 
-def test_prompt_cache_uses_a_stable_system_prompt_breakpoint() -> None:
-    from langchain_core.messages import SystemMessage
-    from langchain_openai.chat_models.base import _convert_message_to_dict
+@pytest.mark.parametrize("cache_enabled", [None, True])
+def test_gateway_request_never_sends_an_explicit_cache_breakpoint(monkeypatch, cache_enabled) -> None:
+    from langchain_core.messages import HumanMessage, SystemMessage
 
-    settings = Settings(llm_model="gpt-5.6-terra", llm_api_key="test-key")
-    message = agent_module._system_prompt_for_settings(settings)
-    assert isinstance(message, SystemMessage)
-    assert message.content[0]["text"] == agent_module.SYSTEM_PROMPT
-    assert message.content[0]["prompt_cache_breakpoint"] == {"mode": "explicit"}
-    assert _convert_message_to_dict(message)["content"][0]["prompt_cache_breakpoint"] == {
-        "mode": "explicit"
-    }
-
-    disabled = agent_module._system_prompt_for_settings(
-        Settings(llm_model="other-model", llm_api_key="test-key")
+    monkeypatch.setattr("langchain.agents.create_agent", lambda **kwargs: kwargs)
+    model_info = agent_module.build_agent(
+        Settings(
+            llm_model="gpt-5.6-terra",
+            llm_base_url="https://gateway.example/v1",
+            llm_api_key="test-key",
+            llm_prompt_cache_enabled=cache_enabled,
+        )
     )
-    assert disabled == agent_module.SYSTEM_PROMPT
+    assert model_info["system_prompt"] == agent_module.SYSTEM_PROMPT
+    payload = model_info["model"]._get_request_payload([
+        SystemMessage(content=model_info["system_prompt"]),
+        HumanMessage(content="hello"),
+    ])
+    assert payload["messages"][0] == {"role": "system", "content": agent_module.SYSTEM_PROMPT}
+    assert payload.get("prompt_cache_options") == (
+        {"mode": "implicit", "ttl": "30m"} if cache_enabled else None
+    )
+    if cache_enabled is None:
+        assert "prompt_cache_key" not in payload
 
 
 def test_cancelled_run_does_not_start_another_model_or_tool_call() -> None:
