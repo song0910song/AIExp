@@ -229,11 +229,16 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [restoring, setRestoring] = useState(true);
+  const [restoreFailed, setRestoreFailed] = useState(false);
+  const [restoreAttempt, setRestoreAttempt] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const streamController = useRef<AbortController | null>(null);
   const sessionStorageKey = `lighting-smart-session:${project.project_id}`;
   const clarificationStorageKey = `lighting-clarification:${project.project_id}`;
   const reasoningStorageKey = `lighting-reasoning-effort:${health?.llm_model ?? "default"}`;
+
+  useEffect(() => () => { streamController.current?.abort(); }, []);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(reasoningStorageKey) as ReasoningEffort | null;
@@ -254,6 +259,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
     setTools([]);
     setActivity(null);
     setError(null);
+    setRestoreFailed(false);
     setContextUsage(unavailableContextUsage(health?.llm_context_window_tokens));
     try {
       setClarification(storedClarification ? JSON.parse(storedClarification) as ClarificationRequest : null);
@@ -275,12 +281,12 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
       })
       .catch(() => {
         if (!active) return;
-        window.localStorage.removeItem(sessionStorageKey);
-        setSessionId(undefined);
+        setRestoreFailed(true);
+        setError("会话暂时无法恢复，历史记录已保留。请重试恢复。");
       })
       .finally(() => { if (active) setRestoring(false); });
     return () => { active = false; };
-  }, [clarificationStorageKey, health?.llm_context_window_tokens, sessionStorageKey]);
+  }, [clarificationStorageKey, health?.llm_context_window_tokens, restoreAttempt, sessionStorageKey]);
 
   useEffect(() => {
     const transcript = transcriptRef.current;
@@ -299,7 +305,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
 
   async function send(providedContent?: string) {
     const instruction = providedContent ?? draft.trim();
-    if ((!instruction && !attachments.length) || busy || uploading || restoring || (clarification && !providedContent)) return;
+    if ((!instruction && !attachments.length) || busy || uploading || restoring || restoreFailed || (clarification && !providedContent)) return;
 
     setUploading(true);
     setActivity("正在解析上传资料…");
@@ -401,6 +407,8 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
     setBusy(true);
     setActivity("正在分析请求…");
 
+    const controller = new AbortController();
+    streamController.current = controller;
     try {
       const response = await api.chatStream({
         message: content,
@@ -431,7 +439,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
           setMessages((current) => current.map((message) => message.id === assistantId ? { ...message, content: message.content + delta } : message));
         },
         onRetry: (info) => setMessages((current) => current.map((message) => message.id === assistantId ? { ...message, retrying: info } : message)),
-      });
+      }, controller.signal);
       setSessionId(response.session_id);
       window.localStorage.setItem(sessionStorageKey, response.session_id);
       if (response.project) onProject(response.project);
@@ -442,6 +450,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
       setMessages((current) => current.filter((message) => message.id !== assistantId || receivedDelta).map((message) => message.id === assistantId ? { ...message, streaming: false } : message));
       setError(reason instanceof Error ? reason.message : "智能对话请求失败");
     } finally {
+      if (streamController.current === controller) streamController.current = null;
       setTools((current) => failUnfinishedTools(current) ?? []);
       setMessages((current) => current.map((message) => message.id === assistantId
         ? { ...message, tools: failUnfinishedTools(message.tools) }
@@ -452,7 +461,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
   }
 
   async function clear() {
-    if (busy) return;
+    if (busy || uploading || restoring) return;
     if (sessionId) await api.clearChat(sessionId, project.project_id).catch(() => undefined);
     window.localStorage.removeItem(sessionStorageKey);
     window.localStorage.removeItem(clarificationStorageKey);
@@ -462,6 +471,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
     setTools([]);
     setClarification(null);
     setError(null);
+    setRestoreFailed(false);
     setActivity(null);
   }
 
@@ -478,7 +488,7 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
         </div>
         <div className="conversation-header-actions">
           <span className={`conversation-run-status ${running ? "is-running" : ""}`}><i />{statusText}</span>
-          <button className="button button-quiet conversation-reset" onClick={clear} disabled={busy} title="新会话"><RotateCcw size={16} /><span>新会话</span></button>
+          <button className="button button-quiet conversation-reset" onClick={clear} disabled={busy || uploading || restoring} title="新会话"><RotateCcw size={16} /><span>新会话</span></button>
         </div>
       </header>
 
@@ -504,12 +514,15 @@ export function SmartConversation({ project, health, onProject }: { project: Pro
             )) : <div className="chat-welcome smart-welcome"><p className="eyebrow">LIGHTING DESIGN AGENT</p><h3>上传资料，开始方案优化</h3><p>可直接上传设计报告 PDF 或 DXF/DWG 平面图。系统会提取项目资料与平面图信息，供后续任务书核对、灯具选型和照度初步计算使用。</p><div>{["上传设计报告并开始分析", "检查当前任务书还缺什么", "根据已确认条件推荐灯具"].map((text) => <button key={text} onClick={() => setDraft(text)}>{text}</button>)}</div></div>}
             {clarification ? <ClarificationCard request={clarification} busy={busy} onSubmit={(content) => void send(content)} /> : null}
           </div>
-          {error ? <div className="conversation-error"><Notice tone="danger">{error}</Notice></div> : null}
+          {error ? <div className="conversation-error"><Notice tone="danger">
+            {error}
+            {restoreFailed ? <button className="button button-quiet" type="button" onClick={() => setRestoreAttempt((attempt) => attempt + 1)}><RotateCcw size={14} />重试恢复</button> : null}
+          </Notice></div> : null}
           <ChatComposer
             draft={draft}
             attachments={attachments}
             busy={busy || uploading || restoring}
-            disabled={!health?.llm_configured || restoring || busy || uploading || Boolean(clarification)}
+            disabled={!health?.llm_configured || restoring || restoreFailed || busy || uploading || Boolean(clarification)}
             usage={contextUsage}
             model={health?.llm_model}
             reasoningEffort={reasoningEffort}

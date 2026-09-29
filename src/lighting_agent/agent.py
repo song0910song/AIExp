@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable, Iterator
+from contextvars import ContextVar, Token
 from typing import Any
 
 import httpx
@@ -112,13 +112,37 @@ SYSTEM_PROMPT = """
 - 项目型回复按需组织为：规范依据、已确认设计条件、计算或候选灯具、待确认事项、人工复核声明；没有内容的部分不必机械输出。
 - 简洁说明信息来源和结果边界，不泄露原始工具错误，不把计划中的能力说成已经完成。
 """
-# Module-level hook so the shared agent can report SDK-level model retries
-# (429 / 5xx / connection errors) back to the active request. LangChain runs
-# model calls on its own executor threads, so a thread-local would miss them.
-# The UI serializes chat requests (one active stream at a time), which keeps
-# this single-slot design safe.
-_RETRY_NOTIFIER: Callable[[str], None] | None = None
-_RETRY_NOTIFIER_LOCK = threading.Lock()
+# LangGraph propagates contextvars into its model executor threads. A shared
+# model can therefore report retries to the request that made the call.
+_RETRY_NOTIFIER: ContextVar[Callable[[str], None] | None] = ContextVar(
+    "lighting_retry_notifier", default=None
+)
+
+
+class AgentRunCancelled(Exception):
+    """A disconnected stream must not start another model or tool call."""
+
+
+def _raise_if_cancelled(context: Any) -> None:
+    if isinstance(context, dict) and (cancel_event := context.get("cancel_event")) is not None:
+        if cancel_event.is_set():
+            raise AgentRunCancelled()
+
+
+def _cancelled_run_middleware() -> list[Any]:
+    from langchain.agents.middleware import wrap_model_call, wrap_tool_call
+
+    @wrap_model_call
+    def guard_model(request: Any, handler: Callable) -> Any:
+        _raise_if_cancelled(request.runtime.context)
+        return handler(request)
+
+    @wrap_tool_call
+    def guard_tool(request: Any, handler: Callable) -> Any:
+        _raise_if_cancelled(request.runtime.context)
+        return handler(request)
+
+    return [guard_model, guard_tool]
 
 
 class _RetryNotifyingTransport(httpx.HTTPTransport):
@@ -136,18 +160,19 @@ class _RetryNotifyingTransport(httpx.HTTPTransport):
 
     @staticmethod
     def _notify(detail: str) -> None:
-        with _RETRY_NOTIFIER_LOCK:
-            notifier = _RETRY_NOTIFIER
+        notifier = _RETRY_NOTIFIER.get()
         if notifier:
             notifier(detail)
 
 
-def set_retry_notifier(notifier: Callable[[str], None] | None) -> None:
-    """Bind the callback fired before each SDK-level model retry."""
+def set_retry_notifier(notifier: Callable[[str], None]) -> Token:
+    """Bind a retry callback to this invocation's propagated context."""
 
-    global _RETRY_NOTIFIER
-    with _RETRY_NOTIFIER_LOCK:
-        _RETRY_NOTIFIER = notifier
+    return _RETRY_NOTIFIER.set(notifier)
+
+
+def reset_retry_notifier(token: Token) -> None:
+    _RETRY_NOTIFIER.reset(token)
 
 
 def _prompt_cache_model_params(settings: Settings) -> dict[str, Any]:
@@ -179,7 +204,7 @@ def _system_prompt_for_settings(settings: Settings) -> Any:
             {
                 "type": "text",
                 "text": SYSTEM_PROMPT,
-                "prompt_cache_breakpoint": True,
+                "prompt_cache_breakpoint": {"mode": "explicit"},
             }
         ]
     )
@@ -217,6 +242,7 @@ def build_agent(settings: Settings | None = None) -> Any:
     )
     return create_agent(
         model=model,
+        middleware=_cancelled_run_middleware(),
         tools=[
             get_project,
             create_project,

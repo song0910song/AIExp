@@ -7,6 +7,7 @@ used by the CLI and LangChain tools.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import hashlib
 import re
@@ -14,8 +15,8 @@ import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from queue import Empty, Queue
-from threading import Lock, Thread
+from queue import Empty, Full, Queue
+from threading import Event, Lock, Thread
 from typing import Annotated, Any, Callable, Literal
 from uuid import uuid4
 
@@ -24,9 +25,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import Field, model_validator
 from starlette.concurrency import run_in_threadpool
+from starlette.types import Receive, Scope, Send
 
 from . import dialux_protocol
-from .agent import build_agent, set_retry_notifier
+from .agent import AgentRunCancelled, build_agent, reset_retry_notifier, set_retry_notifier
 from .calculations import (
     IlluminancePreviewRequest,
     SOLVER_VERSION,
@@ -86,6 +88,20 @@ from .schemas import (
 from .storage import SQLiteDatabase
 from .workspace import WorkspaceError, WorkspaceEvidenceStore, WorkspaceProjectStore
 from .workflow import project_workflow
+
+
+class _CancellableChatStream(StreamingResponse):
+    """Signal the worker even when the client disconnects during a send."""
+
+    def __init__(self, content: Any, *, cancel_event: Event, **kwargs: Any) -> None:
+        super().__init__(content, **kwargs)
+        self.cancel_event = cancel_event
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self.cancel_event.set()
 
 
 class BriefUpdateRequest(StrictModel):
@@ -2011,7 +2027,8 @@ def create_app(
             content = _project_chat_content(request.message, request.project_id, project.revision, project_workflow(project_directory(request.project_id), project))
         agent = chat_agent(request, settings)
         result = agent.invoke(
-            {"messages": [*messages, {"role": "user", "content": content}]}
+            {"messages": [*messages, {"role": "user", "content": content}]},
+            config={"recursion_limit": max(4, settings.agent_max_steps)},
         )
         output_messages = list(result["messages"])
         answer = str(output_messages[-1].content)
@@ -2077,7 +2094,9 @@ def create_app(
         if request.project_id:
             project = projects.get(request.project_id)
             content = _project_chat_content(request.message, request.project_id, project.revision, project_workflow(project_directory(request.project_id), project))
-        def events():
+        cancel_event = Event()
+
+        async def events():
             """Relay agent output while emitting progress during slow tool/model calls."""
 
             answer_parts: list[str] = []
@@ -2086,7 +2105,15 @@ def create_app(
             active_tool_calls: dict[str, str] = {}
             plan_emitted = False
             yield _event_line({"type": "start", "session_id": session_id})
-            output_queue: Queue[tuple[str, Any]] = Queue()
+            output_queue: Queue[tuple[str, Any]] = Queue(maxsize=128)
+
+            def emit(event_type: str, value: Any) -> None:
+                while not cancel_event.is_set():
+                    try:
+                        output_queue.put((event_type, value), timeout=0.1)
+                        return
+                    except Full:
+                        continue
 
             def run_agent_stream() -> None:
                 tool_started_at: dict[str, float] = {}
@@ -2095,9 +2122,9 @@ def create_app(
                 def notify_retry(detail: str) -> None:
                     nonlocal retry_count
                     retry_count += 1
-                    output_queue.put(("retry", {"attempt": retry_count, "max": settings.llm_max_retries, "detail": detail}))
+                    emit("retry", {"attempt": retry_count, "max": settings.llm_max_retries, "detail": detail})
 
-                set_retry_notifier(notify_retry)
+                notifier_token = set_retry_notifier(notify_retry)
                 try:
                     last_context_usage: dict[str, Any] | None = None
                     clarification_emitted = False
@@ -2105,12 +2132,15 @@ def create_app(
                         {"messages": [*messages, {"role": "user", "content": content}]},
                         stream_mode="messages",
                         config={"recursion_limit": max(4, settings.agent_max_steps)},
+                        context={"cancel_event": cancel_event},
                     ):
+                        if cancel_event.is_set():
+                            return
                         for tool_call in _tool_calls_from_chunk(chunk, include_debug=request.debug):
                             tool_started_at[tool_call["call_id"]] = time.monotonic()
                             if request.debug:
                                 tool_call["started_at"] = datetime.now(UTC).isoformat()
-                            output_queue.put(("tool_start", tool_call))
+                            emit("tool_start", tool_call)
                         tool_result = _tool_result_from_chunk(chunk, include_debug=request.debug)
                         if tool_result:
                             started_at = tool_started_at.pop(tool_result["call_id"], None)
@@ -2118,23 +2148,25 @@ def create_app(
                                 tool_result["duration_ms"] = round(
                                     (time.monotonic() - started_at) * 1000
                                 )
-                            output_queue.put(("tool_end", tool_result))
+                            emit("tool_end", tool_result)
                             clarification = _clarification_from_tool_chunk(chunk)
                             if clarification:
                                 clarification_emitted = True
-                                output_queue.put(("clarification", clarification))
+                                emit("clarification", clarification)
                             if request.project_id:
-                                output_queue.put(("project", None))
+                                emit("project", None)
                         context_usage = _context_usage_from_chunk(chunk, settings.llm_context_window_tokens)
                         if context_usage is not None and context_usage != last_context_usage:
                             last_context_usage = context_usage
-                            output_queue.put(("context", context_usage))
+                            emit("context", context_usage)
                         text = _visible_chat_chunk(chunk)
                         if not text:
                             continue
                         answer_parts.append(text)
-                        output_queue.put(("delta", text))
+                        emit("delta", text)
 
+                    if cancel_event.is_set():
+                        return
                     answer = "".join(answer_parts)
                     if not answer:
                         raise RuntimeError("智能体未返回可显示的文本")
@@ -2143,7 +2175,9 @@ def create_app(
                         and not clarification_emitted
                         and _claims_structured_clarification(answer)
                     ):
-                        output_queue.put(("clarification", _fallback_clarification(projects.get(request.project_id))))
+                        emit("clarification", _fallback_clarification(projects.get(request.project_id)))
+                    if cancel_event.is_set():
+                        return
                     session_store.save(
                         session_id,
                         [
@@ -2153,17 +2187,22 @@ def create_app(
                         ],
                         project_id=request.project_id,
                     )
-                    output_queue.put(("done", answer))
+                    emit("done", answer)
+                except AgentRunCancelled:
+                    pass
                 except Exception as error:
-                    output_queue.put(("error", _chat_error_detail(error, settings)))
+                    if not cancel_event.is_set():
+                        emit("error", _chat_error_detail(error, settings))
                 finally:
-                    set_retry_notifier(None)
+                    reset_retry_notifier(notifier_token)
 
             Thread(target=run_agent_stream, name=f"lighting-chat-{session_id[:8]}", daemon=True).start()
             heartbeat_seconds = max(1.0, settings.chat_stream_heartbeat_seconds)
             while True:
                 try:
-                    event_type, value = output_queue.get(timeout=heartbeat_seconds)
+                    event_type, value = await asyncio.to_thread(
+                        output_queue.get, True, heartbeat_seconds
+                    )
                 except Empty:
                     yield _event_line({"type": "status", "content": "智能体正在分析项目条件或调用工具…"})
                     continue
@@ -2262,8 +2301,9 @@ def create_app(
                 yield _event_line({"type": "error", "detail": value})
                 return
 
-        return StreamingResponse(
+        return _CancellableChatStream(
             events(),
+            cancel_event=cancel_event,
             media_type="application/x-ndjson; charset=utf-8",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )

@@ -177,6 +177,15 @@ def test_parse_ies_rejects_non_c_system() -> None:
         parse_photometry("\n".join(lines), "ies")
 
 
+def test_parse_ies_rejects_type_b_photometry() -> None:
+    text = (
+        "IESNA:LM-63-2002\nTILT=NONE\n"
+        "1 1000 1 2 1 2 2 1 1 0\n1 1 10\n0 90\n0\n100 0\n"
+    )
+    with pytest.raises(PhotometryParseError, match="Type B"):
+        parse_photometry(text, "ies")
+
+
 def test_parse_ldt_declares_flux_power_and_symmetry() -> None:
     distribution = parse_photometry(build_simple_ldt(), "ldt")
 

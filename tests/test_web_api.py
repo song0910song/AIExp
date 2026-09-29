@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event
 from typing import Any
 
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+from starlette.requests import ClientDisconnect
+import pytest
 
+import lighting_agent.agent as agent_module
 import lighting_agent.web_api as web_api
 from lighting_agent.config import Settings
 from lighting_agent.project_store import ProjectStore
@@ -35,16 +41,17 @@ class FakeStreamingAgent:
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
 
-    def stream(self, request: dict[str, Any], *, stream_mode: str, config: dict[str, Any]):
+    def stream(self, request: dict[str, Any], *, stream_mode: str, config: dict[str, Any], context: dict[str, Any]):
         self.requests.append(request)
         assert stream_mode == "messages"
         assert config["recursion_limit"] == max(4, Settings().agent_max_steps)
+        assert not context["cancel_event"].is_set()
         yield AIMessageChunk(content="## 设计建议\n") , {"langgraph_node": "model"}
         yield AIMessageChunk(content="- 先确认照度目标") , {"langgraph_node": "model"}
 
 
 class FakeTraceAgent:
-    def stream(self, _request: dict[str, Any], *, stream_mode: str, config: dict[str, Any]):
+    def stream(self, _request: dict[str, Any], *, stream_mode: str, config: dict[str, Any], context: dict[str, Any]):
         assert stream_mode == "messages"
         assert config["recursion_limit"] == max(4, Settings().agent_max_steps)
         yield AIMessage(
@@ -58,7 +65,7 @@ class FakeTraceAgent:
 class FakePartialToolCallAgent:
     """Simulate the blank tool-name chunks sent by some streaming providers."""
 
-    def stream(self, _request: dict[str, Any], *, stream_mode: str, config: dict[str, Any]):
+    def stream(self, _request: dict[str, Any], *, stream_mode: str, config: dict[str, Any], context: dict[str, Any]):
         assert stream_mode == "messages"
         assert config["recursion_limit"] == max(4, Settings().agent_max_steps)
         yield AIMessageChunk(
@@ -76,7 +83,7 @@ class FakePartialToolCallAgent:
 class FakeUnpairedToolCallAgent:
     """Simulate a provider ending a stream before ToolMessage is surfaced."""
 
-    def stream(self, _request: dict[str, Any], *, stream_mode: str, config: dict[str, Any]):
+    def stream(self, _request: dict[str, Any], *, stream_mode: str, config: dict[str, Any], context: dict[str, Any]):
         assert stream_mode == "messages"
         assert config["recursion_limit"] == max(4, Settings().agent_max_steps)
         yield AIMessage(
@@ -87,7 +94,7 @@ class FakeUnpairedToolCallAgent:
 
 
 class FakeUsageStreamingAgent:
-    def stream(self, _request: dict[str, Any], *, stream_mode: str, config: dict[str, Any]):
+    def stream(self, _request: dict[str, Any], *, stream_mode: str, config: dict[str, Any], context: dict[str, Any]):
         assert stream_mode == "messages"
         assert config["recursion_limit"] == max(4, Settings().agent_max_steps)
         yield AIMessageChunk(
@@ -97,7 +104,7 @@ class FakeUsageStreamingAgent:
 
 
 class FakeClarificationAgent:
-    def stream(self, _request: dict[str, Any], *, stream_mode: str, config: dict[str, Any]):
+    def stream(self, _request: dict[str, Any], *, stream_mode: str, config: dict[str, Any], context: dict[str, Any]):
         assert stream_mode == "messages"
         assert config["recursion_limit"] == max(4, Settings().agent_max_steps)
         yield AIMessage(
@@ -136,7 +143,7 @@ class FakeClarificationAgent:
 class FakeClaimedClarificationAgent:
     """Simulate a provider that claims a form exists but never calls ask_user."""
 
-    def stream(self, _request: dict[str, Any], *, stream_mode: str, config: dict[str, Any]):
+    def stream(self, _request: dict[str, Any], *, stream_mode: str, config: dict[str, Any], context: dict[str, Any]):
         assert stream_mode == "messages"
         assert config["recursion_limit"] == max(4, Settings().agent_max_steps)
         yield AIMessage(
@@ -322,6 +329,97 @@ def test_web_chat_stream_returns_ndjson_and_keeps_session(tmp_path, monkeypatch)
 
     client.post("/api/chat/stream", json={"message": "继续", "session_id": events[0]["session_id"]})
     assert len(agent.requests[1]["messages"]) == 3
+
+
+def test_concurrent_streams_keep_retry_events_with_their_own_request(tmp_path, monkeypatch) -> None:
+    barrier = Barrier(2)
+
+    class ConcurrentAgent:
+        def stream(self, request: dict[str, Any], **_kwargs: Any):
+            label = request["messages"][-1]["content"]
+            barrier.wait(timeout=10)
+            agent_module._RetryNotifyingTransport._notify(label)
+            yield AIMessageChunk(content=label), {"langgraph_node": "model"}
+
+    monkeypatch.setattr(web_api, "build_agent", lambda _settings: ConcurrentAgent())
+    client = make_client(tmp_path)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(
+            lambda label: client.post("/api/chat/stream", json={"message": label}),
+            ("first", "second"),
+        ))
+
+    for label, response in zip(("first", "second"), responses, strict=True):
+        events = [json.loads(line) for line in response.text.splitlines()]
+        assert response.status_code == 200
+        assert [event["detail"] for event in events if event["type"] == "retry"] == [label]
+        assert events[-1]["answer"] == label
+
+
+@pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
+def test_disconnected_stream_stops_worker_and_does_not_save_answer(
+    tmp_path, monkeypatch, spec_version: str
+) -> None:
+    class SlowAgent:
+        def __init__(self) -> None:
+            self.release = Event()
+            self.finished = Event()
+            self.cancel_event: Event | None = None
+
+        def stream(self, _request: dict[str, Any], *, context: dict[str, Any], **_kwargs: Any):
+            self.cancel_event = context["cancel_event"]
+            try:
+                yield AIMessageChunk(content="first"), {"langgraph_node": "model"}
+                self.release.wait(timeout=5)
+                yield AIMessageChunk(content="second"), {"langgraph_node": "model"}
+            finally:
+                self.finished.set()
+
+    agent = SlowAgent()
+    monkeypatch.setattr(web_api, "build_agent", lambda _settings: agent)
+    client = make_client(tmp_path)
+    endpoint = next(route.endpoint for route in client.app.routes if route.path == "/api/chat/stream")
+    response = endpoint(web_api.ChatRequest(message="请继续"))
+    session_id = ""
+    disconnected = asyncio.Event()
+
+    async def receive() -> dict[str, Any]:
+        await disconnected.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(event: dict[str, Any]) -> None:
+        nonlocal session_id
+        if event["type"] != "http.response.body":
+            return
+        line = event.get("body", b"").decode("utf-8").strip()
+        if line:
+            payload = json.loads(line)
+            if payload["type"] == "start":
+                session_id = payload["session_id"]
+            if payload["type"] == "delta":
+                if spec_version == "2.0":
+                    disconnected.set()
+                else:
+                    raise OSError("client disconnected")
+
+    try:
+        if spec_version == "2.4":
+            with pytest.raises(ClientDisconnect):
+                asyncio.run(response(
+                    {"type": "http", "asgi": {"spec_version": spec_version}}, receive, send
+                ))
+        else:
+            asyncio.run(response(
+                {"type": "http", "asgi": {"spec_version": spec_version}}, receive, send
+            ))
+    finally:
+        agent.release.set()
+
+    assert agent.cancel_event is not None and agent.cancel_event.is_set()
+    assert agent.finished.wait(timeout=5)
+    assert session_id
+    assert client.get(f"/api/chat/{session_id}").json()["messages"] == []
 
 
 def test_explicit_stop_command_bypasses_model_and_preserves_project(tmp_path, monkeypatch) -> None:

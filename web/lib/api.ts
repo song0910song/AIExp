@@ -209,12 +209,13 @@ export const api = {
     request<{ session_id: string; messages: ChatHistoryMessage[] }>(
       `/chat/${sessionId}${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`,
     ),
-  chatStream: async (payload: ChatPayload, handlers: ChatStreamHandlers = {}) => {
+  chatStream: async (payload: ChatPayload, handlers: ChatStreamHandlers = {}, signal?: AbortSignal) => {
     const response = await fetch(`${API_ROOT}/chat/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
       cache: "no-store",
+      signal,
     });
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: response.statusText }));

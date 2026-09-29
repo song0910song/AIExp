@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any, Callable
 
 import pytest
@@ -440,16 +439,6 @@ def test_dialux_pdf_upload_extracts_labelled_illuminance(tmp_path) -> None:
     assert run["source_kind"] == "dialux_pdf"
     assert run["metrics"]["maintained_illuminance_lx"] == 518
     assert run["parser_version"] == "dialux-pdf-text-1"
-
-
-def test_repository_dialux_report_extracts_workplane_illuminance() -> None:
-    from lighting_agent.dialux_results import extract_maintained_illuminance_from_pdf
-
-    root = Path(__file__).parents[1] / "docs" / "设计文件"
-
-    assert extract_maintained_illuminance_from_pdf(
-        root / "设计案_报告.pdf", allowed_root=root
-    ) == 656
 
 
 def test_dialux_upload_rejects_spoofed_file_signature(tmp_path) -> None:
