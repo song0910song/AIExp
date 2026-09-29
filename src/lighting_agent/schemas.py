@@ -1,17 +1,12 @@
-"""Versioned, serialisable domain models.
-
-Facts used for calculations live here rather than in a chat history.  All
-numeric fields use SI units documented in their field names.
-"""
+"""Current project facts; legacy fields remain readable as opaque data."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def utc_now() -> datetime:
@@ -22,406 +17,98 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
-def _drop_removed_metric_fields(values: Any, fields: frozenset[str]) -> Any:
-    """Discard fields removed from the public model while reading old payloads."""
-
-    if not isinstance(values, dict):
-        return values
-    return {key: value for key, value in values.items() if key not in fields}
+class CompatibleModel(BaseModel):
+    # Older projects may contain calculation/simulation data; do not erase it on save.
+    model_config = ConfigDict(extra="allow", str_strip_whitespace=True)
 
 
-_REMOVED_BRIEF_METRIC_FIELDS = frozenset({"target_uniformity_u0", "max_lpd_w_m2"})
-_REMOVED_CALCULATION_METRIC_FIELDS = frozenset({"installed_power_density_w_m2"})
-_REMOVED_SIMULATION_METRIC_FIELDS = frozenset(
-    {"uniformity_u0", "installed_power_density_w_m2", "ugr"}
-)
-_REMOVED_GROUP_FIELDS = frozenset(
-    {
-        "lighting_groups",
-        "luminaire_group_assignments",
-        "lighting_group_id",
-        "group_id",
-        "region_name",
-        "group_name",
-        "mounting_height_m",
-        "group_assignments",
-        "region",
-        "zone_name",
-        "lighting_group_name",
-        "group",
-        "mounting_height",
-        "mounting_point_height_m",
-    }
-)
-
-
-LIGHTING_PARAMETER_FIELDS = frozenset(
-    {
-        "target_illuminance_lx",
-        "target_cct_k",
-        "min_cri",
-        "target_ugr",
-    }
-)
-
-
-class LightingParameterSource(StrictModel):
-    """Evidence provenance for a lighting parameter populated from RAG."""
-
-    source: Literal["rag"] = "rag"
-    evidence_ids: list[str] = Field(min_length=1, max_length=10)
-    applied_at: datetime = Field(default_factory=utc_now)
-
-    @field_validator("evidence_ids")
-    @classmethod
-    def unique_evidence_ids(cls, values: list[str]) -> list[str]:
-        normalized = list(dict.fromkeys(value for value in values if value))
-        if not normalized:
-            raise ValueError("evidence_ids must include at least one value")
-        return normalized
-
-
-class BriefTemplateOrigin(StrictModel):
-    """The editable indoor-lighting template used to initialise a brief."""
-
-    template_id: str = Field(min_length=1, max_length=80)
-    template_name: str = Field(min_length=1, max_length=100)
-    standard_reference: str = Field(min_length=1, max_length=300)
-    applied_at: datetime = Field(default_factory=utc_now)
-
-
-class DesignBrief(StrictModel):
-    """Confirmed input for an indoor lighting design task.
-
-    The assistant may fill lighting targets from applicable RAG evidence. Each
-    such value retains source evidence in ``lighting_parameter_sources``.
-    """
-
+class DesignBrief(CompatibleModel):
     project_name: str = Field(min_length=1, max_length=160)
-    space_type: str | None = Field(default=None, max_length=100)
-    area_m2: float | None = Field(default=None, gt=0, le=100_000)
-    length_m: float | None = Field(default=None, gt=0, le=1_000)
-    width_m: float | None = Field(default=None, gt=0, le=1_000)
-    room_height_m: float | None = Field(default=None, gt=0, le=100)
-    workplane_height_m: float | None = Field(default=0.75, ge=0, le=10)
-    target_illuminance_lx: float | None = Field(default=None, gt=0, le=100_000)
-    target_cct_k: int | None = Field(default=None, ge=1_000, le=20_000)
-    min_cri: int | None = Field(default=None, ge=0, le=100)
-    target_ugr: float | None = Field(default=None, ge=0, le=40)
-    max_power_w: float | None = Field(default=None, gt=0, le=100_000)
-    mounting: str | None = Field(default=None, max_length=100)
-    min_ip_rating: str | None = Field(default=None, pattern=r"^IP\d{2}[A-Za-z]?$", max_length=5)
-    preferred_brands: list[str] = Field(default_factory=list, max_length=20)
-    notes: str | None = Field(default=None, max_length=4_000)
+    space_type: str | None = None
+    area_m2: float | None = None
+    length_m: float | None = None
+    width_m: float | None = None
     confirmed_fields: set[str] = Field(default_factory=set)
-    lighting_parameter_sources: dict[str, LightingParameterSource] = Field(default_factory=dict)
-    template_origin: BriefTemplateOrigin | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def drop_removed_metrics(cls, values: Any) -> Any:
-        cleaned = _drop_removed_metric_fields(values, _REMOVED_BRIEF_METRIC_FIELDS)
-        if not isinstance(cleaned, dict):
-            return cleaned
-
-        confirmed_fields = cleaned.get("confirmed_fields")
-        if isinstance(confirmed_fields, (list, set, tuple)):
-            cleaned["confirmed_fields"] = [
-                field for field in confirmed_fields if field not in _REMOVED_BRIEF_METRIC_FIELDS
-            ]
-        sources = cleaned.get("lighting_parameter_sources")
-        if isinstance(sources, dict):
-            cleaned["lighting_parameter_sources"] = _drop_removed_metric_fields(
-                sources, _REMOVED_BRIEF_METRIC_FIELDS
-            )
-        # Projects created before the group workflow was removed may still
-        # contain this field. Preserve only the project-level room height when
-        # it is available, then ignore the group records themselves.
-        legacy_groups = cleaned.get("lighting_groups")
-        if cleaned.get("room_height_m") is None and isinstance(legacy_groups, list):
-            for legacy_group in legacy_groups:
-                if isinstance(legacy_group, dict) and legacy_group.get("mounting_height_m") is not None:
-                    cleaned["room_height_m"] = legacy_group["mounting_height_m"]
-                    break
-        cleaned.pop("lighting_groups", None)
-        return cleaned
-
-    @field_validator("preferred_brands")
-    @classmethod
-    def unique_brands(cls, values: list[str]) -> list[str]:
-        return list(dict.fromkeys(value for value in values if value))
-
-    @field_validator("lighting_parameter_sources")
-    @classmethod
-    def lighting_parameter_sources_only_cover_lighting_fields(
-        cls, values: dict[str, LightingParameterSource]
-    ) -> dict[str, LightingParameterSource]:
-        unknown_fields = sorted(set(values) - LIGHTING_PARAMETER_FIELDS)
-        if unknown_fields:
-            raise ValueError(
-                "lighting_parameter_sources contains non-lighting fields: "
-                + ", ".join(unknown_fields)
-            )
-        return values
-
-    def missing_design_inputs(self) -> list[str]:
-        missing: list[str] = []
-        if not self.space_type:
-            missing.append("space_type")
-        return missing
 
 
 class Evidence(StrictModel):
     evidence_id: str = Field(default_factory=lambda: uuid4().hex)
-    source_name: str = Field(min_length=1)
+    source_name: str
     source_type: Literal["standard", "project_document", "user_note"]
-    excerpt: str = Field(min_length=1)
+    excerpt: str
     locator: str | None = None
     retrieved_at: datetime = Field(default_factory=utc_now)
-    score: float | None = Field(default=None, ge=0, le=1)
-
-# 照度计算输入
-class CalculationInput(StrictModel):
-    area_m2: float = Field(gt=0)
-    target_illuminance_lx: float = Field(gt=0)
-    luminaire_luminous_flux_lm: float = Field(gt=0)
-    luminaire_power_w: float = Field(gt=0)
-    utilization_factor: float = Field(gt=0, le=1)
-    maintenance_factor: float = Field(gt=0, le=1)
-
-    @model_validator(mode="before")
-    @classmethod
-    def drop_removed_group_fields(cls, values: Any) -> Any:
-        return _drop_removed_metric_fields(values, _REMOVED_GROUP_FIELDS)
+    score: float | None = None
 
 
-class CalculationResult(StrictModel):
-    method: Literal["lumen_method"] = "lumen_method"
-    inputs: CalculationInput
-    required_luminous_flux_lm: float
-    luminaire_count: int
-    estimated_illuminance_lx: float = Field(ge=0)
-    installed_power_w: float
-    assumptions: list[str]
-    limitations: list[str]
-    calculated_at: datetime = Field(default_factory=utc_now)
-
-    @model_validator(mode="before")
-    @classmethod
-    def drop_removed_metrics(cls, values: Any) -> Any:
-        cleaned = _drop_removed_metric_fields(values, _REMOVED_CALCULATION_METRIC_FIELDS)
-        cleaned = _drop_removed_metric_fields(cleaned, _REMOVED_GROUP_FIELDS)
-        if isinstance(cleaned, dict) and cleaned.get("estimated_illuminance_lx") is None:
-            inputs = cleaned.get("inputs")
-            count = cleaned.get("luminaire_count")
-            if isinstance(inputs, dict) and count is not None:
-                area = inputs.get("area_m2")
-                flux = inputs.get("luminaire_luminous_flux_lm")
-                utilization = inputs.get("utilization_factor")
-                maintenance = inputs.get("maintenance_factor")
-                if all(value is not None for value in (area, flux, utilization, maintenance)):
-                    cleaned["estimated_illuminance_lx"] = (
-                        float(count)
-                        * float(flux)
-                        * float(utilization)
-                        * float(maintenance)
-                        / float(area)
-                    )
-        return cleaned
-
-
-class RuleRequirement(StrictModel):
-    """A deterministic rule with explicit provenance; it is not a hard-coded GB rule."""
-
-    metric: Literal["illuminance_lx"]
-    operator: Literal["min", "max"]
-    threshold: float = Field(ge=0)
-    evidence_id: str | None = None
-    description: str | None = None
-
-
-class RuleCheck(StrictModel):
-    metric: str
-    status: Literal["pass", "fail", "not_applicable", "insufficient_data"]
-    observed: float | None = None
-    threshold: float | None = None
-    explanation: str
-    evidence_id: str | None = None
-
-
-class SimulationMetrics(StrictModel):
-    """Structured metrics imported from a DIALux or equivalent result."""
-
-    maintained_illuminance_lx: float | None = Field(default=None, ge=0)
-    minimum_illuminance_lx: float | None = Field(default=None, ge=0)
-
-    @model_validator(mode="before")
-    @classmethod
-    def drop_removed_metrics(cls, values: Any) -> Any:
-        return _drop_removed_metric_fields(values, _REMOVED_SIMULATION_METRIC_FIELDS)
-
-
-class SimulationArtifact(StrictModel):
-    """A preserved DIALux result file used as simulation evidence."""
-
-    artifact_id: str = Field(default_factory=lambda: uuid4().hex)
-    file_name: str = Field(min_length=1, max_length=180)
-    media_type: str = Field(min_length=1, max_length=120)
-    storage_path: str = Field(min_length=1, max_length=500)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    size_bytes: int = Field(ge=1, le=50 * 1024 * 1024)
-    uploaded_at: datetime = Field(default_factory=utc_now)
-
-
-class DialuxVisionAnalysis(StrictModel):
-    """Structured, auditable reading returned by the image-capable model."""
-
-    is_dialux_result: bool
-    maintained_illuminance_lx: float | None = Field(default=None, ge=0)
-    confidence: float = Field(ge=0, le=1)
-    metric_label: str | None = Field(default=None, max_length=160)
-    calculation_surface: str | None = Field(default=None, max_length=240)
-    explanation: str = Field(min_length=1, max_length=1_000)
-    model: str = Field(min_length=1, max_length=160)
-
-
-class SimulationRun(StrictModel):
-    run_id: str = Field(default_factory=lambda: uuid4().hex)
-    kind: Literal["preview", "精算", "dialux_handoff"] = "preview"
-    status: Literal["pending", "running", "succeeded", "failed", "stale", "unverified", "cancelled"] = "pending"
-    input_project_revision: int = Field(ge=0)
-    solver_version: str | None = None
-    artifact_path: str | None = None
-    error: str | None = None
-    selected_luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
-    source_file: str | None = None
-    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    source_kind: Literal[
-        "dialux_pdf",
-        "dialux_image",
-        "dialux_csv",
-        "dialux_json",
-        "manual_form",
-    ] | None = None
-    artifacts: list[SimulationArtifact] = Field(default_factory=list, max_length=20)
-    metrics: SimulationMetrics | None = None
-    metric_source: Literal["manual", "pdf_text", "vision"] | None = None
-    vision_analysis: DialuxVisionAnalysis | None = None
-    verification_status: Literal["matched", "mismatch", "incomplete", "unverified", "stale"] = "unverified"
-    verification_messages: list[str] = Field(default_factory=list, max_length=50)
-    parser_version: str | None = None
-    stale_reason: str | None = None
-    created_at: datetime = Field(default_factory=utc_now)
-    completed_at: datetime | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def drop_removed_fields(cls, values: Any) -> Any:
-        if isinstance(values, dict):
-            values.pop("input_scene_revision", None)
-            values.pop("handoff_id", None)
-            values.pop("input_snapshot_sha256", None)
-            values.pop("photometry_sha256_by_luminaire", None)
-        return values
-
-
-class LuminaireSearchRequest(StrictModel):
+class LuminaireSearchRequest(CompatibleModel):
     keyword: str = Field(min_length=1, max_length=160)
-    language: str = Field(default="zh", pattern=r"^[A-Za-z-]{2,5}$")
-    brand: str | None = Field(default=None, max_length=100)
-    brand_id: str | None = Field(default=None, max_length=128)
-    preferred_brands: list[str] = Field(default_factory=list, max_length=20)
-    target_illuminance_lx: float | None = Field(default=None, gt=0, le=100_000)
-    target_cct_k: int | None = Field(default=None, ge=1_000, le=20_000)
-    target_cct_tolerance_k: int = Field(default=0, ge=0, le=2_000)
-    min_cri: int | None = Field(default=None, ge=0, le=100)
-    max_ugr: float | None = Field(default=None, ge=0, le=40)
-    max_power_w: float | None = Field(default=None, gt=0, le=100_000)
-    min_ip_rating: str | None = Field(default=None, pattern=r"^IP\d{2}[A-Za-z]?$", max_length=5)
+    language: str = "zh"
+    brand: str | None = None
+    brand_id: str | None = None
+    preferred_brands: list[str] = Field(default_factory=list)
+    target_illuminance_lx: float | None = None
+    target_cct_k: int | None = None
+    target_cct_tolerance_k: int = 0
+    min_cri: int | None = None
+    max_ugr: float | None = None
+    max_power_w: float | None = None
+    min_ip_rating: str | None = None
     max_results: int = Field(default=5, ge=1, le=5)
-
-    @model_validator(mode="before")
-    @classmethod
-    def drop_removed_group_fields(cls, values: Any) -> Any:
-        return _drop_removed_metric_fields(values, _REMOVED_GROUP_FIELDS)
-
-    @model_validator(mode="before")
-    @classmethod
-    def drop_deprecated_mounting(cls, values: Any) -> Any:
-        """Drop the removed mounting filter so stored search runs stay loadable."""
-
-        if isinstance(values, dict):
-            values.pop("mounting", None)
-            for key in _REMOVED_GROUP_FIELDS:
-                values.pop(key, None)
-        return values
-
-    @field_validator("preferred_brands")
-    @classmethod
-    def unique_preferred_brands(cls, values: list[str]) -> list[str]:
-        return list(dict.fromkeys(value for value in values if value))
 
 
 class LuminaireCriterionCheck(StrictModel):
-    """Result of checking one requested luminaire attribute."""
-
-    field: Literal[
-        "brand", "max_power_w", "target_cct_k", "min_cri", "max_ugr", "min_ip_rating", "mounting", "detail"
-    ]
+    field: Literal["brand", "max_power_w", "target_cct_k", "min_cri", "max_ugr", "min_ip_rating", "mounting", "detail"]
     status: Literal["pass", "fail", "unknown"]
     expected: str
     observed: str | None = None
     priority: Literal["required", "preference"] = "required"
 
 
-class LuminaireBriefValidation(StrictModel):
-    """A re-check of a saved candidate against one immutable project revision."""
-
-    project_revision: int = Field(ge=0)
+class LuminaireBriefValidation(CompatibleModel):
+    project_revision: int
     constraints: LuminaireSearchRequest
     matching_status: Literal["matches", "incomplete", "rejected"]
     missing_requested_fields: list[str] = Field(default_factory=list)
     failed_requested_fields: list[str] = Field(default_factory=list)
     criteria_checks: list[LuminaireCriterionCheck] = Field(default_factory=list)
-    status: Literal["current", "stale"] = "current"
+    status: str = "current"
     validated_at: datetime = Field(default_factory=utc_now)
 
 
-class LuminaireSearchRun(StrictModel):
-    """Reproducible provenance for one vendor-directory lookup."""
-
+class LuminaireSearchRun(CompatibleModel):
     search_run_id: str = Field(default_factory=lambda: uuid4().hex)
-    project_id: str | None = Field(default=None, min_length=8, max_length=64)
-    project_revision: int | None = Field(default=None, ge=0)
+    project_id: str | None = None
+    project_revision: int | None = None
     request: LuminaireSearchRequest
-    original_keyword: str = Field(min_length=1, max_length=160)
-    resolved_keyword: str = Field(min_length=1, max_length=160)
-    fallback_keyword: str | None = Field(default=None, max_length=160)
-    endpoint: str = Field(min_length=1)
+    original_keyword: str
+    resolved_keyword: str
+    fallback_keyword: str | None = None
+    endpoint: str
     parameters: dict[str, str] = Field(default_factory=dict)
     brand_resolution: dict[str, str] = Field(default_factory=dict)
-    candidate_ids: list[str] = Field(default_factory=list, max_length=100)
+    candidate_ids: list[str] = Field(default_factory=list)
     detail_status_by_id: dict[str, str] = Field(default_factory=dict)
-    warnings: list[str] = Field(default_factory=list, max_length=100)
+    warnings: list[str] = Field(default_factory=list)
     parser_version: str = "2.0"
-    cache_hits: int = Field(default=0, ge=0)
+    cache_hits: int = 0
     started_at: datetime = Field(default_factory=utc_now)
     completed_at: datetime | None = None
-    duration_ms: int | None = Field(default=None, ge=0)
+    duration_ms: int | None = None
 
 
-class LuminaireCandidate(StrictModel):
+class LuminaireCandidate(CompatibleModel):
     luminaire_id: str
     article_name: str
     brand_name: str | None = None
     summary: str | None = None
     technical_summary: str | None = None
-    power_w: float | None = Field(default=None, ge=0)
-    luminous_flux_lm: float | None = Field(default=None, ge=0)
+    power_w: float | None = None
+    luminous_flux_lm: float | None = None
     ip_rating: str | None = None
-    cct_k: int | None = Field(default=None, ge=0)
-    cri: int | None = Field(default=None, ge=0, le=100)
-    ugr: float | None = Field(default=None, ge=0, le=40)
+    cct_k: int | None = None
+    cri: int | None = None
+    ugr: float | None = None
     detail_url: str
     image_url: str | None = None
     photometry_image_url: str | None = None
@@ -430,7 +117,7 @@ class LuminaireCandidate(StrictModel):
     detail_fields: dict[str, str] = Field(default_factory=dict)
     search_run_id: str | None = None
     detail_status: Literal["not_requested", "fetched", "failed", "parse_failed"] = "not_requested"
-    parse_warnings: list[str] = Field(default_factory=list, max_length=50)
+    parse_warnings: list[str] = Field(default_factory=list)
     brief_validation: LuminaireBriefValidation | None = None
     matching_status: Literal["matches", "incomplete", "rejected"] = "incomplete"
     missing_requested_fields: list[str] = Field(default_factory=list)
@@ -438,298 +125,64 @@ class LuminaireCandidate(StrictModel):
     criteria_checks: list[LuminaireCriterionCheck] = Field(default_factory=list)
     retrieved_at: datetime = Field(default_factory=utc_now)
 
-    @model_validator(mode="before")
-    @classmethod
-    def drop_deprecated_mounting(cls, values: Any) -> Any:
-        """Drop removed supplier fields so stored candidates stay loadable."""
-
-        if isinstance(values, dict):
-            values.pop("mounting", None)
-            values.pop("dialux_protocol_url", None)
-        return values
-
-
-class PhotometryExtractedFile(StrictModel):
-    relative_path: str
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    size_bytes: int = Field(ge=0)
-    file_type: Literal["ies", "ldt", "uld"]
-
-
-class PhotometryAsset(StrictModel):
-    luminaire_id: str
-    article_name: str
-    status: Literal["pending", "downloaded", "failed", "not_available"]
-    source_url: str | None = None
-    downloaded_at: datetime | None = None
-    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    zip_file: str | None = None
-    zip_size_bytes: int | None = Field(default=None, ge=0)
-    extracted_files: list[PhotometryExtractedFile] = Field(default_factory=list)
-    error: str | None = None
-    purposes: list[Literal["dialux_task", "design_evaluation"]] = Field(default_factory=list)
-    design_run_ids: list[str] = Field(default_factory=list, max_length=100)
-    quality_status: Literal["unchecked", "matched", "mismatch"] = "unchecked"
-    photometry_compatibility: Literal["unchecked", "supported", "unsupported"] = "unchecked"
-    quality_warnings: list[str] = Field(default_factory=list, max_length=20)
-    parsed_flux_lm: float | None = Field(default=None, ge=0)
-    parsed_power_w: float | None = Field(default=None, ge=0)
-
-
-class DesignFixtureSpec(StrictModel):
-    """One existing or candidate luminaire used by a redesign calculation."""
-
-    role: Literal["existing", "candidate"]
-    label: str = Field(min_length=1, max_length=240)
-    luminaire_id: str | None = Field(default=None, max_length=128)
-    asset_file: str | None = Field(default=None, max_length=500)
-    local_path: str | None = Field(default=None, max_length=500)
-    file_type: Literal["ldt", "ies"] | None = None
-    flux_lm: float = Field(gt=0, le=10_000_000)
-    watts: float = Field(ge=0, le=100_000)
-    maintenance_factor: float = Field(default=0.8, gt=0, le=1)
-    mounting_height_m: float | None = Field(default=None, gt=0, le=100)
-    height_source: Literal["report", "manual", "assumed"] = "assumed"
-    form_note: str | None = Field(default=None, max_length=500)
-
-    @model_validator(mode="after")
-    def source_is_required(self) -> "DesignFixtureSpec":
-        if not any((self.luminaire_id, self.asset_file, self.local_path)):
-            raise ValueError("fixture requires luminaire_id, asset_file or local_path")
-        return self
-
-
-class DesignMetrics(StrictModel):
-    average_lx: float = Field(ge=0)
-    minimum_lx: float = Field(ge=0)
-    maximum_lx: float = Field(ge=0)
-    uniformity_uo: float = Field(ge=0)
-    diversity_ud: float = Field(ge=0)
-    installed_power_w: float = Field(ge=0)
-    lpd_w_m2: float = Field(ge=0)
-    target_met: bool
-    overdesign_pct: float
-
-
-class DesignIteration(StrictModel):
-    attempt: int = Field(ge=1, le=3)
-    keyword: str | None = Field(default=None, max_length=160)
-    candidate_ids: list[str] = Field(default_factory=list, max_length=100)
-    asset_sha256: dict[str, str] = Field(default_factory=dict)
-    metrics: DesignMetrics | None = None
-    verdict: Literal["target_met", "under_target", "overdesigned", "failed"]
-    notes: list[str] = Field(default_factory=list, max_length=50)
-
-
-class DesignArtifact(StrictModel):
-    name: str = Field(min_length=1, max_length=180)
-    relative_path: str = Field(min_length=1, max_length=500)
-    media_type: str = Field(min_length=1, max_length=120)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    size_bytes: int = Field(ge=0)
-
-
-class DesignRun(StrictModel):
-    run_id: str = Field(default_factory=lambda: uuid4().hex)
-    mode: Literal["relayout", "retrofit"]
-    status: Literal["running", "succeeded", "failed"] = "running"
-    input_project_revision: int = Field(ge=0)
-    target_lux: float = Field(gt=0)
-    calibration_scale: float = Field(gt=0)
-    dxf_source: str = Field(min_length=1, max_length=500)
-    report_source: str | None = Field(default=None, max_length=500)
-    input_sha256: dict[str, str] = Field(default_factory=dict)
-    iterations: list[DesignIteration] = Field(default_factory=list, max_length=3)
-    result: dict[str, Any] = Field(default_factory=dict)
-    warnings: list[str] = Field(default_factory=list, max_length=100)
-    artifacts: list[DesignArtifact] = Field(default_factory=list, max_length=20)
-    created_at: datetime = Field(default_factory=utc_now)
-    completed_at: datetime | None = None
-
 
 class CadPoint(StrictModel):
-    """A 2D drawing coordinate in the CAD file's native coordinate system."""
-
     x: float
     y: float
 
 
 class FloorPlanAsset(StrictModel):
-    """Immutable provenance for one uploaded CAD drawing."""
-
-    source_name: str = Field(min_length=1, max_length=180)
+    source_name: str
     source_type: Literal["dxf", "dwg"]
-    storage_path: str = Field(min_length=1, max_length=300)
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    size_bytes: int = Field(ge=0, le=50 * 1024 * 1024)
+    storage_path: str
+    sha256: str
+    size_bytes: int
     converted_from_dwg: bool = False
     imported_at: datetime = Field(default_factory=utc_now)
 
 
 class FloorPlanAreaCandidate(StrictModel):
-    """One closed polyline that may represent a usable room boundary."""
-
     entity_type: Literal["LWPOLYLINE", "POLYLINE"]
-    layer: str = Field(min_length=1, max_length=255)
-    raw_area: float = Field(gt=0)
-    area_m2: float | None = Field(default=None, gt=0, le=100_000)
-    length_m: float | None = Field(default=None, gt=0, le=1_000)
-    width_m: float | None = Field(default=None, gt=0, le=1_000)
-    points: list[CadPoint] = Field(min_length=3, max_length=5_000)
+    layer: str
+    raw_area: float
+    area_m2: float | None = None
+    length_m: float | None = None
+    width_m: float | None = None
+    points: list[CadPoint]
 
 
-class FloorPlan(StrictModel):
-    """Parsed drawing facts. They are never used for design until applied."""
-
-    @model_validator(mode="before")
-    @classmethod
-    def drop_removed_luminaire_placements(cls, values: Any) -> Any:
-        """Keep projects saved before layout phase removal readable."""
-
-        if isinstance(values, dict):
-            values = dict(values)
-            values.pop("luminaire_placements", None)
-        return values
-
+class FloorPlan(CompatibleModel):
     asset: FloorPlanAsset
-    drawing_units: str = Field(min_length=1, max_length=32)
-    meters_per_drawing_unit: float | None = Field(default=None, gt=0)
+    drawing_units: str
+    meters_per_drawing_unit: float | None = None
     bounds: tuple[CadPoint, CadPoint] | None = None
     entity_counts: dict[str, int] = Field(default_factory=dict)
-    text_items: list[str] = Field(default_factory=list, max_length=200)
-    room_name: str | None = Field(default=None, max_length=160)
-    area_candidates: list[FloorPlanAreaCandidate] = Field(default_factory=list, max_length=50)
-    selected_area_candidate_index: int | None = Field(default=None, ge=0, le=49)
-    warnings: list[str] = Field(default_factory=list, max_length=50)
+    text_items: list[str] = Field(default_factory=list)
+    room_name: str | None = None
+    area_candidates: list[FloorPlanAreaCandidate] = Field(default_factory=list)
+    selected_area_candidate_index: int | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
-class ProjectState(StrictModel):
+class ProjectState(CompatibleModel):
     project_id: str = Field(default_factory=lambda: uuid4().hex)
-    revision: int = Field(default=0, ge=0)
+    revision: int = 0
     brief: DesignBrief
-    evidence: list[Evidence] = Field(default_factory=list)
-    calculations: list[CalculationResult] = Field(default_factory=list)
-    rule_checks: list[RuleCheck] = Field(default_factory=list)
     luminaires: list[LuminaireCandidate] = Field(default_factory=list)
-    luminaire_search_runs: list[LuminaireSearchRun] = Field(default_factory=list, max_length=500)
-    selected_luminaire_ids: list[str] = Field(default_factory=list, max_length=100)
+    luminaire_search_runs: list[LuminaireSearchRun] = Field(default_factory=list)
     floor_plan: FloorPlan | None = None
-    simulation_runs: list[SimulationRun] = Field(default_factory=list)
-    design_runs: list[DesignRun] = Field(default_factory=list, max_length=100)
-    workflow_status: Literal[
-        "draft",
-        "brief_confirmed",
-        "preliminary_calculated",
-        "luminaires_selected",
-        "simulation_pending",
-        "simulation_verified",
-        "needs_revision",
-        "accepted",
-        "delivered",
-    ] = "draft"
-    open_questions: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
-    def refresh_open_questions(self) -> None:
-        self.open_questions = self.brief.missing_design_inputs()
-
-    def refresh_workflow_status(self) -> None:
-        """Derive the visible workflow state from persisted project facts."""
-
-        latest_run = self.simulation_runs[-1] if self.simulation_runs else None
-        latest_calculation = self.calculations[-1] if self.calculations else None
-        target = self.brief.target_illuminance_lx
-        dialux_illuminance = (
-            latest_run.metrics.maintained_illuminance_lx
-            if latest_run is not None and latest_run.metrics is not None
-            else None
-        )
-        if (
-            target is not None
-            and latest_calculation is not None
-            and latest_calculation.estimated_illuminance_lx >= target
-            and latest_run is not None
-            and latest_run.verification_status == "matched"
-            and latest_run.status == "succeeded"
-            and dialux_illuminance is not None
-            and dialux_illuminance >= target
-        ):
-            self.workflow_status = "simulation_verified"
-        elif (
-            target is not None
-            and (
-                latest_calculation is not None
-                and latest_calculation.estimated_illuminance_lx < target
-                or latest_run is not None
-                and latest_run.verification_status == "matched"
-                and latest_run.status == "succeeded"
-                and dialux_illuminance is not None
-                and dialux_illuminance < target
-            )
-        ):
-            self.workflow_status = "needs_revision"
-        elif latest_run is not None and (
-            latest_run.verification_status == "mismatch" or latest_run.status == "stale"
-        ):
-            self.workflow_status = "needs_revision"
-        elif latest_run is not None and (
-            latest_run.status in {"succeeded", "unverified"}
-            or latest_run.verification_status in {"incomplete", "unverified", "matched"}
-        ):
-            self.workflow_status = "simulation_pending"
-        elif self.selected_luminaire_ids:
-            self.workflow_status = "luminaires_selected"
-        elif self.calculations:
-            self.workflow_status = "preliminary_calculated"
-        elif not self.brief.missing_design_inputs():
-            self.workflow_status = "brief_confirmed"
-        else:
-            self.workflow_status = "draft"
-
-    @model_validator(mode="before")
+    @field_validator("luminaires")
     @classmethod
-    def drop_removed_fields(cls, values: Any) -> Any:
-        if isinstance(values, dict):
-            values = dict(values)
-            values.pop("plan", None)
-            values.pop("scene", None)
-            values.pop("layout_analysis", None)
-            values.pop("blender_workflow", None)
-            values.pop("luminaire_group_assignments", None)
-        return values
-
-    @field_validator("selected_luminaire_ids")
-    @classmethod
-    def unique_selected_luminaires(cls, values: list[str]) -> list[str]:
-        return list(dict.fromkeys(value for value in values if value))
-
-    @model_validator(mode="after")
-    def selected_luminaires_must_be_saved_candidates(self) -> "ProjectState":
-        saved_ids = {item.luminaire_id for item in self.luminaires}
-        unknown_ids = [item for item in self.selected_luminaire_ids if item not in saved_ids]
-        if unknown_ids:
-            raise ValueError(f"Selected luminaires are not saved project candidates: {', '.join(unknown_ids)}")
-        return self
-
-    def selected_luminaires(self) -> list[LuminaireCandidate]:
-        """Return final project selections in the user-confirmed order."""
-
-        candidates_by_id = {item.luminaire_id: item for item in self.luminaires}
-        return [candidates_by_id[item] for item in self.selected_luminaire_ids]
+    def unique_luminaires(cls, values: list[LuminaireCandidate]) -> list[LuminaireCandidate]:
+        return list({item.luminaire_id: item for item in values}.values())
 
 
 class ProjectUpdate(StrictModel):
     expected_revision: int = Field(ge=0)
     brief: DesignBrief | None = None
-    evidence: list[Evidence] | None = None
-    calculations: list[CalculationResult] | None = None
-    rule_checks: list[RuleCheck] | None = None
+    floor_plan: FloorPlan | None = None
     luminaires: list[LuminaireCandidate] | None = None
     luminaire_search_runs: list[LuminaireSearchRun] | None = None
-    selected_luminaire_ids: list[str] | None = None
-    floor_plan: FloorPlan | None = None
-    simulation_runs: list[SimulationRun] | None = None
-    design_runs: list[DesignRun] | None = None
-    open_questions: list[str] | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)

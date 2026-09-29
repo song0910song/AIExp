@@ -1,197 +1,60 @@
-# LuxBeyond · 室内照明设计智能体
+# LuxBeyond · 照明设计知识工作台
 
-一个**可审计、可追溯**的室内照明设计工作台。
+当前版本的主界面是**一个项目问答窗口**。在同一会话中：
 
-它把需求理解、资料检索、照度初算、DIALux 验证和灯具选型串成一条工作流；项目事实、证据、计算结果和版本快照由程序保存，LLM 只负责对话与工具编排。
+1. 上传 DXF 或 DWG，查看二维轮廓与面积候选，确认房间边界后再用于后续提问。DWG 解析依赖本机 ODA File Converter。
+2. 上传 PDF、DOCX、MD 或 TXT 到项目资料或公共规范库；直接在对话中提问，助手检索片段并注明来源。扫描 PDF 需要可用的 OCR 服务。
+3. 询问照明设计知识、检索 DIALux Luminaire Finder；候选保存在当前项目，在会话中的候选列表里点击发送，通过本机 `dial://` 协议打开灯具导入。
+4. 在输入区选择思考强度；模型提示词缓存由环境变量控制，页面显示当前开关状态。
 
-> 定位：辅助设计与 DIALux 交接，不替代专业照明软件的最终仿真和人工签发。
+发送灯具只是唤起导入对话框；**不会驱动 DIALux 建模、计算或生成仿真结果**。已移除流明法、配光预览、重设计、自算报告和 DIALux 结果导入。历史项目中的原有记录仍保存在数据库，当前工作台不展示或修改这些数据。
 
-## 核心能力
+## 启动
 
-| 模块 | 能做什么 |
-| --- | --- |
-| 项目管理 | 创建项目、保存项目级设计任务书、revision 版本和待确认事项 |
-| 资料检索 | 将 Markdown、TXT、Word、PDF 建库，保留证据片段和来源位置 |
-| 平面图解析 | 读取 DXF；安装 ODA File Converter 后可转换并读取 DWG，提取二维房间边界与标注 |
-| 确定性初算 | 使用流明法计算所需光通量、灯具数量、估算照度和装机功率 |
-| 联合检验 | 仅以照度为标准，流明法与当前版本的 DIALux 维持照度均达标才通过 |
-| 灯具选型 | 查询 DIALux Luminaire Finder，补全型号、品牌、功率、IP、ULD 和配光信息 |
-| 照明重设计 | 解析 DXF + DIALux PDF，以真实 IES/LDT 配光执行自由重排或固定点位替换，输出逐点照度验证与可审计方案包 |
-| 交付输出 | 生成存量重设计成果包，不再生成设计报告草稿或 DIALux 交接任务包 |
-| 智能对话 | 通过 Web 工作台上传资料、确认条件并编排上述工具 |
-
-## 当前验收口径
-
-- 现阶段仅以照度作为计算、验证与迭代停止标准；UGR、显色指数、色温、功率等不参与本阶段通过/不通过判定。
-- 流明法用于方案前置估算，DIALux evo 用于仿真复核。两者结果都不低于目标照度时，联合检验才通过。
-- DIALux 证据可直接上传 PDF 设计报告或 PNG/JPG/WEBP 仿真图片，不需要先保存最终选型或生成任务包。保留原文件、哈希与项目 revision；图片必须经视觉模型解析。存量资料标为现状证据，不能仅凭上传就证明新方案达标。
-- 未达标时智能体根据已上传 DXF 和 PDF 继续存量重设计；缺少文件时用纯文字询问，最终方案仍须在 DIALux 中复算。用户明确说停止、结束、取消迭代时，终止循环。
-
-## 重设计工作流
-
-- 新建时只有文字说明：补全必要参数、完成初算和灯具选型，然后用纯文字提醒上传 DXF 平面图及 DIALux PDF 报告，不生成表格或结构化问询卡片。
-- 新建时已上传两类文件，或选型后补传齐全：先解析与交叉校验，自动进入存量照明重设计，无需用户再次要求“重设计”。分轮上传仅询问缺失项；普通 PDF 不算 DIALux 报告，多份报告需确认采用哪份。
-- 输入推荐同时提供 DXF 与 DIALux PDF：DXF 提供房间轮廓、灯具点位和评价网格；PDF 提供灯具表、工作面、安装高度与目标值。
-- 允许调整点位时运行自由重排；点位、高度或吊顶不可变时运行原位替换，并给出产品组合、部分替换 `k` 扫描与最小干预建议。
-- 计算以已下载并解析通过的 IES/LDT 为准；目录或报告参数与配光文件冲突时记录差异，光通量采用配光文件声明值，LM-63 `-1` 文件采用光强表积分值。
-- 当前仅以平均照度 `Em >= target` 验收；Uo、LPD、功率和 RUG 继续披露，但 Uo/RUG 不参与本轮通过判定。最终施工前仍需在 DIALux evo 或等效专业软件中复算。
-- 每次运行持久化为 `DesignRun`，产物包包含报告、候选/场景 CSV、布点或替换清单、PNG 图和带 SHA-256 的 manifest。
-
-主要 API：`POST /api/projects/{id}/redesign/relayout`、`POST /api/projects/{id}/redesign/retrofit`、`GET /api/projects/{id}/redesign/runs`、`GET /api/projects/{id}/redesign/runs/{run_id}/package` 和 `POST /api/projects/{id}/design-assets`。
-
-## 快速开始
-
-### 1. 安装后端依赖
-
-要求：Python `>=3.14`、[uv](https://docs.astral.sh/uv/)。
+要求 Python 3.14+、Node.js 20+、uv。初次安装：
 
 ```powershell
 uv sync --group dev
+cd web
+npm install
 ```
 
-### 2. 启动 Web 工作台（推荐）
+在项目根目录配置 `.env`：
 
-要求：Node.js `>=20`。
+```dotenv
+LIGHTING_LLM_API_KEY=your-key
+LIGHTING_LLM_MODEL=your-model
+LIGHTING_LLM_BASE_URL=https://your-compatible-endpoint/v1
+LIGHTING_LLM_REASONING_EFFORTS=none,low,medium,high
+LIGHTING_LLM_REASONING_EFFORT_DEFAULT=medium
+# 可选：使用兼容网关的隐式缓存；默认只对受支持的 OpenAI 模型自动启用
+LIGHTING_LLM_PROMPT_CACHE_ENABLED=true
+LIGHTING_LLM_PROMPT_CACHE_KEY=lighting-design-agent-v1
+LIGHTING_LLM_PROMPT_CACHE_TTL=30m
+# 可选：本机 DWG 转换
+ODA_FILE_CONVERTER_PATH=C:\path\to\ODAFileConverter.exe
+# 可选：无需嵌入模型时使用本地关键词检索
+LIGHTING_RAG_BACKEND=local
+```
+
+工作台：
 
 ```powershell
 cd web
-npm install       # 首次运行
 npm run dev
 ```
 
-浏览器打开 <http://localhost:3000>。`npm run dev` 会自动启动后端并等待健康检查；API 文档位于 <http://127.0.0.1:8000/docs>。
+打开 http://localhost:3000。启动脚本会自动拉起 FastAPI；API 文档为 http://127.0.0.1:8000/docs。创建项目时会在选定文件夹下保存项目数据库与上传资料。灯具发送到 DIALux 需要后端与装有 DIALux 的 Windows 桌面运行在同一台机器上。兼容网关是否接受缓存扩展参数需按网关协议配置。
 
-### 3. 使用 CLI
-
-在项目根目录执行：
-
-```powershell
-# 创建项目
-uv run python main.py init-project "会议室改造" `
-  --space-type "会议室" --area-m2 30 `
-  --target-lx 500 --target-cct-k 4000 --min-cri 80
-
-# 查看项目
-uv run python main.py show-project <project_id>
-
-# 建库并检索资料
-uv run python main.py add-document .\src\data\user_docs\GB-50034-2024.md --source-type standard
-uv run python main.py search-evidence "会议室 照度 显色指数"
-
-# 初步计算、查询灯具
-uv run python main.py calculate <project_id> --revision 0 `
-  --area-m2 30 --target-lx 500 `
-  --lumens 3200 --power-w 24 --utilization-factor 0.6 --maintenance-factor 0.8
-uv run python main.py search-luminaires "嵌入式 LED 筒灯" --target-cct-k 4000 --min-cri 80
-```
-
-所有命令的完整参数可用以下命令查看：
-
-```powershell
-uv run python main.py --help
-```
-
-## 配置
-
-在项目根目录创建 `.env`。CLI 命令不需要 LLM 密钥；Web 智能对话需要配置网关。
-
-```dotenv
-LIGHTING_LLM_API_KEY=你的密钥
-LIGHTING_LLM_MODEL=模型名称
-LIGHTING_LLM_BASE_URL=https://你的网关地址/v1
-# ODA 安装在非默认目录时配置完整可执行文件路径
-ODA_FILE_CONVERTER_PATH=F:\oda\ODAFileConverter.exe
-```
-
-常用变量：
-
-| 变量 | 默认值 | 用途 |
-| --- | --- | --- |
-| `LIGHTING_LLM_API_KEY` | 无 | 智能对话密钥 |
-| `LIGHTING_LLM_MODEL` | 无 | 对话模型 |
-| `LIGHTING_LLM_BASE_URL` | 无 | OpenAI 兼容网关地址 |
-| `LIGHTING_VISION_MODEL` | `LIGHTING_LLM_MODEL` | 解析 DIALux 仿真图片的多模态模型 |
-| `LIGHTING_VISION_MIN_CONFIDENCE` | `0.7` | 自动采用图片照度读数的最低置信度 |
-| `LIGHTING_VISION_TIMEOUT_SECONDS` | `60` | 单次视觉模型请求超时 |
-| `LIGHTING_VISION_MAX_RETRIES` | `0` | 视觉模型失败后的最大重试次数 |
-| `ODA_FILE_CONVERTER_PATH` | 自动探测 | ODA File Converter 的完整路径；用于自定义安装目录下的 DWG 转换 |
-| `LIGHTING_RAG_BACKEND` | `chroma` | `local` 切换为 SQLite 关键词检索 |
-| `LIGHTING_EMBEDDING_MODEL` | `BAAI/bge-small-zh-v1.5` | Chroma 嵌入模型 |
-| `LIGHTING_EMBEDDING_CACHE_FOLDER` | `.model-cache` | 嵌入模型缓存目录 |
-| `DIALUX_BASE_URL` | `https://luminaires.dialux.com` | DIALux 灯具目录地址 |
-| `DIALUX_TIMEOUT_SECONDS` | `15` | DIALux 请求超时 |
-| `PADDLEOCR_API_URL` | 见 `config.py` | PDF OCR 作业端点 |
-
-首次使用 Chroma 前需要下载嵌入模型。网络受限时可使用镜像：
-
-```powershell
-$env:HF_ENDPOINT = "https://hf-mirror.com"
-$env:LIGHTING_EMBEDDING_LOCAL_FILES_ONLY = "false"
-uv run python -c "from lighting_agent.rag import create_evidence_store; create_evidence_store()"
-```
-
-不需要语义检索时，可临时使用本地关键词检索：
-
-```powershell
-$env:LIGHTING_RAG_BACKEND = "local"
-```
-
-完整配置清单见 [`src/lighting_agent/config.py`](src/lighting_agent/config.py)。
-
-## 工作流边界
-
-- CAD 仅解析**二维平面图**，不提供三维建模。
-- DIALux Luminaire Finder 是灯具产品目录，不是仿真服务；搜索结果只是候选。
-- 保留候选灯具和用户明确确认的最终选型；重设计可按 DesignRun 下载候选的真实配光，不再提供“保存选型并生成任务包”流程。
-- 本阶段的照度必须在 DIALux evo 或等效专业软件中复核；其他指标不参与当前验收。
-- 新上传结果保留为未验证的现状证据；不提供任务包生成、下载或一致性校验。输入发生变化时，旧结果会标记为过期。
-
-## 数据位置
-
-| 路径 | 内容 |
-| --- | --- |
-| `data/lighting_design.sqlite3` | CLI 使用的项目与全局资料库 |
-| `data/projects/` | CLI 项目数据（运行时生成） |
-| 工作区目录下的 `projects/<project_id>/` | Web 项目状态、聊天记录、资料和交付文件（每个项目独立存放） |
-| `.model-cache/` | 嵌入模型缓存（运行时生成） |
-| `src/data/user_docs/` | 可加入资料库的示例文档 |
-
-项目状态以版本化 `ProjectState` 为准，更新使用 revision 乐观锁，避免旧会话覆盖新数据。计算和选型均基于项目级条件，不再维护照明分组。
+CLI 可使用 `uv run python main.py --help` 查看 `analyze-cad`、`add-document`、`search-evidence` 和 `search-luminaires` 等命令。
 
 ## 验证
 
 ```powershell
-uv run pytest tests/ -q --basetemp .pytest-basetemp
-uv run python main.py --help
+uv run pytest tests/ -q
+cd web
+npm run typecheck
+npm run build
 ```
 
-## 项目结构
-
-```text
-src/lighting_agent/
-  agent.py              # LLM 对话与工具编排
-  system_prompt.md      # 智能体系统提示词
-  tools.py              # 项目、检索、计算、选型与重设计工具
-  project_store.py      # ProjectState 版本化持久化
-  rag.py                # Chroma / SQLite 证据检索
-  floor_plan.py         # DXF / DWG 二维平面图解析
-  dialux_api.py         # DIALux Luminaire Finder 客户端
-  deliverables.py       # 重设计成果包与未验证仿真记录
-  workflow.py           # 按当前项目文件分流及纯文字补传提示
-  web_api.py            # FastAPI 接口
-  calculations/         # 流明法与规则校核
-web/                    # Next.js 工作台
-tests/                  # pytest 测试
-main.py                 # CLI 入口
-```
-
-## 文档
-
-- [从零启动教程](docs/从零启动教程.md)：环境准备、首次安装和常见问题
-- [照明设计智能体方案](docs/照明设计智能体方案.md)：系统设计与数据模型
-- [DIALux Luminaire Finder API](docs/DIALux-Luminaire-Finder-API.md)：目录接口与字段说明
-- [灯具坐标与照明布局分析方案](docs/灯具坐标与照明布局分析方案.md)：平面图分析方案
-
-## License
-
-见 [LICENSE](LICENSE)。
+外部 DIALux 网站和本机软件的真实连接需要在部署环境中单独验证；单元测试只验证 API 和协议调用。

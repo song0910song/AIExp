@@ -319,9 +319,9 @@ def test_matching_supports_cct_tolerance() -> None:
     assert result.matching_status == "matches"
 
 
-def test_search_requires_deterministic_selection_conditions() -> None:
-    with pytest.raises(DialuxAPIError, match="missing deterministic prerequisites"):
-        DialuxAPI(session=FakeSession()).search(LuminaireSearchRequest(keyword="downlight"))
+def test_keyword_search_does_not_require_a_design_target() -> None:
+    results = DialuxAPI(session=FakeSession()).search(LuminaireSearchRequest(keyword="downlight"))
+    assert results[0].article_name == "DL-4000K 16.4W"
 
 
 def test_candidate_summary_excludes_raw_supplier_detail_fields() -> None:

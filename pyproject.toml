@@ -1,7 +1,7 @@
 [project]
 name = "lighting-design-agent"
 version = "0.1.0"
-description = "Auditable indoor lighting-design agent with DIALux Luminaire Finder integration"
+description = "CAD, lighting knowledge and DIALux luminaire workbench"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -19,14 +19,9 @@ dependencies = [
     "python-multipart>=0.0.20",
     "requests>=2.32",
     "sentence-transformers>=5.6",
-    "torch>=2.7",
     "uvicorn>=0.35",
-    "crawl4ai>=0.9.2",
     "ezdxf>=1.4",
-    "matplotlib>=3.11.1",
-    "numpy>=2.3",
     "shapely>=2.1.2",
-    "reportlab>=5.0.1",
 ]
 
 [project.scripts]

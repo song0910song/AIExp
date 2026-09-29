@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import re
 import time
-import zipfile
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from io import BytesIO
 from threading import Lock
 from typing import Any
 from urllib.parse import quote, urljoin, urlparse
@@ -72,10 +70,8 @@ IP_PATTERN = re.compile(r"\b(IP\s?\d{2}[A-Z]?)\b", re.I)
 CCT_PATTERN = re.compile(r"\b(\d{4,5})\s*K\b", re.I)
 CRI_PATTERN = re.compile(r"\b(?:CRI|Ra)\s*[:>=]?\s*(\d{2,3})\b", re.I)
 UGR_PATTERN = re.compile(r"\bUGR\s*(?:[:<≤]|max(?:\.|imum)?\s*)?\s*(\d{1,2}(?:[.,]\d)?)(?!\d)", re.I)
-PHOTOMETRY_ZIP_HREF_PATTERN = re.compile(r"href\s*=\s*['\"](?P<href>[^'\"]+\.zip(?:\?[^'\"]*)?)['\"]", re.I)
 # Same shape the site embeds behind its "Send to DIALux" button.
 DIALUX_PROTOCOL_LINK_PATTERN = re.compile(r"dial://[^\s\"'<>]+\.uld", re.I)
-MAX_PHOTOMETRY_ZIP_BYTES = 50 * 1024 * 1024
 PARSER_VERSION = "2.0"
 
 POWER_FIELD_NAMES = (
@@ -613,32 +609,6 @@ class DialuxAPI:
             return current, response
         raise DialuxAPIError("DIALux redirect chain exceeded the allowed limit", code="redirect_limit")
 
-    def download_photometry_zip(self, detail_url: str) -> tuple[str, bytes]:
-        """Download a same-origin photometric ZIP with a hard streamed size limit."""
-
-        page_url, detail_response = self._trusted_get(
-            detail_url,
-            headers={"Accept": "text/html", "User-Agent": self.headers["User-Agent"]},
-        )
-        match = PHOTOMETRY_ZIP_HREF_PATTERN.search(detail_response.text)
-        if match is None:
-            raise DialuxAPIError(
-                "DIALux product page does not expose a photometric ZIP download",
-                code="photometry_not_listed",
-            )
-        download_url = urljoin(page_url, match.group("href"))
-        source_url, download_response = self._trusted_get(
-            download_url,
-            headers={"Accept": "application/zip, application/octet-stream"},
-            stream=True,
-        )
-        content = _read_limited_response(download_response, MAX_PHOTOMETRY_ZIP_BYTES)
-        if not content:
-            raise DialuxAPIError("DIALux photometric ZIP download was empty", code="empty_download")
-        if not zipfile.is_zipfile(BytesIO(content)):
-            raise DialuxAPIError("DIALux photometric download was not a valid ZIP file", code="invalid_zip")
-        return source_url, content
-
     def resolve_send_to_dialux_url(self, detail_url: str) -> str:
         """Extract the product page's Send-to-DIALux ``dial://`` link."""
 
@@ -697,27 +667,6 @@ class DialuxAPI:
             "fields": fields,
             "warnings": warnings,
         }
-
-
-def _read_limited_response(response: Any, limit: int) -> bytes:
-    iterator = getattr(response, "iter_content", None)
-    chunks = iterator(chunk_size=64 * 1024) if callable(iterator) else [response.content]
-    content = bytearray()
-    try:
-        for chunk in chunks:
-            if not chunk:
-                continue
-            content.extend(chunk)
-            if len(content) > limit:
-                raise DialuxAPIError(
-                    f"DIALux photometric ZIP exceeds the {limit // (1024 * 1024)} MB package limit",
-                    code="download_too_large",
-                )
-    finally:
-        close = getattr(response, "close", None)
-        if callable(close):
-            close()
-    return bytes(content)
 
 
 def _safe_detail_fields(value: Any) -> dict[str, str]:
@@ -823,30 +772,10 @@ def apply_brief_constraints(
 def validate_luminaire_search(
     request: LuminaireSearchRequest, brief: DesignBrief | None = None
 ) -> tuple[LuminaireSearchRequest, list[str]]:
-    """Return an effective request and missing deterministic prerequisites.
-
-    Any explicit product-selection condition can unlock a catalogue search.
-    This is separate from project acceptance, which currently uses only
-    illuminance.
-    """
+    """Apply optional project filters without requiring design calculations."""
 
     effective = apply_brief_constraints(request, brief) if brief is not None else request
-    missing: list[str] = []
-    if brief is not None and not brief.space_type:
-        missing.append("space_type")
-    if not any(
-        (
-            effective.target_illuminance_lx is not None,
-            effective.target_cct_k is not None,
-            effective.min_cri is not None,
-            effective.max_ugr is not None,
-            effective.min_ip_rating is not None,
-            effective.max_power_w is not None,
-            effective.brand is not None,
-        )
-    ):
-        missing.append("selection_constraint")
-    return effective, missing
+    return effective, []
 
 
 def candidate_summary(candidate: LuminaireCandidate) -> dict[str, Any]:

@@ -1,193 +1,68 @@
-"""Command-line interface for local, testable lighting-design workflows."""
+"""Command-line access to CAD, evidence and DIALux catalogue search."""
 
 from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 from typing import Any
 
-from .calculations import calculate_lumen_method
 from .dialux_api import DialuxAPI
-from .deliverables import build_unverified_simulation_run
 from .document_loader import load_document
+from .floor_plan import parse_floor_plan
 from .project_store import ProjectStore
-from .rag import create_evidence_store, format_evidence
-from .schemas import (
-    CalculationInput,
-    DesignBrief,
-    LuminaireSearchRequest,
-    ProjectUpdate,
-    SimulationMetrics,
-)
-
-
-def _print(value: Any) -> None:
-    def default(item: Any) -> Any:
-        if hasattr(item, "model_dump"):
-            return item.model_dump(mode="json")
-        return str(item)
-
-    print(json.dumps(value, ensure_ascii=False, indent=2, default=default))
-
-
-def _add_brief_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--space-type")
-    parser.add_argument("--area-m2", type=float)
-    parser.add_argument("--length-m", type=float)
-    parser.add_argument("--width-m", type=float)
-    parser.add_argument("--room-height-m", type=float)
-    parser.add_argument("--target-lx", type=float)
-    parser.add_argument("--target-cct-k", type=int)
-    parser.add_argument("--min-cri", type=int)
-    parser.add_argument("--target-ugr", type=float)
-    parser.add_argument("--max-power-w", type=float)
-    parser.add_argument("--mounting")
-    parser.add_argument("--min-ip-rating")
-    parser.add_argument("--brand", action="append", default=[])
-    parser.add_argument("--notes")
+from .rag import create_evidence_store
+from .schemas import DesignBrief, LuminaireSearchRequest
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Auditable indoor-lighting design assistant")
-    subcommands = parser.add_subparsers(dest="command", required=True)
-
-    create = subcommands.add_parser("init-project", help="create a versioned design project")
+    parser = argparse.ArgumentParser(description="Lighting CAD and knowledge workbench")
+    commands = parser.add_subparsers(dest="command", required=True)
+    create = commands.add_parser("init-project", help="create a project")
     create.add_argument("project_name")
-    _add_brief_arguments(create)
-
-    show = subcommands.add_parser("show-project", help="show a saved project")
+    create.add_argument("--space-type")
+    show = commands.add_parser("show-project", help="show a project")
     show.add_argument("project_id")
-
-    add_document = subcommands.add_parser("add-document", help="index a workspace document for evidence retrieval")
-    add_document.add_argument("file_path")
-    add_document.add_argument("--source-type", choices=["standard", "project_document", "user_note"], default="project_document")
-
-    evidence = subcommands.add_parser("search-evidence", help="search indexed evidence")
-    evidence.add_argument("query")
-
-    calculate = subcommands.add_parser("calculate", help="run and save a lumen-method estimate")
-    calculate.add_argument("project_id")
-    calculate.add_argument("--revision", type=int, required=True)
-    calculate.add_argument("--area-m2", type=float, required=True)
-    calculate.add_argument("--target-lx", type=float, required=True)
-    calculate.add_argument("--lumens", type=float, required=True)
-    calculate.add_argument("--power-w", type=float, required=True)
-    calculate.add_argument("--utilization-factor", type=float, required=True)
-    calculate.add_argument("--maintenance-factor", type=float, required=True)
-
-    luminaire = subcommands.add_parser("search-luminaires", help="search DIALux Luminaire Finder candidates")
-    luminaire.add_argument("keyword")
-    luminaire.add_argument("--language", default="zh")
-    luminaire.add_argument("--brand")
-    luminaire.add_argument("--brand-id")
-    luminaire.add_argument("--target-cct-k", type=int)
-    luminaire.add_argument("--min-cri", type=int)
-    luminaire.add_argument("--max-power-w", type=float)
-    luminaire.add_argument("--min-ip-rating")
-    luminaire.add_argument("--max-results", type=int, default=5)
-
-    result = subcommands.add_parser("import-dialux-result", help="import DIALux evidence as an unverified record")
-    result.add_argument("project_id")
-    result.add_argument("--revision", type=int, required=True)
-    result.add_argument("--source-kind", choices=["dialux_pdf", "dialux_csv", "dialux_json", "manual_form"], default="manual_form")
-    result.add_argument("--maintained-lx", type=float)
-    result.add_argument("--minimum-lx", type=float)
-    result.add_argument("--solver-version")
-
+    cad = commands.add_parser("analyze-cad", help="inspect a DXF or DWG without changing a project")
+    cad.add_argument("file_path", type=Path)
+    document = commands.add_parser("add-document", help="index a local document")
+    document.add_argument("file_path")
+    document.add_argument("--source-type", choices=["standard", "project_document", "user_note"], default="standard")
+    search = commands.add_parser("search-evidence", help="retrieve indexed excerpts")
+    search.add_argument("query")
+    luminaires = commands.add_parser("search-luminaires", help="query DIALux Luminaire Finder")
+    luminaires.add_argument("keyword")
+    luminaires.add_argument("--brand")
+    luminaires.add_argument("--target-cct-k", type=int)
+    luminaires.add_argument("--min-cri", type=int)
     return parser
 
 
-def _brief_from_args(args: argparse.Namespace) -> DesignBrief:
-    values = {
-        "project_name": args.project_name,
-        "space_type": args.space_type,
-        "area_m2": args.area_m2,
-        "length_m": args.length_m,
-        "width_m": args.width_m,
-        "room_height_m": args.room_height_m,
-        "target_illuminance_lx": args.target_lx,
-        "target_cct_k": args.target_cct_k,
-        "min_cri": args.min_cri,
-        "target_ugr": args.target_ugr,
-        "max_power_w": args.max_power_w,
-        "mounting": args.mounting,
-        "min_ip_rating": args.min_ip_rating,
-        "preferred_brands": args.brand,
-        "notes": args.notes,
-    }
-    confirmed = {key for key, value in values.items() if value not in (None, [], "") and key != "project_name"}
-    return DesignBrief(**values, confirmed_fields=confirmed)
+def _output(value: Any) -> None:
+    print(json.dumps(value, ensure_ascii=False, indent=2, default=lambda item: item.model_dump(mode="json")))
 
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    store = ProjectStore()
-    evidence_store = create_evidence_store()
     if args.command == "init-project":
-        _print(store.create(_brief_from_args(args)))
-        return
-    if args.command == "show-project":
-        _print(store.get(args.project_id))
-        return
-    if args.command == "add-document":
+        _output(ProjectStore().create(DesignBrief(project_name=args.project_name, space_type=args.space_type)))
+    elif args.command == "show-project":
+        _output(ProjectStore().get(args.project_id))
+    elif args.command == "analyze-cad":
+        _output(parse_floor_plan(args.file_path, storage_path=args.file_path.name))
+    elif args.command == "add-document":
         document = load_document(args.file_path)
-        chunks = evidence_store.add_document(document, source_type=args.source_type)
-        _print({"source_name": document.source_name, "sha256": document.sha256, "indexed_chunks": chunks})
-        return
-    if args.command == "search-evidence":
-        results = evidence_store.search(args.query)
-        _print({"evidence": [item.model_dump(mode="json") for item in results], "formatted": format_evidence(results)})
-        return
-    if args.command == "calculate":
-        result = calculate_lumen_method(
-            CalculationInput(
-                area_m2=args.area_m2,
-                target_illuminance_lx=args.target_lx,
-                luminaire_luminous_flux_lm=args.lumens,
-                luminaire_power_w=args.power_w,
-                utilization_factor=args.utilization_factor,
-                maintenance_factor=args.maintenance_factor,
-            )
-        )
-        state = store.get(args.project_id)
-        updated = store.update(
-            args.project_id,
-            ProjectUpdate(expected_revision=args.revision, calculations=[*state.calculations, result]),
-        )
-        _print({"calculation": result, "project_revision": updated.revision})
-        return
-    if args.command == "search-luminaires":
+        count = create_evidence_store().add_document(document, source_type=args.source_type)
+        _output({"source_name": document.source_name, "indexed_chunks": count})
+    elif args.command == "search-evidence":
+        _output({"evidence": create_evidence_store().search(args.query)})
+    elif args.command == "search-luminaires":
         request = LuminaireSearchRequest(
-            keyword=args.keyword,
-            language=args.language,
-            brand=args.brand,
-            brand_id=args.brand_id,
-            target_cct_k=args.target_cct_k,
+            keyword=args.keyword, brand=args.brand, target_cct_k=args.target_cct_k,
             min_cri=args.min_cri,
-            max_power_w=args.max_power_w,
-            min_ip_rating=args.min_ip_rating,
-            max_results=args.max_results,
         )
-        _print({"candidates": DialuxAPI().search(request), "notice": "候选灯具仍需 DIALux evo 仿真核验。"})
-        return
-    if args.command == "import-dialux-result":
-        state = store.get(args.project_id)
-        if state.revision != args.revision:
-            raise ValueError(f"Project revision is {state.revision}, but command expected {args.revision}")
-        metrics = SimulationMetrics(
-            maintained_illuminance_lx=args.maintained_lx,
-            minimum_illuminance_lx=args.minimum_lx,
-        )
-        run = build_unverified_simulation_run(
-            state, metrics=metrics, source_kind=args.source_kind, solver_version=args.solver_version,
-        )
-        updated = store.append_simulation_run(state.project_id, args.revision, run)
-        _print(
-            {
-                "simulation_run": run,
-                "project_revision": updated.revision,
-                "verification_messages": run.verification_messages,
-            }
-        )
-        return
-    raise AssertionError(f"Unhandled command: {args.command}")
+        _output({"candidates": DialuxAPI().search(request)})
+
+
+if __name__ == "__main__":
+    main()

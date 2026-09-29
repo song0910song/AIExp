@@ -1,181 +1,59 @@
 "use client";
 
 import { useState } from "react";
-import { FolderOpen } from "lucide-react";
-import { LIGHTING_TEMPLATES } from "@/lib/lighting-templates";
-import { api, type WorkspaceDirectorySelection } from "@/lib/api";
+import { FolderOpen, X } from "lucide-react";
+import { api } from "@/lib/api";
 import type { Project } from "@/lib/types";
-import { BusyButton, Field, Modal, Notice, toNullableNumber } from "./ui";
 
-type ProjectDraft = {
-  project_name: string;
-  space_type: string;
-  area_m2: string;
-  workplane_height_m: string;
-  target_illuminance_lx: string;
-  target_cct_k: string;
-  min_cri: string;
-  target_ugr: string;
-};
-
-const emptyDraft: ProjectDraft = {
-  project_name: "",
-  space_type: "",
-  area_m2: "",
-  workplane_height_m: "0.75",
-  target_illuminance_lx: "",
-  target_cct_k: "",
-  min_cri: "",
-  target_ugr: "",
-};
-
-const templateValueFields = [
-  "space_type",
-  "workplane_height_m",
-  "target_illuminance_lx",
-  "target_cct_k",
-  "min_cri",
-  "target_ugr",
-] as const;
-
-export function CreateProjectModal({ onClose, onCreated }: { onClose: () => void; onCreated: (project: Project) => void }) {
-  const [draft, setDraft] = useState<ProjectDraft>(emptyDraft);
-  const [templateId, setTemplateId] = useState("");
+export function CreateProjectModal({ onClose, onCreated }: {
+  onClose: () => void; onCreated: (project: Project) => void;
+}) {
+  const [name, setName] = useState("");
+  const [spaceType, setSpaceType] = useState("");
+  const [directory, setDirectory] = useState<{ selection_id: string; directory: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [selectingDirectory, setSelectingDirectory] = useState(false);
-  const [workspaceDirectory, setWorkspaceDirectory] = useState<WorkspaceDirectorySelection | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const selectedTemplate = LIGHTING_TEMPLATES.find((template) => template.id === templateId) ?? null;
+  const [error, setError] = useState("");
 
-  function updateField(key: keyof ProjectDraft, value: string) {
-    setDraft((current) => ({ ...current, [key]: value }));
-  }
-
-  function selectTemplate(id: string) {
-    setTemplateId(id);
-    const template = LIGHTING_TEMPLATES.find((item) => item.id === id);
-    if (!template) return;
-
-    setDraft((current) => ({
-      ...current,
-      ...Object.fromEntries(templateValueFields.map((field) => [field, String(template.values[field] ?? "")])),
-    }));
-  }
-
-  async function selectDirectory() {
-    setSelectingDirectory(true);
-    setError(null);
+  async function chooseDirectory() {
+    setError("");
     try {
-      const selected = await api.selectWorkspaceDirectory();
-      if (selected.selected && selected.selection_id && selected.directory) {
-        setWorkspaceDirectory(selected);
+      const choice = await api.chooseDirectory();
+      if (choice.selected && choice.selection_id && choice.directory) {
+        setDirectory({ selection_id: choice.selection_id, directory: choice.directory });
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "无法打开项目文件夹选择器");
-    } finally {
-      setSelectingDirectory(false);
+      setError(reason instanceof Error ? reason.message : "选择文件夹失败");
     }
   }
 
-  async function submit(event: React.FormEvent<HTMLFormElement>) {
+  async function submit(event: React.FormEvent) {
     event.preventDefault();
+    if (!directory) return;
     setBusy(true);
-    setError(null);
+    setError("");
     try {
-      if (!workspaceDirectory?.selection_id) {
-        throw new Error("请先选择项目文件夹");
-      }
-      const values = {
-        project_name: draft.project_name.trim(),
-        space_type: draft.space_type || null,
-        area_m2: toNullableNumber(draft.area_m2),
-        workplane_height_m: toNullableNumber(draft.workplane_height_m),
-        target_illuminance_lx: toNullableNumber(draft.target_illuminance_lx),
-        target_cct_k: toNullableNumber(draft.target_cct_k),
-        min_cri: toNullableNumber(draft.min_cri),
-        target_ugr: toNullableNumber(draft.target_ugr),
-      };
-      const confirmed_fields = Object.entries(values)
-        .filter(([key, value]) => key !== "project_name" && value !== null && value !== "")
-        .map(([key]) => key);
-
-      const project = await api.createProject({
-        ...values,
-        workspace_selection_id: workspaceDirectory.selection_id,
-        confirmed_fields,
-        template_origin: selectedTemplate
-          ? {
-              template_id: selectedTemplate.id,
-              template_name: selectedTemplate.name,
-              standard_reference: selectedTemplate.standardReference,
-              applied_at: new Date().toISOString(),
-            }
-          : null,
-      });
-      onCreated(project);
+      onCreated(await api.createProject(name.trim(), spaceType.trim(), directory.selection_id));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "创建失败");
+      setError(reason instanceof Error ? reason.message : "创建项目失败");
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <Modal title="建立照明项目" onClose={onClose}>
-      <form onSubmit={submit}>
-        <div className="form-grid">
-          <Field label="常用室内照明模板" wide>
-            <select value={templateId} onChange={(event) => selectTemplate(event.target.value)}>
-              <option value="">手动填写</option>
-              {LIGHTING_TEMPLATES.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
-            </select>
-          </Field>
-          {selectedTemplate ? (
-            <div className="template-reference" aria-live="polite">
-              <span>规范初始值</span>
-              <strong>{selectedTemplate.values.target_illuminance_lx} lx · UGR {selectedTemplate.values.target_ugr} · Ra {selectedTemplate.values.min_cri}</strong>
-              <small>{selectedTemplate.standardReference}</small>
-            </div>
-          ) : null}
-          <Field label="项目名称" wide>
-            <input value={draft.project_name} onChange={(event) => updateField("project_name", event.target.value)} required placeholder="例如：总部三层会议室改造" autoFocus />
-          </Field>
-          <Field label="项目文件夹" hint="系统会将项目状态、资料、图纸、配光和交付文件保存到所选目录下的 projects/项目ID 中" wide>
-            <div className="directory-picker">
-              <input value={workspaceDirectory?.directory ?? ""} readOnly placeholder="请选择本机项目文件夹" aria-label="项目文件夹" />
-              <BusyButton className="button button-secondary" busy={selectingDirectory} type="button" onClick={() => void selectDirectory()} disabled={busy}>
-                <FolderOpen size={16} />选择文件夹
-              </BusyButton>
-            </div>
-          </Field>
-          <Field label="空间类型">
-            <input value={draft.space_type} onChange={(event) => updateField("space_type", event.target.value)} placeholder="会议室" />
-          </Field>
-          <Field label="面积 / m²">
-            <input value={draft.area_m2} onChange={(event) => updateField("area_m2", event.target.value)} type="number" min="0.1" step="0.1" placeholder="30" />
-          </Field>
-          <Field label="工作面高度 / m">
-            <input value={draft.workplane_height_m} onChange={(event) => updateField("workplane_height_m", event.target.value)} type="number" min="0" step="0.05" />
-          </Field>
-          <Field label="目标照度 / lx">
-            <input value={draft.target_illuminance_lx} onChange={(event) => updateField("target_illuminance_lx", event.target.value)} type="number" min="1" step="1" placeholder="500" />
-          </Field>
-          <Field label="目标色温 / K">
-            <input value={draft.target_cct_k} onChange={(event) => updateField("target_cct_k", event.target.value)} type="number" min="1000" step="100" placeholder="4000" />
-          </Field>
-          <Field label="最低显色指数 / Ra">
-            <input value={draft.min_cri} onChange={(event) => updateField("min_cri", event.target.value)} type="number" min="0" max="100" step="1" placeholder="80" />
-          </Field>
-          <Field label="目标 UGR">
-            <input value={draft.target_ugr} onChange={(event) => updateField("target_ugr", event.target.value)} type="number" min="0" max="40" step="1" placeholder="19" />
-          </Field>
-        </div>
-        {error ? <Notice tone="danger">{error}</Notice> : null}
-        <div className="form-actions">
-          <button type="button" className="button button-quiet" onClick={onClose}>取消</button>
-          <BusyButton busy={busy} type="submit">创建并进入项目</BusyButton>
-        </div>
-      </form>
-    </Modal>
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <section className="modal-dialog" role="dialog" aria-modal="true" aria-label="新建项目" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="modal-heading"><h2>新建项目</h2><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></header>
+        <form onSubmit={(event) => void submit(event)} className="field-stack">
+          <label>项目名称<input value={name} onChange={(event) => setName(event.target.value)} required autoFocus placeholder="例如：会议室照明" /></label>
+          <label>空间用途<input value={spaceType} onChange={(event) => setSpaceType(event.target.value)} placeholder="例如：会议室" /></label>
+          <label>工作区文件夹
+            <div className="directory-row"><input value={directory?.directory ?? ""} readOnly placeholder="选择本机文件夹" /><button type="button" className="button secondary" onClick={() => void chooseDirectory()}><FolderOpen size={16} />选择</button></div>
+          </label>
+          {error ? <p className="error-text" role="alert">{error}</p> : null}
+          <footer className="modal-actions"><button type="button" className="button secondary" onClick={onClose}>取消</button><button className="button primary" disabled={busy || !name.trim() || !directory}>{busy ? "创建中…" : "创建"}</button></footer>
+        </form>
+      </section>
+    </div>
   );
 }

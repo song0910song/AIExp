@@ -1,4 +1,4 @@
-"""Configuration and filesystem locations for the lighting assistant."""
+"""Settings for the four active workbench capabilities."""
 
 from __future__ import annotations
 
@@ -11,113 +11,73 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2] # 根目录
-DATA_DIRECTORY = PROJECT_ROOT / "data" # 数据库目录
-
-USER_DOCUMENTS_DIRECTORY = PROJECT_ROOT / "src" / "data" / "user_docs"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DATA_DIRECTORY = PROJECT_ROOT / "data"
 DATABASE_FILE = DATA_DIRECTORY / "lighting_design.sqlite3"
-WORKSPACE_REGISTRY_FILE = DATA_DIRECTORY / "workspace_registry.sqlite3" # 工作目录数据库
+PROJECTS_DIRECTORY = DATA_DIRECTORY / "projects"
+WORKSPACE_REGISTRY_FILE = DATA_DIRECTORY / "workspace_registry.sqlite3"
+USER_DOCUMENTS_DIRECTORY = PROJECT_ROOT / "src" / "data" / "user_docs"
 
-# Load local .env before Settings defaults are evaluated (dataclass defaults run
-# at class definition time); existing environment variables take precedence.
 load_dotenv(PROJECT_ROOT / ".env")
 
 
-def _env_optional_bool(name: str) -> bool | None:
-    """Read an optional, forgiving boolean environment setting."""
+REASONING_EFFORT_VALUES = ("none", "low", "medium", "high")
+REASONING_EFFORT_METADATA = {
+    "none": {"label": "关闭", "description": "不启用额外推理"},
+    "low": {"label": "低", "description": "适合简单查询"},
+    "medium": {"label": "中", "description": "兼顾响应速度与分析"},
+    "high": {"label": "高", "description": "适合复杂问题"},
+}
 
+
+def _optional_bool(name: str) -> bool | None:
     value = os.getenv(name)
-    if value is None or not value.strip():
+    if not value or not value.strip():
         return None
     return value.strip().casefold() in {"1", "true", "yes", "on"}
 
 
-def _model_supports_prompt_cache(model: str | None) -> bool:
-    """Return whether the configured model is in the GPT-5.6+ family."""
-
+def _supports_prompt_cache(model: str | None, base_url: str | None) -> bool:
     match = re.match(r"^gpt-(\d+)\.(\d+)", (model or "").strip().casefold())
-    return bool(match) and (int(match.group(1)), int(match.group(2))) >= (5, 6)
-
-
-def _uses_openai_api(base_url: str | None) -> bool:
-    if not base_url:
-        return True
-    endpoint = urlsplit(base_url)
-    return endpoint.scheme == "https" and endpoint.hostname == "api.openai.com"
-
-
-# The configured New API gateway accepts this set for agnes-2.5-flash.  Keep
-# the list configurable because an OpenAI-compatible gateway does not expose
-# a reliable, machine-readable reasoning capability document.
-REASONING_EFFORT_VALUES: tuple[str, ...] = ("none", "low", "medium", "high")
-REASONING_EFFORT_METADATA: dict[str, dict[str, str]] = {
-    "none": {
-        "label": "关闭",
-        "description": "不启用额外推理，响应最快",
-    },
-    "low": {
-        "label": "低",
-        "description": "快速分析，适合简单问题",
-    },
-    "medium": {
-        "label": "中",
-        "description": "速度与准确性平衡，推荐",
-    },
-    "high": {
-        "label": "高",
-        "description": "更深分析，通常更慢且消耗更多 token",
-    },
-}
+    endpoint = urlsplit(base_url) if base_url else None
+    is_openai_api = endpoint is None or (
+        endpoint.scheme == "https" and endpoint.hostname == "api.openai.com"
+    )
+    return bool(match) and (int(match.group(1)), int(match.group(2))) >= (5, 6) and is_openai_api
 
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    """Runtime settings, read once so secrets are never printed or persisted."""
-
-    llm_model: str = os.getenv("LIGHTING_LLM_MODEL")
-    vision_model: str = os.getenv("LIGHTING_VISION_MODEL") or os.getenv("LIGHTING_LLM_MODEL")
-    llm_base_url: str = os.getenv("LIGHTING_LLM_BASE_URL")
+    llm_model: str | None = os.getenv("LIGHTING_LLM_MODEL")
+    llm_base_url: str | None = os.getenv("LIGHTING_LLM_BASE_URL")
     llm_api_key: str | None = os.getenv("LIGHTING_LLM_API_KEY")
     llm_temperature: float = float(os.getenv("LIGHTING_LLM_TEMPERATURE", "0.3"))
     llm_timeout_seconds: float = float(os.getenv("LIGHTING_LLM_TIMEOUT_SECONDS", "60"))
-    vision_min_confidence: float = float(os.getenv("LIGHTING_VISION_MIN_CONFIDENCE", "0.7"))
-    vision_timeout_seconds: float = float(os.getenv("LIGHTING_VISION_TIMEOUT_SECONDS", "60"))
-    vision_max_retries: int = int(os.getenv("LIGHTING_VISION_MAX_RETRIES", "0"))
-    # Codex-style: SDK retries transient model failures (429/5xx/connection) up to 5 times with exponential backoff + jitter.
-    llm_max_retries: int = int(os.getenv("LIGHTING_LLM_MAX_RETRIES", "5"))
-    llm_context_window_tokens: int = int(os.getenv("LIGHTING_LLM_CONTEXT_WINDOW_TOKENS", "1000000"))
-    # Keep this key stable across projects and sessions so the provider can
-    # route requests with the same system prompt to an existing cache.
-    # None enables cache extensions only for GPT-5.6+ on the OpenAI API.
-    # Compatible gateways may reject them even when they expose that model name.
-    llm_prompt_cache_enabled: bool | None = _env_optional_bool(
-        "LIGHTING_LLM_PROMPT_CACHE_ENABLED"
+    llm_max_retries: int = int(os.getenv("LIGHTING_LLM_MAX_RETRIES", "3"))
+    agent_max_steps: int = int(os.getenv("LIGHTING_AGENT_MAX_STEPS", "20"))
+    llm_reasoning_efforts: str = os.getenv(
+        "LIGHTING_LLM_REASONING_EFFORTS", ",".join(REASONING_EFFORT_VALUES)
     )
+    llm_reasoning_effort_default: str = os.getenv("LIGHTING_LLM_REASONING_EFFORT_DEFAULT", "medium")
+    llm_reasoning_effort: str | None = None
+    llm_prompt_cache_enabled: bool | None = _optional_bool("LIGHTING_LLM_PROMPT_CACHE_ENABLED")
     llm_prompt_cache_key: str = os.getenv(
         "LIGHTING_LLM_PROMPT_CACHE_KEY", "lighting-design-agent-v1"
     ).strip() or "lighting-design-agent-v1"
-    # The current OpenAI-compatible schema accepts 30m as the cache TTL.
-    llm_prompt_cache_ttl: str = os.getenv("LIGHTING_LLM_PROMPT_CACHE_TTL", "30m").strip()
-    agent_max_steps: int = int(os.getenv("LIGHTING_AGENT_MAX_STEPS", "50"))
-    chat_stream_heartbeat_seconds: float = float(
-        os.getenv("LIGHTING_CHAT_STREAM_HEARTBEAT_SECONDS", "5")
-    )
+    llm_prompt_cache_ttl: str = os.getenv("LIGHTING_LLM_PROMPT_CACHE_TTL", "30m")
+    chat_session_ttl_hours: int = int(os.getenv("LIGHTING_CHAT_SESSION_TTL_HOURS", "168"))
+    chat_session_max_messages: int = int(os.getenv("LIGHTING_CHAT_SESSION_MAX_MESSAGES", "80"))
+
     dialux_base_url: str = os.getenv("DIALUX_BASE_URL", "https://luminaires.dialux.com")
     dialux_timeout_seconds: float = float(os.getenv("DIALUX_TIMEOUT_SECONDS", "15"))
-    dialux_default_max_results: int = int(os.getenv("DIALUX_DEFAULT_MAX_RESULTS", "5"))
     dialux_candidate_pool_size: int = int(os.getenv("DIALUX_CANDIDATE_POOL_SIZE", "12"))
     dialux_detail_max_workers: int = int(os.getenv("DIALUX_DETAIL_MAX_WORKERS", "4"))
     dialux_search_deadline_seconds: float = float(os.getenv("DIALUX_SEARCH_DEADLINE_SECONDS", "25"))
     dialux_cache_ttl_seconds: float = float(os.getenv("DIALUX_CACHE_TTL_SECONDS", "300"))
-    dialux_min_request_interval_seconds: float = float(
-        os.getenv("DIALUX_MIN_REQUEST_INTERVAL_SECONDS", "0.05")
-    )
-    dialux_circuit_failure_threshold: int = int(
-        os.getenv("DIALUX_CIRCUIT_FAILURE_THRESHOLD", "4")
-    )
-    dialux_circuit_cooldown_seconds: float = float(
-        os.getenv("DIALUX_CIRCUIT_COOLDOWN_SECONDS", "60")
-    )
+    dialux_min_request_interval_seconds: float = float(os.getenv("DIALUX_MIN_REQUEST_INTERVAL_SECONDS", "0.05"))
+    dialux_circuit_failure_threshold: int = int(os.getenv("DIALUX_CIRCUIT_FAILURE_THRESHOLD", "4"))
+    dialux_circuit_cooldown_seconds: float = float(os.getenv("DIALUX_CIRCUIT_COOLDOWN_SECONDS", "60"))
+
     rag_backend: str = os.getenv("LIGHTING_RAG_BACKEND", "chroma")
     embedding_model: str = os.getenv("LIGHTING_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
     embedding_cache_folder: str = os.getenv(
@@ -126,69 +86,38 @@ class Settings:
     embedding_local_files_only: bool = os.getenv(
         "LIGHTING_EMBEDDING_LOCAL_FILES_ONLY", "true"
     ).casefold() in {"1", "true", "yes", "on"}
+
     paddleocr_api_url: str = os.getenv(
         "PADDLEOCR_API_URL", "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
     )
     paddleocr_model: str = os.getenv("PADDLEOCR_MODEL", "PaddleOCR-VL-1.6")
     paddleocr_timeout_seconds: float = float(os.getenv("PADDLEOCR_TIMEOUT_SECONDS", "900"))
     paddleocr_poll_interval_seconds: float = float(os.getenv("PADDLEOCR_POLL_INTERVAL_SECONDS", "5"))
-    chat_session_ttl_hours: int = int(os.getenv("LIGHTING_CHAT_SESSION_TTL_HOURS", "168"))
-    chat_session_max_messages: int = int(os.getenv("LIGHTING_CHAT_SESSION_MAX_MESSAGES", "80"))
-    # Comma-separated values let deployments adapt this UI to another model
-    # without changing code.  The default matches the configured gateway.
-    llm_reasoning_efforts: str = os.getenv(
-        "LIGHTING_LLM_REASONING_EFFORTS", ",".join(REASONING_EFFORT_VALUES)
-    )
-    llm_reasoning_effort_default: str = os.getenv(
-        "LIGHTING_LLM_REASONING_EFFORT_DEFAULT", "medium"
-    )
-    # Per-request override.  ``None`` preserves the provider's own default for
-    # API clients that do not send a selector.
-    llm_reasoning_effort: str | None = None
 
     def supported_reasoning_efforts(self) -> tuple[str, ...]:
-        """Return normalized reasoning efforts exposed by this deployment."""
-
-        configured = tuple(
-            value.strip().casefold()
-            for value in self.llm_reasoning_efforts.split(",")
-            if value.strip()
-        )
-        values = tuple(dict.fromkeys(value for value in configured if value in REASONING_EFFORT_VALUES))
-        return values or REASONING_EFFORT_VALUES
+        configured = (item.strip().casefold() for item in self.llm_reasoning_efforts.split(","))
+        efforts = tuple(dict.fromkeys(item for item in configured if item in REASONING_EFFORT_VALUES))
+        return efforts or REASONING_EFFORT_VALUES
 
     def default_reasoning_effort(self) -> str:
-        """Return a valid default even when an environment override is stale."""
-
-        requested = self.llm_reasoning_effort_default.strip().casefold()
-        supported = self.supported_reasoning_efforts()
-        return requested if requested in supported else supported[0]
+        choice = self.llm_reasoning_effort_default.strip().casefold()
+        available = self.supported_reasoning_efforts()
+        return choice if choice in available else available[0]
 
     def with_reasoning_effort(self, effort: str | None) -> "Settings":
-        """Create request-scoped settings without mutating frozen global config."""
-
         return replace(self, llm_reasoning_effort=effort)
 
     def prompt_cache_options(self) -> dict[str, str] | None:
-        """Return provider cache options, normalizing unsupported TTL values."""
-
         enabled = self.llm_prompt_cache_enabled
-        if enabled is False or (enabled is None and not (
-            _model_supports_prompt_cache(self.llm_model) and _uses_openai_api(self.llm_base_url)
-        )):
+        if enabled is False or (enabled is None and not _supports_prompt_cache(self.llm_model, self.llm_base_url)):
             return None
-        ttl = self.llm_prompt_cache_ttl if self.llm_prompt_cache_ttl == "30m" else "30m"
-        return {"mode": "implicit", "ttl": ttl}
+        return {"mode": "implicit", "ttl": "30m"}
 
     def validate_for_agent(self) -> None:
-        if not self.llm_api_key:
-            raise RuntimeError(
-                "LIGHTING_LLM_API_KEY is required for chat mode. "
-                "Offline commands such as init-project and calculate do not require it."
-            )
+        if not self.llm_model or not self.llm_api_key:
+            raise RuntimeError("LIGHTING_LLM_MODEL and LIGHTING_LLM_API_KEY are required for chat")
 
 
 def ensure_data_directories() -> None:
     for directory in (DATA_DIRECTORY, PROJECTS_DIRECTORY, USER_DOCUMENTS_DIRECTORY):
         directory.mkdir(parents=True, exist_ok=True)
-PROJECTS_DIRECTORY = DATA_DIRECTORY / "projects" # 项目文件
