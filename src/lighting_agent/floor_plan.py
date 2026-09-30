@@ -18,15 +18,14 @@ from ezdxf.addons import odafc
 from ezdxf.document import Drawing
 from ezdxf.filemanagement import readfile
 from ezdxf.lldxf.const import DXFError
-from ezdxf.math import Vec2
-from shapely import LineString, ops
 
 from .schemas import (
     CadPoint,
     FloorPlan,
-    FloorPlanAreaCandidate,
     FloorPlanAsset,
 )
+from .cad_geometry import inspect_drawing
+from .spatial_model import build_spatial_model
 
 
 class FloorPlanParseError(RuntimeError):
@@ -34,8 +33,6 @@ class FloorPlanParseError(RuntimeError):
 
 
 MAX_TEXT_ITEMS = 200
-MAX_AREA_CANDIDATES = 50
-MAX_CANDIDATE_POINTS = 1_000
 MAX_DRAWING_BYTES = 50 * 1024 * 1024
 SUPPORTED_DRAWING_SUFFIXES = frozenset({".dxf", ".dwg"})
 ODA_FILE_CONVERTER_ENV_VAR = "ODA_FILE_CONVERTER_PATH"
@@ -72,6 +69,8 @@ def parse_floor_plan(source: Path, *, storage_path: str) -> FloorPlan:
         raise FloorPlanParseError("仅支持 .dxf 与 .dwg 平面图文件")
     if not source.is_file():
         raise FloorPlanParseError("平面图文件不存在")
+    if source.stat().st_size > MAX_DRAWING_BYTES:
+        raise FloorPlanParseError("CAD 文件不能超过 50 MB")
     try:
         document, converted_from_dwg, warnings = _read_document(source)
     except (DXFError, IOError, OSError, odafc.ODAFCError) as error:
@@ -87,7 +86,9 @@ def parse_floor_plan(source: Path, *, storage_path: str) -> FloorPlan:
     # already metric.  Normalize the effective scale before persisting facts.
     dialux_metric = _uses_dialux_metric_coordinates(entities)
     effective_meters_per_unit = 1.0 if dialux_metric else meters_per_unit
-    area_candidates = _area_candidates(entities, effective_meters_per_unit)
+    inspection = inspect_drawing(document, effective_meters_per_unit)
+    area_candidates = inspection.pop("area_candidates")
+    elements = inspection.pop("elements")
     room_name = _room_name(text_items)
     if not effective_meters_per_unit:
         warnings.append("图纸未声明可换算的长度单位；面积与尺寸仅能作为原始单位参考。")
@@ -95,7 +96,7 @@ def parse_floor_plan(source: Path, *, storage_path: str) -> FloorPlan:
         warnings.append("未识别到闭合房间边界；请在图纸中使用闭合多段线或在界面手动填写面积。")
 
     normalized_units = "m" if dialux_metric else unit_name
-    return FloorPlan(
+    plan = FloorPlan(
         asset=FloorPlanAsset(
             source_name=source.name,
             source_type=cast(Literal["dxf", "dwg"], suffix[1:]),
@@ -112,7 +113,16 @@ def parse_floor_plan(source: Path, *, storage_path: str) -> FloorPlan:
         room_name=room_name,
         area_candidates=area_candidates,
         warnings=list(dict.fromkeys(warnings)),
+        conversion_log=[
+            f"原文件 SHA-256: {_sha256(source)}",
+            "ODA 本机临时 DXF 转换完成" if converted_from_dwg else "直接读取 DXF（不改写原文件）",
+            f"DXF 版本: {document.dxfversion}; 声明单位: {unit_name}",
+            *(["识别到 DIALux DLX 图层，按米解释坐标；请核对尺度"] if dialux_metric else []),
+        ],
+        **inspection,
     )
+    plan.spatial_model = build_spatial_model(plan, elements)
+    return plan
 
 
 def _read_document(source: Path) -> tuple[Drawing, bool, list[str]]:
@@ -127,7 +137,10 @@ def _read_document(source: Path) -> tuple[Drawing, bool, list[str]]:
     with tempfile.TemporaryDirectory(prefix="lighting-dwg-") as temporary_directory:
         converted = Path(temporary_directory) / f"{source.stem}.dxf"
         odafc.convert(source, converted, replace=True)
-        return readfile(converted), True, ["DWG 已在本机转换为临时 DXF 后解析；原始 DWG 未被修改。"]
+        return readfile(converted), True, [
+            "DWG 已在本机转换为临时 DXF 后解析；原始 DWG 未被修改。",
+            f"转换器: {converter}; ezdxf: {ezdxf.__version__}; 转换 DXF SHA-256: {_sha256(converted)}",
+        ]
 
 
 def _configure_oda_file_converter() -> Path | None:
@@ -248,168 +261,6 @@ def _room_name(text_items: list[str]) -> str | None:
         if match:
             return match.group(0)
     return None
-
-
-def _area_candidates(
-    entities: list[Any], meters_per_unit: float | None
-) -> list[FloorPlanAreaCandidate]:
-    # 优先：闭合多段线直接作为房间边界候选。
-    candidates = _closed_polyline_candidates(entities, meters_per_unit)
-    # 补充：DIALux 等导出的图纸常把墙体画成分段线段网络，用 shapely
-    # 重构闭合轮廓，在闭合多段线识别不到面积时提供替代候选。
-    candidates += _reconstructed_candidates(entities, meters_per_unit)
-    flattened: list[FloorPlanAreaCandidate] = []
-    seen: set[tuple[float, float]] = set()
-    for candidate in candidates:
-        key = (candidate.raw_area, round(candidate.length_m or 0, 4))
-        if key in seen:
-            continue
-        seen.add(key)
-        flattened.append(candidate)
-    flattened.sort(key=lambda item: item.raw_area, reverse=True)
-    return flattened[:MAX_AREA_CANDIDATES]
-
-
-def _closed_polyline_candidates(
-    entities: list[Any], meters_per_unit: float | None
-) -> list[FloorPlanAreaCandidate]:
-    candidates: list[FloorPlanAreaCandidate] = []
-    for entity in entities:
-        points = _closed_polyline_points(entity)
-        if points is None:
-            continue
-        candidate = _to_candidate(entity.dxftype(), str(entity.dxf.layer), points, meters_per_unit)
-        if candidate is not None:
-            candidates.append(candidate)
-    return candidates
-
-
-def _reconstructed_candidates(
-    entities: list[Any], meters_per_unit: float | None
-) -> list[FloorPlanAreaCandidate]:
-    # 优先从墙体/轮廓图层收集线段（DIALux 导出约定为 DLX_CONT，另含常见墙线层），
-    # 避免网格、标注文字等辅助图层的小碎线污染多边形化结果。
-    layers = _contour_layers(entities)
-    lines: list[Any] = []
-    for entity in entities:
-        if entity.dxftype() not in {"LINE", "POLYLINE", "LWPOLYLINE"}:
-            continue
-        if layers and str(entity.dxf.layer) not in layers:
-            continue
-        points = _segment_points(entity)
-        for a, b in _pairs(points):
-            if a.distance(b) <= 0.01:
-                continue
-            lines.append(LineString([(a.x, a.y), (b.x, b.y)]))
-    if not lines:
-        return []
-    merged = ops.unary_union(lines)
-    geoms = list(getattr(merged, "geoms", [merged]))
-    polys = list(ops.polygonize(geoms))
-    polys.sort(key=lambda p: p.area, reverse=True)
-    # The caller has already normalized the document-wide scale.  Keep the
-    # reconstruction path on that same scale as closed polylines.
-    effective_meters_per_unit = meters_per_unit
-    # 过滤微碎面：仅保留面积不小于主候选千分之一的面。
-    largest = polys[0].area if polys else 0.0
-    threshold = largest / 1000
-    candidates: list[FloorPlanAreaCandidate] = []
-    for polygon in polys:
-        if polygon.area < threshold:
-            break
-        ring = polygon.exterior
-        coords = list(ring.coords)
-        # 去重首尾闭合点，避免鞋带公式/预览出现重复顶点。
-        if len(coords) > 1 and coords[0] == coords[-1]:
-            coords = coords[:-1]
-        if len(coords) < 4:
-            continue
-        candidate = _to_candidate("POLYLINE", layers[0] if layers else "CONTOUR", [Vec2(x, y) for x, y in coords], effective_meters_per_unit)
-        if candidate is not None:
-            candidates.append(candidate)
-    return candidates
-
-
-def _contour_layers(entities: list[Any]) -> list[str]:
-    """DIALux 等导出的墙体/轮廓图层；无匹配时返回空，表示收集全部实体。"""
-    present = {str(entity.dxf.layer) for entity in entities}
-    preferred = [layer for layer in ("DLX_CONT", "WALLS", "WALL", "CONT", "Structural") if layer in present]
-    if preferred:
-        return preferred
-    return []
-
-
-def _segment_points(entity: Any) -> list[Vec2]:
-    entity_type = entity.dxftype()
-    if entity_type in {"LINE", "XLINE", "RAY"}:
-        return [Vec2(entity.dxf.start), Vec2(entity.dxf.end)]
-    if entity_type == "LWPOLYLINE":
-        return [Vec2(point) for point in entity.get_points("xy")]
-    if entity_type == "POLYLINE":
-        return [Vec2(vertex.dxf.location) for vertex in entity.vertices]
-    return []
-
-
-def _pairs(points: list[Vec2]) -> list[tuple[Vec2, Vec2]]:
-    return list(zip(points, points[1:]))
-
-
-def _to_candidate(
-    entity_type: Literal["LWPOLYLINE", "POLYLINE"],
-    layer: str,
-    points: list[Vec2],
-    meters_per_unit: float | None,
-) -> FloorPlanAreaCandidate | None:
-    raw_area = _polygon_area(points)
-    # 极小面积（含退化共线）在四舍五入后会归零，直接丢弃。
-    if raw_area <= 1e-6:
-        return None
-    x_values = [point.x for point in points]
-    y_values = [point.y for point in points]
-    length = max(x_values) - min(x_values)
-    width = max(y_values) - min(y_values)
-    area_m2 = raw_area * meters_per_unit**2 if meters_per_unit else None
-    return FloorPlanAreaCandidate(
-        entity_type=entity_type,
-        layer=layer,
-        raw_area=round(raw_area, 6),
-        area_m2=round(area_m2, 4) if area_m2 is not None else None,
-        length_m=round(length * meters_per_unit, 4) if meters_per_unit else None,
-        width_m=round(width * meters_per_unit, 4) if meters_per_unit else None,
-        points=_preview_points(points),
-    )
-
-
-def _preview_points(points: list[Vec2]) -> list[CadPoint]:
-    """Retain a bounded outline for preview without changing measured geometry."""
-
-    if len(points) > MAX_CANDIDATE_POINTS:
-        step = len(points) / MAX_CANDIDATE_POINTS
-        points = [points[int(index * step)] for index in range(MAX_CANDIDATE_POINTS)]
-    return [CadPoint(x=round(point.x, 6), y=round(point.y, 6)) for point in points]
-
-
-def _closed_polyline_points(entity: Any) -> list[Vec2] | None:
-    entity_type = entity.dxftype()
-    if entity_type == "LWPOLYLINE":
-        if not entity.closed:
-            return None
-        return [Vec2(point) for point in entity.get_points("xy")]
-    if entity_type == "POLYLINE":
-        if not entity.is_closed:
-            return None
-        points = [Vec2(vertex.dxf.location) for vertex in entity.vertices]
-        return points if len(points) >= 3 else None
-    return None
-
-
-def _polygon_area(points: list[Vec2]) -> float:
-    return abs(
-        sum(
-            point.x * next_point.y - next_point.x * point.y
-            for point, next_point in zip(points, [*points[1:], points[0]], strict=True)
-        )
-    ) / 2
 
 
 def _sha256(path: Path) -> str:

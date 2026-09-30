@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatStreamEvent, DocumentContent, DocumentRecord, Evidence, Health, Luminaire, Project } from "./types";
+import type { ChatMessage, ChatStreamEvent, DocumentContent, DocumentRecord, Evidence, Health, Luminaire, Project, SpatialModel, StandardRecord, DesignRule, DesignSettings } from "./types";
 
 const ROOT = "/backend";
 
@@ -7,7 +7,9 @@ async function assertOk(response: Response): Promise<void> {
   let detail = `请求失败（${response.status}）`;
   try {
     const error = await response.json();
-    detail = typeof error.detail === "string" ? error.detail : error.detail?.message ?? detail;
+    detail = typeof error.detail === "string" ? error.detail : Array.isArray(error.detail)
+      ? error.detail.map((item: { loc?: string[]; msg?: string }) => `${item.loc?.slice(1).join(".") ?? "字段"}: ${item.msg ?? "无效"}`).join("；")
+      : error.detail?.message ?? detail;
   } catch { /* The server did not return JSON. */ }
   throw new Error(detail);
 }
@@ -66,6 +68,20 @@ async function streamChat(
 }
 
 export const api = {
+  reviewModel: (project: Project, model: SpatialModel, note: string) => request<Project>(`/projects/${project.project_id}/spatial-model`, {
+    method: "PUT", body: JSON.stringify({ expected_revision: project.revision, meters_per_unit: model.meters_per_unit, rooms: model.rooms,
+      elements: model.elements, coverage_confirmed: model.coverage_confirmed, elements_reviewed: model.elements_reviewed, note }),
+  }),
+  standards: (projectId: string) => request<StandardRecord[]>(`/standards?project_id=${projectId}`),
+  registerStandard: (record: Omit<StandardRecord, "standard_id" | "file_sha256" | "registered_at">) =>
+    request<StandardRecord>("/standards", { method: "POST", body: JSON.stringify(record) }),
+  standardEvidence: (id: string, projectId: string) => request<{ items: Array<{ key: string; text: string; locator: string; status: string }> }>(`/standards/${id}/evidence?project_id=${projectId}`),
+  ruleCandidates: (project: Project, standardId: string) => request<{ project: Project; generated: number; notice: string }>(`/projects/${project.project_id}/rules/candidates`, { method: "POST", body: JSON.stringify({ expected_revision: project.revision, standard_id: standardId }) }),
+  manualRule: (project: Project, standardId: string, evidenceKey: string, metric: DesignRule["metric"]) => request<Project>(`/projects/${project.project_id}/rules/manual`, { method: "POST", body: JSON.stringify({ expected_revision: project.revision, standard_id: standardId, evidence_key: evidenceKey, metric }) }),
+  editRule: (project: Project, rule: DesignRule) => request<Project>(`/projects/${project.project_id}/rules/${rule.rule_id}`, { method: "PUT", body: JSON.stringify({ expected_revision: project.revision, rule }) }),
+  confirmRule: (project: Project, ruleId: string, reviewer: string, note: string) => request<Project>(`/projects/${project.project_id}/rules/${ruleId}/confirm`, { method: "POST", body: JSON.stringify({ expected_revision: project.revision, reviewer, note }) }),
+  bindRules: (project: Project, reviewer: string, note: string, coverageConfirmed: boolean) => request<Project>(`/projects/${project.project_id}/rules/bind`, { method: "POST", body: JSON.stringify({ expected_revision: project.revision, reviewer, note, coverage_confirmed: coverageConfirmed }) }),
+  designSettings: (projectId: string) => request<DesignSettings>(`/projects/${projectId}/design-settings`),
   health: () => request<Health>("/health"),
   projects: () => request<Project[]>("/projects"),
   project: (id: string) => request<Project>(`/projects/${id}`),

@@ -319,3 +319,17 @@ class WorkspaceEvidenceStore:
 
     def delete_document(self, source_hash: str):
         return self.global_store.delete_document(source_hash)
+
+    def get_document_artifact(self, source_hash: str, *, project_id: str | None = None):
+        store = self._project_store(project_id) if project_id else self.global_store
+        return store.get_document_artifact(source_hash, project_id=project_id)
+
+    def register_standard(self, record):
+        store = self._project_store(record.project_id) if record.project_id else self.global_store
+        return store.register_standard(record)
+
+    def list_standards(self, *, project_id: str | None = None):
+        records = self.global_store.list_standards()
+        if project_id:
+            records += self._project_store(project_id).list_standards(project_id=project_id)
+        return records

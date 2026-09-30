@@ -16,7 +16,7 @@ def test_local_rag_returns_source_and_locator(tmp_path) -> None:
 
     assert len(results) == 1
     assert results[0].source_name == "standard.md"
-    assert results[0].locator == "chunk 1"
+    assert results[0].locator == "行 1–1"
     assert "500 lx" in results[0].excerpt
 
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowUp, BookOpen, Brain, Check, ChevronDown, FileText, FolderOpen, Gauge,
   Lightbulb, LoaderCircle, PanelLeftClose, PanelLeftOpen, Paperclip, Plus, RotateCcw,
@@ -13,6 +13,8 @@ import rehypeKatex from "rehype-katex";
 import { api } from "@/lib/api";
 import type { ChatMessage, ContextUsage, DocumentContent, DocumentRecord, Health, Luminaire, Project, ToolCall } from "@/lib/types";
 import { CreateProjectModal } from "./CreateProjectModal";
+import { SpatialReview } from "./SpatialReview";
+import { DocumentPages, StandardsReview } from "./StandardsReview";
 
 const sessionKey = (id: string) => `lighting-chat:${id}`;
 const messageError = (reason: unknown) => reason instanceof Error ? reason.message : "操作失败，请重试";
@@ -195,7 +197,7 @@ export function LightingWorkbench() {
             {globalDetailBusy ? <div className="global-panel-empty"><LoaderCircle className="spin" size={16} />正在读取资料</div> : globalDetailError ? <div className="inline-error" role="alert">{globalDetailError}</div> : globalContent ? <>
               <h3>{globalContent.source_name}</h3>
               <div className="global-detail-meta"><span>{globalContent.page_count ? `${globalContent.page_count} 页` : "文本文档"}</span><span>{globalContent.indexed_chunks} 个索引片段</span><span>{new Date(globalContent.indexed_at).toLocaleString("zh-CN")}</span></div>
-              <div className="global-document-content">{globalContent.content || "文档没有可提取的文本内容。"}</div>
+              <DocumentPages document={globalContent} />
             </> : null}
           </section> : null}
         </aside>
@@ -207,38 +209,6 @@ export function LightingWorkbench() {
         window.localStorage.setItem("lighting-active-project", next.project_id);
       }} /> : null}
     </div>
-  );
-}
-
-function CadReview({ project, onProject }: { project: Project; onProject: (value: Project) => void }) {
-  const plan = project.floor_plan;
-  const [choice, setChoice] = useState(0);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const selected = plan?.area_candidates[choice];
-  const outline = useMemo(() => {
-    if (!selected?.points.length) return "";
-    const xs = selected.points.map((point) => point.x);
-    const ys = selected.points.map((point) => point.y);
-    const minX = Math.min(...xs); const minY = Math.min(...ys);
-    const scale = Math.min(250 / Math.max(0.01, Math.max(...xs) - minX), 100 / Math.max(0.01, Math.max(...ys) - minY));
-    return selected.points.map((point) => `${15 + (point.x - minX) * scale},${120 - (point.y - minY) * scale}`).join(" ");
-  }, [selected]);
-  if (!plan || plan.selected_area_candidate_index !== null) return null;
-  async function confirm() {
-    setBusy(true); setError("");
-    try { onProject(await api.selectRoom(project, choice)); }
-    catch (reason) { setError(messageError(reason)); }
-    finally { setBusy(false); }
-  }
-  return (
-    <section className="review-strip" aria-label="CAD 房间边界确认">
-      <div className="review-text"><strong><FolderOpen size={15} />{plan.asset.source_name}</strong><small>{plan.drawing_units} · {plan.area_candidates.length} 个边界候选</small>
-        {plan.area_candidates.length ? <div className="review-choice"><select aria-label="选择房间边界" value={choice} onChange={(event) => setChoice(Number(event.target.value))}>{plan.area_candidates.map((item, index) => <option value={index} key={index}>候选 {index + 1} · {item.area_m2?.toFixed(2) ?? "未知"} m²</option>)}</select><button className="button primary" disabled={busy || selected?.area_m2 === null} onClick={() => void confirm()}><Check size={15} />确认边界</button></div> : <span className="error-text">未检测到闭合房间轮廓</span>}
-        {error ? <span className="error-text">{error}</span> : null}
-      </div>
-      {outline ? <svg className="review-preview" viewBox="0 0 280 140" role="img" aria-label="房间候选轮廓"><polygon points={outline} fill="#c8e9df" stroke="#087b6c" strokeWidth="2" /></svg> : null}
-    </section>
   );
 }
 
@@ -391,7 +361,8 @@ function ChatView({ project, health, onProject }: {
     <section className="chat-view">
       <header className="section-heading"><div><h1>项目对话</h1><p>{project.brief.space_type ?? project.brief.project_name}</p></div><button className="icon-button" disabled={busy} onClick={() => void resetChat()} title="新对话" aria-label="新对话"><Plus size={18} /></button></header>
       <div className="chat-messages" ref={messagesRef} onScroll={(event) => { const list = event.currentTarget; followRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 120; }}>
-        <CadReview project={project} onProject={onProject} />
+        <SpatialReview project={project} onProject={onProject} />
+        <StandardsReview project={project} onProject={onProject} />
         {project.floor_plan?.selected_area_candidate_index !== null && project.floor_plan ? <div className="context-line"><FolderOpen size={15} /><span>{project.floor_plan.asset.source_name}</span><small>边界已确认</small></div> : null}
         {documents.length ? <details className="context-details"><summary><BookOpen size={15} />项目资料 · {documents.length}<ChevronDown size={14} /></summary><div>{documents.map((document) => <div key={document.source_hash}><FileText size={14} />{document.source_name}</div>)}</div></details> : null}
         {project.luminaires.length ? <details className="context-details product-context"><summary><Lightbulb size={15} />候选灯具 · {project.luminaires.length}<ChevronDown size={14} /></summary><div>{project.luminaires.toReversed().map((item) => <div className="context-product" key={item.luminaire_id}><span><strong>{item.article_name}</strong><small>{item.brand_name ?? "品牌未提供"} · {[item.power_w !== null ? `${item.power_w} W` : null, item.cct_k !== null ? `${item.cct_k} K` : null, item.cri !== null ? `Ra ${item.cri}` : null].filter(Boolean).join(" · ")}</small></span><button className="icon-button" disabled={Boolean(sending)} title="发送到 DIALux" aria-label={`发送 ${item.article_name} 到 DIALux`} onClick={() => void sendLuminaire(item)}>{sending === item.luminaire_id ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div>)}</div></details> : null}

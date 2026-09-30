@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -29,6 +29,7 @@ class DesignBrief(CompatibleModel):
     length_m: float | None = None
     width_m: float | None = None
     confirmed_fields: set[str] = Field(default_factory=set)
+    cad_confirmed_fields: set[str] = Field(default_factory=set)
 
 
 class Evidence(StrictModel):
@@ -127,8 +128,188 @@ class LuminaireCandidate(CompatibleModel):
 
 
 class CadPoint(StrictModel):
-    x: float
-    y: float
+    x: float = Field(allow_inf_nan=False)
+    y: float = Field(allow_inf_nan=False)
+
+
+class FieldProvenance(StrictModel):
+    source: Literal["cad", "inferred", "user_assumption", "user_correction"]
+    locator: str
+    confidence: float = Field(default=1, ge=0, le=1)
+    confirmed: bool = False
+    note: str = ""
+
+
+class ModelIssue(StrictModel):
+    code: str
+    message: str
+    severity: Literal["info", "warning", "error"] = "warning"
+    source_handle: str | None = None
+    room_id: str | None = None
+    position: CadPoint | None = None
+
+
+class DrawingPath(StrictModel):
+    layer: str
+    source_handle: str
+    points: list[CadPoint]
+    closed: bool = False
+    elevation_raw: float = 0
+
+
+class DrawingLabel(StrictModel):
+    text: str
+    position: CadPoint
+    layer: str
+    source_handle: str
+    elevation_raw: float = 0
+
+
+class SpatialElement(StrictModel):
+    element_id: str = Field(default_factory=lambda: uuid4().hex)
+    kind: Literal["door", "window", "column", "furniture", "obstruction"]
+    name: str = ""
+    room_id: str | None = None
+    footprint: list[CadPoint] = Field(default_factory=list)
+    position: CadPoint | None = None
+    length_m: float | None = None
+    width_m: float | None = None
+    elevation_m: float | None = Field(default=None, allow_inf_nan=False)
+    height_m: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    rotation_deg: float | None = Field(default=None, allow_inf_nan=False)
+    material: str | None = None
+    reflectance: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    status: Literal["pending", "confirmed", "excluded"] = "pending"
+    provenance: dict[str, FieldProvenance] = Field(default_factory=dict)
+
+
+class SpatialRoom(StrictModel):
+    room_id: str
+    candidate_id: str | None = None
+    floor: str | None = None
+    number: str | None = None
+    name: str | None = None
+    usage: str | None = None
+    boundary: list[CadPoint] = Field(min_length=3)
+    holes: list[list[CadPoint]] = Field(default_factory=list)
+    area_m2: float | None = None
+    elevation_m: float | None = Field(default=None, allow_inf_nan=False)
+    height_m: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    ceiling_height_m: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    wall_reflectance: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    ceiling_reflectance: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    floor_reflectance: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    status: Literal["pending", "confirmed", "excluded"] = "pending"
+    exclusion_reason: str = ""
+    provenance: dict[str, FieldProvenance] = Field(default_factory=dict)
+
+
+class SpatialModel(StrictModel):
+    version: int = 1
+    source_sha256: str
+    coordinate_system: str = "CAD WCS XY; boundaries in drawing units; elevations in metres"
+    meters_per_unit: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    geometry_tolerance_m: float | None = None
+    rooms: list[SpatialRoom] = Field(default_factory=list)
+    elements: list[SpatialElement] = Field(default_factory=list)
+    coverage_confirmed: bool = False
+    elements_reviewed: bool = False
+    design_ready: bool = False
+    outstanding: list[str] = Field(default_factory=list)
+    audit_log: list[str] = Field(default_factory=list)
+
+
+class EvidenceBlock(StrictModel):
+    block_id: str
+    text: str
+    bbox: tuple[float, float, float, float] | None = None
+    kind: Literal["text", "ocr", "table"] = "text"
+    source_bbox: tuple[float, float, float, float] | None = None
+    coordinate_space: Literal["pdf_points", "image_pixels", "unknown"] = "pdf_points"
+
+
+class EvidenceTable(StrictModel):
+    table_id: str
+    cells: list[list[str | None]]
+    bbox: tuple[float, float, float, float] | None = None
+    cell_bboxes: list[tuple[float, float, float, float] | None] = Field(default_factory=list)
+
+
+class EvidencePage(StrictModel):
+    page_number: int | None = None
+    locator: str
+    text: str = ""
+    width: float | None = None
+    height: float | None = None
+    blocks: list[EvidenceBlock] = Field(default_factory=list)
+    tables: list[EvidenceTable] = Field(default_factory=list)
+    ocr_layout: list[EvidenceBlock] = Field(default_factory=list)
+    status: Literal["extracted", "ocr_review", "needs_review", "empty"] = "extracted"
+    warnings: list[str] = Field(default_factory=list)
+
+
+class StandardRecord(StrictModel):
+    standard_id: str = Field(default_factory=lambda: uuid4().hex)
+    source_hash: str
+    file_sha256: str
+    project_id: str | None = None
+    number: str = Field(min_length=1, max_length=160)
+    edition: str = Field(min_length=1, max_length=160)
+    title: str = Field(min_length=1, max_length=300)
+    effective_date: date
+    scope: str = Field(min_length=1, max_length=2000)
+    kind: Literal["official", "corporate", "owner"]
+    source: str = Field(min_length=1, max_length=2000)
+    source_verified: bool = False
+    registered_at: datetime = Field(default_factory=utc_now)
+
+
+class CalculationConditions(StrictModel):
+    plane: str | None = None
+    workplane_height_m: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    grid_x_m: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    grid_y_m: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    maintenance_factor: float | None = Field(default=None, gt=0, le=1, allow_inf_nan=False)
+    glare_method: str | None = None
+    glare_observers: str | None = None
+    additional: str = ""
+
+
+class DesignRule(StrictModel):
+    rule_id: str = Field(default_factory=lambda: uuid4().hex)
+    standard_id: str
+    locator: str
+    page_number: int | None = None
+    evidence_text: str
+    evidence_key: str
+    metric: Literal["illuminance", "uniformity", "ugr", "cri", "cct", "lpd"]
+    operator: Literal[">=", "<=", "=", "range"] | None = None
+    threshold: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    upper_threshold: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    unit: str | None = None
+    applies_to: list[str] = Field(default_factory=list)
+    evaluation_scope: str | None = None
+    conditions: CalculationConditions = Field(default_factory=CalculationConditions)
+    condition_provenance: dict[str, FieldProvenance] = Field(default_factory=dict)
+    status: Literal["candidate", "confirmed", "rejected"] = "candidate"
+    reviewer: str | None = None
+    review_note: str = ""
+    reviewed_at: datetime | None = None
+
+
+class RuleSet(StrictModel):
+    version: int = 1
+    standards: list[StandardRecord] = Field(default_factory=list)
+    rules: list[DesignRule] = Field(default_factory=list)
+    bound_version: int | None = None
+    bound_model_version: int | None = None
+    bound_source_sha256: str | None = None
+    status: Literal["draft", "bound", "stale"] = "draft"
+    bound_by: str | None = None
+    bound_at: datetime | None = None
+    coverage_confirmed: bool = False
+    binding_note: str | None = None
+    invalidation_reason: str | None = None
 
 
 class FloorPlanAsset(StrictModel):
@@ -149,6 +330,13 @@ class FloorPlanAreaCandidate(StrictModel):
     length_m: float | None = None
     width_m: float | None = None
     points: list[CadPoint]
+    candidate_id: str = ""
+    boundary: list[CadPoint] = Field(default_factory=list)
+    holes: list[list[CadPoint]] = Field(default_factory=list)
+    source_handles: list[str] = Field(default_factory=list)
+    geometry_sources: list[dict[str, Any]] = Field(default_factory=list)
+    inferred_name: str | None = None
+    elevation_raw: float = 0
 
 
 class FloorPlan(CompatibleModel):
@@ -162,6 +350,16 @@ class FloorPlan(CompatibleModel):
     area_candidates: list[FloorPlanAreaCandidate] = Field(default_factory=list)
     selected_area_candidate_index: int | None = None
     warnings: list[str] = Field(default_factory=list)
+    layers: list[str] = Field(default_factory=list)
+    external_references: list[str] = Field(default_factory=list)
+    unsupported_entities: dict[str, int] = Field(default_factory=dict)
+    read_complete: bool = False
+    issues: list[ModelIssue] = Field(default_factory=list)
+    conversion_log: list[str] = Field(default_factory=list)
+    repairs: list[str] = Field(default_factory=list)
+    drawing_paths: list[DrawingPath] = Field(default_factory=list)
+    drawing_labels: list[DrawingLabel] = Field(default_factory=list)
+    spatial_model: SpatialModel | None = None
 
 
 class ProjectState(CompatibleModel):
@@ -171,6 +369,8 @@ class ProjectState(CompatibleModel):
     luminaires: list[LuminaireCandidate] = Field(default_factory=list)
     luminaire_search_runs: list[LuminaireSearchRun] = Field(default_factory=list)
     floor_plan: FloorPlan | None = None
+    rule_set: RuleSet | None = None
+    invalidated_dependencies: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -186,3 +386,5 @@ class ProjectUpdate(StrictModel):
     floor_plan: FloorPlan | None = None
     luminaires: list[LuminaireCandidate] | None = None
     luminaire_search_runs: list[LuminaireSearchRun] | None = None
+    rule_set: RuleSet | None = None
+    invalidated_dependencies: list[str] | None = None

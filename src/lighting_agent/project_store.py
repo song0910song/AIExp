@@ -10,6 +10,7 @@ from pathlib import Path
 from .config import DATABASE_FILE, PROJECTS_DIRECTORY, ensure_data_directories
 from .schemas import DesignBrief, FloorPlan, LuminaireCandidate, LuminaireSearchRun, ProjectState, ProjectUpdate
 from .storage import SQLiteDatabase
+from .spatial_model import assess_model
 
 
 class ProjectNotFoundError(FileNotFoundError):
@@ -83,7 +84,7 @@ class ProjectStore:
             state = ProjectState.model_validate_json(row["state_json"])
             changes = {
                 name: getattr(update, name)
-                for name in ("brief", "floor_plan", "luminaires", "luminaire_search_runs")
+                for name in ("brief", "floor_plan", "luminaires", "luminaire_search_runs", "rule_set", "invalidated_dependencies")
                 if getattr(update, name) is not None
             }
             state = state.model_copy(update=changes)
@@ -103,7 +104,19 @@ class ProjectStore:
         state = self.get(project_id)
         if area_candidate_index is None:
             stored = plan.model_copy(update={"selected_area_candidate_index": None})
-            return self.update(project_id, ProjectUpdate(expected_revision=expected_revision, floor_plan=stored))
+            if stored.spatial_model and state.floor_plan and state.floor_plan.spatial_model:
+                stored.spatial_model.version = state.floor_plan.spatial_model.version + 1
+            brief = state.brief.model_copy(deep=True)
+            if state.floor_plan:
+                for field in ("area_m2", "length_m", "width_m"):
+                    setattr(brief, field, None)
+                    brief.confirmed_fields.discard(field)
+                if "space_type" in brief.cad_confirmed_fields:
+                    brief.space_type = None
+                    brief.confirmed_fields.discard("space_type")
+                brief.cad_confirmed_fields.clear()
+            return self.update(project_id, ProjectUpdate(expected_revision=expected_revision, floor_plan=stored, brief=brief,
+                **self._invalidate(state, "CAD 重新导入；旧空间确认和计算关联需复核")))
         if area_candidate_index < 0 or area_candidate_index >= len(plan.area_candidates):
             raise ValueError("房间边界候选不存在")
         candidate = plan.area_candidates[area_candidate_index]
@@ -114,16 +127,42 @@ class ProjectStore:
             "length_m": candidate.length_m,
             "width_m": candidate.width_m,
             "confirmed_fields": state.brief.confirmed_fields | {"area_m2", "length_m", "width_m"},
+            "cad_confirmed_fields": state.brief.cad_confirmed_fields | {"area_m2", "length_m", "width_m"},
         })
         if not brief.space_type and plan.room_name:
             brief = brief.model_copy(update={
                 "space_type": plan.room_name,
                 "confirmed_fields": brief.confirmed_fields | {"space_type"},
+                "cad_confirmed_fields": brief.cad_confirmed_fields | {"space_type"},
             })
         stored = plan.model_copy(update={"selected_area_candidate_index": area_candidate_index})
+        stored = stored.model_copy(deep=True)
+        if stored.spatial_model:
+            for room in stored.spatial_model.rooms:
+                if room.candidate_id == candidate.candidate_id:
+                    room.status = "confirmed"
+                    room.provenance["boundary"].confirmed = True
+            stored.spatial_model.version += 1
+            assess_model(stored.spatial_model, stored)
         return self.update(
-            project_id, ProjectUpdate(expected_revision=expected_revision, brief=brief, floor_plan=stored)
+            project_id, ProjectUpdate(expected_revision=expected_revision, brief=brief, floor_plan=stored,
+                                     **self._invalidate(state, "房间确认已变更"))
         )
+
+    @staticmethod
+    def _invalidate(state: ProjectState, reason: str) -> dict:
+        changes: dict = {"invalidated_dependencies": [reason, "历史计算/布置结果仅供追溯，不代表当前模型"]}
+        if state.rule_set:
+            rules = state.rule_set.model_copy(deep=True)
+            rules.status = "stale" if rules.bound_version else "draft"
+            rules.invalidation_reason = reason
+            changes["rule_set"] = rules
+        luminaires = [item.model_copy(deep=True) for item in state.luminaires]
+        for luminaire in luminaires:
+            if luminaire.brief_validation:
+                luminaire.brief_validation.status = "stale"
+        changes["luminaires"] = luminaires
+        return changes
 
     def append_luminaires(
         self,

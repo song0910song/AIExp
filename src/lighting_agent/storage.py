@@ -79,6 +79,17 @@ class SQLiteDatabase:
                 indexed_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS document_artifacts (
+                source_hash TEXT PRIMARY KEY REFERENCES documents(source_hash) ON DELETE CASCADE,
+                artifact_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS standard_versions (
+                standard_id TEXT PRIMARY KEY,
+                source_hash TEXT NOT NULL REFERENCES documents(source_hash) ON DELETE RESTRICT,
+                record_json TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS evidence_chunks_source_hash_idx
                 ON evidence_chunks(source_hash);
 
@@ -153,6 +164,8 @@ class SQLiteDatabase:
                 "documents",
                 "project_revisions",
                 "evidence_chunks",
+                "document_artifacts",
+                "standard_versions",
                 "chat_sessions",
                 "legacy_imports",
             ):

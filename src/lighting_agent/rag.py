@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 from dataclasses import asdict, dataclass
@@ -13,7 +14,7 @@ from uuid import uuid4
 
 from .config import DATABASE_FILE, Settings, ensure_data_directories
 from .document_loader import ParsedDocument
-from .schemas import Evidence
+from .schemas import Evidence, StandardRecord
 from .storage import SQLiteDatabase
 
 
@@ -124,6 +125,14 @@ def scoped_source_hash(source_hash: str, project_id: str | None) -> str:
     return hashlib.sha256(f"project:{project_id}:{source_hash}".encode("utf-8")).hexdigest()
 
 
+def document_chunks(document: ParsedDocument) -> list[tuple[str, str]]:
+    """Never merge chunks across pages; PDF page numbers remain physical."""
+    if document.pages:
+        return [(content, page.locator + ("（待核实）" if page.status != "extracted" else ""))
+                for page in document.pages for content in chunk_text(page.text)]
+    return [(content, f"chunk {index}") for index, content in enumerate(chunk_text(document.content), 1)]
+
+
 class LocalEvidenceStore:
     """基于 SQLite 的确定性检索，用于离线与测试部署。"""
 
@@ -154,15 +163,16 @@ class LocalEvidenceStore:
         source_type: str = "project_document",
         project_id: str | None = None,
     ) -> int:
-        contents = chunk_text(document.content)
+        contents = document_chunks(document)
         now = datetime.now(UTC).isoformat()
         storage_hash = scoped_source_hash(document.sha256, project_id)
         with self.database.transaction() as connection:
-            connection.execute("DELETE FROM documents WHERE source_hash = ?", (storage_hash,))
+            connection.execute("DELETE FROM evidence_chunks WHERE source_hash = ?", (storage_hash,))
             connection.execute(
                 """
                 INSERT INTO documents (source_hash, source_name, source_type, project_id, page_count, indexed_at)
                 VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_hash) DO UPDATE SET indexed_at=excluded.indexed_at, page_count=excluded.page_count
                 """,
                 (storage_hash, document.source_name, source_type, project_id, document.page_count, now),
             )
@@ -179,14 +189,55 @@ class LocalEvidenceStore:
                         document.source_name,
                         source_type,
                         project_id,
-                        f"chunk {position}",
+                        locator,
                         content,
                         now,
                     )
-                    for position, content in enumerate(contents, start=1)
+                    for position, (content, locator) in enumerate(contents, start=1)
                 ],
             )
+            artifact = {
+                "source_sha256": document.sha256, "source_path": str(document.source_path.resolve()),
+                "content": document.content, "pages": [p.model_dump(mode="json") for p in document.pages],
+                "extraction_complete": all(p.status not in {"needs_review", "empty"} for p in document.pages),
+                "review_required": any(p.status != "extracted" for p in document.pages),
+            }
+            connection.execute(
+                "INSERT INTO document_artifacts VALUES (?, ?) ON CONFLICT(source_hash) DO UPDATE SET artifact_json=excluded.artifact_json",
+                (storage_hash, json.dumps(artifact, ensure_ascii=False)),
+            )
         return len(contents)
+
+    def get_document_artifact(self, source_hash: str, *, project_id: str | None = None) -> dict | None:
+        connection = self.database.connect()
+        try:
+            row = connection.execute(
+                "SELECT artifact_json FROM document_artifacts a JOIN documents d USING(source_hash) WHERE source_hash=? AND d.project_id IS ?",
+                (source_hash, project_id),
+            ).fetchone()
+            return json.loads(row[0]) if row else None
+        finally:
+            connection.close()
+
+    def register_standard(self, record: StandardRecord) -> StandardRecord:
+        artifact = self.get_document_artifact(record.source_hash, project_id=record.project_id)
+        if not artifact or artifact["source_sha256"] != record.file_sha256:
+            raise ValueError("标准必须关联当前范围内已归档的原始文件；旧资料请重新导入")
+        with self.database.transaction() as connection:
+            connection.execute("INSERT INTO standard_versions VALUES (?, ?, ?)",
+                               (record.standard_id, record.source_hash, record.model_dump_json()))
+        return record
+
+    def list_standards(self, *, project_id: str | None = None) -> list[StandardRecord]:
+        connection = self.database.connect()
+        try:
+            rows = connection.execute(
+                "SELECT s.record_json FROM standard_versions s JOIN documents d USING(source_hash) WHERE d.project_id IS ? ORDER BY s.rowid",
+                (project_id,),
+            ).fetchall()
+            return [StandardRecord.model_validate_json(row[0]) for row in rows]
+        finally:
+            connection.close()
 
     def upsert_chunks(self, chunks: list[StoredChunk]) -> int:
         """Mirror externally indexed chunks into the durable audit tables."""
@@ -363,6 +414,7 @@ class LocalEvidenceStore:
         """Remove all project-scoped evidence and leave global knowledge intact."""
 
         with self.database.transaction() as connection:
+            connection.execute("DELETE FROM standard_versions WHERE source_hash IN (SELECT source_hash FROM documents WHERE project_id=?)", (project_id,))
             result = connection.execute("DELETE FROM documents WHERE project_id = ?", (project_id,))
             return int(result.rowcount)
 
@@ -485,7 +537,7 @@ class ChromaEvidenceStore:
         project_id: str | None = None,
     ) -> int:
         storage_hash = scoped_source_hash(document.sha256, project_id)
-        records = [(position, content) for position, content in enumerate(chunk_text(document.content), start=1)]
+        records = [(position, content, locator) for position, (content, locator) in enumerate(document_chunks(document), start=1)]
         documents = [
             self._document_type(
                 page_content=content,
@@ -495,10 +547,10 @@ class ChromaEvidenceStore:
                     "source_type": source_type,
                     "source_hash": storage_hash,
                     "project_id": project_id or "__global__",
-                    "locator": f"chunk {position}",
+                    "locator": locator,
                 },
             )
-            for position, content in records
+            for position, content, locator in records
         ]
         if documents:
             existing = self.vector_store.get(where={"source_hash": storage_hash})
@@ -517,9 +569,9 @@ class ChromaEvidenceStore:
             stale_ids = existing_ids.difference(ids)
             if stale_ids:
                 self.vector_store.delete(ids=list(stale_ids))
-            audited_count = self.audit_store.add_document(document, source_type=source_type, project_id=project_id)
-            if audited_count != len(documents):
-                raise RuntimeError("Chroma and SQLite produced different chunk counts")
+        audited_count = self.audit_store.add_document(document, source_type=source_type, project_id=project_id)
+        if audited_count != len(documents):
+            raise RuntimeError("Chroma and SQLite produced different chunk counts")
         return len(documents)
 
     @staticmethod
@@ -686,6 +738,15 @@ class ChromaEvidenceStore:
 
     def list_documents(self, *, project_id: str | None = None) -> list[StoredDocument]:
         return self.audit_store.list_documents(project_id=project_id)
+
+    def get_document_artifact(self, source_hash: str, *, project_id: str | None = None):
+        return self.audit_store.get_document_artifact(source_hash, project_id=project_id)
+
+    def register_standard(self, record: StandardRecord):
+        return self.audit_store.register_standard(record)
+
+    def list_standards(self, *, project_id: str | None = None):
+        return self.audit_store.list_standards(project_id=project_id)
 
     def get_document_chunks(self, source_hash: str, *, project_id: str | None = None) -> list[StoredChunk]:
         return self.audit_store.get_document_chunks(source_hash, project_id=project_id)

@@ -9,6 +9,7 @@ from langchain_core.tools import tool
 from .dialux_api import candidate_summary
 from .rag import public_locator
 from .schemas import LuminaireSearchRequest
+from .rules import calculation_mapping
 
 
 def make_tools(*, projects: Any, evidence: Any, dialux: Any, project_id: str | None):
@@ -30,7 +31,14 @@ def make_tools(*, projects: Any, evidence: Any, dialux: Any, project_id: str | N
                 "areas_m2": [item.area_m2 for item in plan.area_candidates[:12]],
                 "selected_area_candidate_index": plan.selected_area_candidate_index,
                 "warnings": plan.warnings,
+                "read_complete": plan.read_complete,
+                "model_version": plan.spatial_model.version if plan.spatial_model else None,
+                "design_ready": plan.spatial_model.design_ready if plan.spatial_model else False,
+                "rooms": [r.model_dump(mode="json", exclude={"boundary", "holes"}) for r in plan.spatial_model.rooms] if plan.spatial_model else [],
+                "outstanding": plan.spatial_model.outstanding if plan.spatial_model else ["旧图纸需重新导入"],
             } if plan else None,
+            "rules_and_settings": calculation_mapping(state.rule_set, plan.spatial_model if plan else None),
+            "invalidated_dependencies": state.invalidated_dependencies,
             "saved_luminaires": [
                 {"id": item.luminaire_id, "brand": item.brand_name, "name": item.article_name}
                 for item in state.luminaires[-12:]

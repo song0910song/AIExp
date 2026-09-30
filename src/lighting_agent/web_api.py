@@ -32,6 +32,7 @@ from .rag import EvidenceNotFoundError, create_evidence_store, public_locator
 from .schemas import DesignBrief, LuminaireSearchRequest, ProjectState, ProjectUpdate, StrictModel
 from .storage import SQLiteDatabase
 from .workspace import WorkspaceError, WorkspaceEvidenceStore, WorkspaceProjectStore
+from .review_api import install_review_routes
 
 LOGGER = logging.getLogger(__name__)
 
@@ -163,6 +164,8 @@ def _project_view(state: ProjectState) -> dict[str, Any]:
         },
         "floor_plan": state.floor_plan.model_dump(mode="json") if state.floor_plan else None,
         "luminaires": [item.model_dump(mode="json") for item in state.luminaires],
+        "rule_set": state.rule_set.model_dump(mode="json") if state.rule_set else None,
+        "invalidated_dependencies": state.invalidated_dependencies,
         "created_at": state.created_at.isoformat(),
         "updated_at": state.updated_at.isoformat(),
     }
@@ -309,6 +312,7 @@ def create_app(
         return sessions
 
     app = FastAPI(title="照明设计知识工作台 API", version="0.2.0")
+    install_review_routes(app, projects, evidence, project_root, _project_view)
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
@@ -474,7 +478,11 @@ def create_app(
         if item is None:
             raise HTTPException(status_code=404, detail="资料不存在")
         chunks = evidence.get_document_chunks(source_hash, project_id=project_id)
-        return {**_document_view(item), "content": _merge_chunks([chunk.content for chunk in chunks])}
+        artifact = evidence.get_document_artifact(source_hash, project_id=project_id)
+        if artifact:
+            return {**_document_view(item), **{k: v for k, v in artifact.items() if k != "source_path"}}
+        return {**_document_view(item), "content": _merge_chunks([chunk.content for chunk in chunks]),
+                "pages": [], "extraction_complete": False, "review_required": True}
 
     @app.get("/api/documents/{source_hash}")
     def get_document(source_hash: str) -> dict[str, Any]:
@@ -505,7 +513,8 @@ def create_app(
             if not existed:
                 target.unlink(missing_ok=True)
             raise HTTPException(status_code=422, detail=str(error)) from error
-        return {"source_name": document.source_name, "sha256": document.sha256, "indexed_chunks": count}
+        return {"source_name": document.source_name, "sha256": document.sha256, "indexed_chunks": count,
+                "warnings": [f"{p.locator}: {w}" for p in document.pages for w in p.warnings]}
 
     @app.post("/api/documents", status_code=201)
     async def add_document(
