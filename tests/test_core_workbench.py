@@ -117,6 +117,8 @@ def test_project_documents_are_private_but_global_documents_are_searchable(envir
         files={"file": ("private.md", b"Private project fixture detail", "text/markdown")},
     )
     assert global_doc.status_code == local_doc.status_code == 201
+    global_hash = client.get("/api/documents").json()[0]["source_hash"]
+    assert "Global standard 500 lx" in client.get(f"/api/documents/{global_hash}").json()["content"]
     private_hash = client.get(f"/api/projects/{one}/documents").json()[0]["source_hash"]
     assert client.get(f"/api/projects/{two}/documents/{private_hash}").status_code == 404
     global_results = client.post("/api/evidence/search", json={"query": "Private fixture"}).json()["evidence"]
@@ -214,12 +216,112 @@ def test_chat_rejects_another_projects_session(environment, monkeypatch):
     )
     assert response.status_code == 200, response.text
     assert used_efforts == ["high"]
+    assert response.json()["context_usage"]["percentage"] > 0
     assert client.post(
         "/api/chat", json={"project_id": project_one, "message": "Hi", "reasoning_effort": "none"}
     ).status_code == 422
     session_id = response.json()["session_id"]
     assert client.get(f"/api/chat/{session_id}", params={"project_id": project_two}).status_code == 404
     assert client.get(f"/api/chat/{session_id}", params={"project_id": project_one}).json()["messages"]
+
+
+def test_stream_chat_shows_tool_progress_and_persists_history(environment, monkeypatch):
+    from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+    from lighting_agent import web_api
+
+    _, projects, evidence = environment
+    monkeypatch.setattr(web_api, "Settings", lambda: SimpleNamespace(
+        llm_api_key="test", llm_model="test", rag_backend="local",
+        chat_session_max_messages=80, chat_session_ttl_hours=168, agent_max_steps=12,
+        llm_context_window_tokens=8192, llm_context_window_estimated=False,
+        supported_reasoning_efforts=lambda: ("low", "medium", "high"),
+        default_reasoning_effort=lambda: "medium", prompt_cache_options=lambda: None,
+        with_reasoning_effort=lambda effort: SimpleNamespace(llm_reasoning_effort=effort),
+    ))
+    project = projects.create(DesignBrief(project_name="Stream"))
+    received = []
+
+    def fake_agent(config, **kwargs):
+        assert config.llm_reasoning_effort == "high"
+
+        def stream(inputs, *, stream_mode, config):
+            received.append(inputs["messages"])
+            assert stream_mode == ["messages", "updates"]
+            assert config["recursion_limit"] == 12
+            yield "updates", {"model": {"messages": [AIMessage(
+                content="", tool_calls=[{"id": "call-1", "name": "search_evidence", "args": {"query": "500 lx"}}],
+            )]}}
+            yield "updates", {"tools": {"messages": [ToolMessage(
+                content=json.dumps({"evidence": [{"source": "standard.md"}]}),
+                tool_call_id="call-1", name="search_evidence",
+            )]}}
+            yield "messages", (AIMessageChunk(content="照明"), {})
+            yield "messages", (AIMessageChunk(
+                content="规范", usage_metadata={"input_tokens": 4096, "output_tokens": 2, "total_tokens": 4098},
+            ), {})
+
+        return SimpleNamespace(stream=stream)
+
+    monkeypatch.setattr(web_api, "build_agent", fake_agent)
+    client = TestClient(web_api.create_app(
+        project_store=projects, evidence_store=evidence, dialux_api=Catalogue(),
+    ))
+    response = client.post("/api/chat/stream", json={
+        "project_id": project.project_id, "message": "照度要求？", "reasoning_effort": "high",
+    })
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    events = [
+        (block.split("\n")[0][7:], json.loads(block.split("\ndata: ", 1)[1]))
+        for block in response.text.strip().split("\n\n")
+    ]
+    assert [name for name, _ in events] == ["session", "tool", "tool", "delta", "delta", "done"]
+    assert events[1][1]["status"] == "running"
+    assert events[2][1]["summary"] == "检索到 1 条资料"
+    assert events[3][1]["text"] + events[4][1]["text"] == "照明规范"
+    assert events[-1][1]["context_usage"] == {
+        "input_tokens": 4096, "window_tokens": 8192, "percentage": 50.0, "estimated": False,
+    }
+    session_id = events[-1][1]["session_id"]
+    history = client.get(f"/api/chat/{session_id}", params={"project_id": project.project_id}).json()
+    assert history["messages"][-1]["content"] == "照明规范"
+    assert history["messages"][-1]["tool_calls"][0]["status"] == "completed"
+    assert history["messages"][-1]["context_usage"]["percentage"] == 50.0
+    client.post("/api/chat/stream", json={
+        "project_id": project.project_id, "message": "还有呢？", "session_id": session_id,
+        "reasoning_effort": "high",
+    })
+    assert received[1][1] == {"role": "assistant", "content": "照明规范"}
+    assert "tool_calls" not in received[1][1]
+
+
+def test_stream_error_does_not_store_incomplete_answer(environment, monkeypatch):
+    from langchain_core.messages import AIMessageChunk
+    from lighting_agent import web_api
+
+    _, projects, evidence = environment
+    monkeypatch.setattr(web_api, "Settings", lambda: SimpleNamespace(
+        llm_api_key="test", llm_model="test", chat_session_max_messages=80,
+        chat_session_ttl_hours=168, agent_max_steps=12,
+        supported_reasoning_efforts=lambda: ("medium",),
+        with_reasoning_effort=lambda effort: None,
+    ))
+    project = projects.create(DesignBrief(project_name="Interrupted"))
+
+    def stream(*args, **kwargs):
+        yield "messages", (AIMessageChunk(content="部分结果"), {})
+        raise RuntimeError("private provider error")
+
+    monkeypatch.setattr(web_api, "build_agent", lambda *args, **kwargs: SimpleNamespace(stream=stream))
+    client = TestClient(web_api.create_app(
+        project_store=projects, evidence_store=evidence, dialux_api=Catalogue(),
+    ))
+    response = client.post("/api/chat/stream", json={"project_id": project.project_id, "message": "你好"})
+    assert "event: error" in response.text
+    assert "private provider error" not in response.text
+    session_id = json.loads(response.text.split("\ndata: ", 1)[1].split("\n\n", 1)[0])["session_id"]
+    history = client.get(f"/api/chat/{session_id}", params={"project_id": project.project_id}).json()
+    assert history["messages"] == []
 
 
 def test_project_chat_search_saves_candidates_for_explicit_handoff(environment):
@@ -245,5 +347,8 @@ def test_reasoning_and_prompt_cache_settings_remain_available():
     assert Settings(
         llm_model="gpt-5.6-test", llm_base_url="https://gateway.example/v1",
         llm_prompt_cache_enabled=None,
-    ).prompt_cache_options() is None
-    assert Settings(llm_prompt_cache_enabled=True).prompt_cache_options() == {"mode": "implicit", "ttl": "30m"}
+    ).prompt_cache_options() == {"mode": "implicit", "ttl": "30m"}
+    assert Settings(llm_prompt_cache_enabled=False).prompt_cache_options() is None
+    assert Settings(llm_prompt_cache_enabled=True, llm_prompt_cache_ttl="1h").prompt_cache_options() == {
+        "mode": "implicit", "ttl": "1h",
+    }

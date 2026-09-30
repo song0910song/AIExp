@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sys
 from datetime import UTC, datetime, timedelta
@@ -14,11 +15,11 @@ from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import Field
 from starlette.concurrency import run_in_threadpool
 
-from .agent import build_agent
+from .agent import SYSTEM_PROMPT, build_agent
 from .config import (
     DATABASE_FILE, REASONING_EFFORT_METADATA, Settings, USER_DOCUMENTS_DIRECTORY, ensure_data_directories,
 )
@@ -31,6 +32,8 @@ from .rag import EvidenceNotFoundError, create_evidence_store
 from .schemas import DesignBrief, LuminaireSearchRequest, ProjectState, ProjectUpdate, StrictModel
 from .storage import SQLiteDatabase
 from .workspace import WorkspaceError, WorkspaceEvidenceStore, WorkspaceProjectStore
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ProjectCreateRequest(StrictModel):
@@ -67,7 +70,7 @@ class ChatSessionStore:
         self.database = SQLiteDatabase(path)
         self.settings = settings
 
-    def get(self, session_id: str, project_id: str | None) -> list[dict[str, str]]:
+    def get(self, session_id: str, project_id: str | None) -> list[dict[str, Any]]:
         connection = self.database.connect()
         try:
             row = connection.execute(
@@ -91,15 +94,21 @@ class ChatSessionStore:
                 for item in messages_from_dict(records)
                 if item.type in {"human", "ai"}
             ]
-        return [
-            {"role": item["role"], "content": item["content"]}
-            for item in records
-            if isinstance(item, dict)
-            and item.get("role") in {"user", "assistant"}
-            and isinstance(item.get("content"), str)
-        ]
+        messages = []
+        for item in records:
+            if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
+                continue
+            if not isinstance(item.get("content"), str):
+                continue
+            message = {"role": item["role"], "content": item["content"]}
+            if item["role"] == "assistant" and isinstance(item.get("tool_calls"), list):
+                message["tool_calls"] = item["tool_calls"]
+            if item["role"] == "assistant" and isinstance(item.get("context_usage"), dict):
+                message["context_usage"] = item["context_usage"]
+            messages.append(message)
+        return messages
 
-    def save(self, session_id: str, project_id: str | None, messages: list[dict[str, str]]) -> None:
+    def save(self, session_id: str, project_id: str | None, messages: list[dict[str, Any]]) -> None:
         now = datetime.now(UTC)
         payload = json.dumps(messages[-max(1, self.settings.chat_session_max_messages):], ensure_ascii=False)
         with self.database.transaction() as connection:
@@ -211,6 +220,56 @@ def _merge_chunks(chunks: list[str]) -> str:
         )
         content += chunk[overlap:] if overlap else "\n\n" + chunk
     return content
+
+
+def _message_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "") for part in content
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+        )
+    return ""
+
+
+def _tool_result_summary(name: str, content: Any) -> str:
+    try:
+        result = json.loads(content) if isinstance(content, str) else content
+    except (ValueError, TypeError):
+        return "调用完成"
+    if isinstance(result, dict):
+        if name == "search_evidence" and isinstance(result.get("evidence"), list):
+            return f"检索到 {len(result['evidence'])} 条资料"
+        if name == "search_luminaires" and isinstance(result.get("candidates"), list):
+            return f"找到 {len(result['candidates'])} 款灯具"
+    return "调用完成"
+
+
+def _sse(event: str, payload: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _context_usage(
+    input_tokens: int | None, settings: Settings,
+    messages: list[dict[str, str]], tool_outputs: list[str] | None = None,
+) -> dict[str, Any]:
+    estimated = input_tokens is None or getattr(settings, "llm_context_window_estimated", True)
+    if input_tokens is None:
+        content = SYSTEM_PROMPT + json.dumps(messages, ensure_ascii=False) + "\n".join(tool_outputs or [])
+        try:
+            import tiktoken
+
+            input_tokens = len(tiktoken.get_encoding("o200k_base").encode(content, disallowed_special=()))
+        except (ImportError, ValueError):
+            input_tokens = max(1, len(content) // 3)
+    window = max(1, getattr(settings, "llm_context_window_tokens", 128000))
+    return {
+        "input_tokens": input_tokens,
+        "window_tokens": window,
+        "percentage": round(input_tokens / window * 100, 2),
+        "estimated": estimated,
+    }
 
 
 def create_app(
@@ -518,20 +577,128 @@ def create_app(
                 dialux=dialux, project_id=request.project_id,
             )
             response = agent.invoke(
-                {"messages": [*history, current]},
+                {"messages": [{"role": item["role"], "content": item["content"]} for item in [*history, current]]},
                 config={"recursion_limit": max(4, settings.agent_max_steps)},
             )
-            answer = response["messages"][-1].content
-            if not isinstance(answer, str):
-                answer = " ".join(str(part.get("text", "")) for part in answer if isinstance(part, dict))
+            final = response["messages"][-1]
+            answer = _message_text(final.content)
+            tokens = (getattr(final, "usage_metadata", None) or {}).get("input_tokens")
+            usage = _context_usage(tokens, settings, [*history, current])
         except Exception as error:
             raise HTTPException(status_code=502, detail="照明问答服务暂不可用，请稍后重试") from error
-        session_store.save(session_id, request.project_id, [*history, current, {"role": "assistant", "content": answer}])
+        session_store.save(session_id, request.project_id, [
+            *history, current, {"role": "assistant", "content": answer, "context_usage": usage},
+        ])
         return {
             "session_id": session_id,
             "answer": answer,
+            "context_usage": usage,
             "project": _project_view(projects.get(request.project_id)) if request.project_id else None,
         }
+
+    @app.post("/api/chat/stream")
+    def stream_chat(request: ChatRequest) -> StreamingResponse:
+        if request.project_id:
+            projects.get(request.project_id)
+        if not settings.llm_api_key or not settings.llm_model:
+            raise HTTPException(status_code=503, detail="未配置照明问答模型")
+        if request.reasoning_effort and request.reasoning_effort not in settings.supported_reasoning_efforts():
+            raise HTTPException(status_code=422, detail="当前模型不支持所选思考强度")
+        session_id = request.session_id or uuid4().hex
+        session_store = project_sessions(request.project_id)
+        history = session_store.get(session_id, request.project_id)
+        current = {"role": "user", "content": request.message}
+        try:
+            agent = build_agent(
+                settings.with_reasoning_effort(request.reasoning_effort),
+                projects=projects, evidence=evidence,
+                dialux=dialux, project_id=request.project_id,
+            )
+        except Exception as error:
+            LOGGER.exception("Failed to initialize lighting agent")
+            raise HTTPException(status_code=502, detail="照明问答服务暂不可用，请稍后重试") from error
+
+        def events():
+            from langchain_core.messages import AIMessageChunk
+
+            answer_parts: list[str] = []
+            calls: dict[str, dict[str, str]] = {}
+            tool_outputs: list[str] = []
+            input_tokens: int | None = None
+            yield _sse("session", {"session_id": session_id})
+            try:
+                for mode, chunk in agent.stream(
+                    {"messages": [{"role": item["role"], "content": item["content"]} for item in [*history, current]]},
+                    stream_mode=["messages", "updates"],
+                    config={"recursion_limit": max(4, settings.agent_max_steps)},
+                ):
+                    if mode == "messages":
+                        message, _metadata = chunk
+                        if isinstance(message, AIMessageChunk):
+                            tokens = (message.usage_metadata or {}).get("input_tokens")
+                            if isinstance(tokens, int) and tokens > 0:
+                                input_tokens = tokens
+                            if not message.tool_call_chunks:
+                                delta = _message_text(message.content)
+                                if delta:
+                                    answer_parts.append(delta)
+                                    yield _sse("delta", {"text": delta})
+                    elif mode == "updates":
+                        for update in chunk.values():
+                            for message in update.get("messages", []):
+                                if getattr(message, "type", None) == "ai":
+                                    tokens = (getattr(message, "usage_metadata", None) or {}).get("input_tokens")
+                                    if isinstance(tokens, int) and tokens > 0:
+                                        input_tokens = tokens
+                                    for call in getattr(message, "tool_calls", []) or []:
+                                        call_id = call.get("id") or uuid4().hex
+                                        if call_id not in calls:
+                                            args = call.get("args") or {}
+                                            entry = {
+                                                "id": call_id, "name": call["name"],
+                                                "input": json.dumps(args, ensure_ascii=False) if args else "",
+                                                "status": "running", "summary": "",
+                                            }
+                                            calls[call_id] = entry
+                                            yield _sse("tool", entry)
+                                    if not getattr(message, "tool_calls", None) and not answer_parts:
+                                        fallback = _message_text(message.content)
+                                        if fallback:
+                                            answer_parts.append(fallback)
+                                            yield _sse("delta", {"text": fallback})
+                                elif getattr(message, "type", None) == "tool":
+                                    tool_outputs.append(str(message.content))
+                                    call_id = message.tool_call_id
+                                    if call_id in calls:
+                                        entry = calls[call_id]
+                                        entry["status"] = "error" if getattr(message, "status", "success") == "error" else "completed"
+                                        entry["summary"] = (
+                                            "调用失败" if entry["status"] == "error"
+                                            else _tool_result_summary(entry["name"], message.content)
+                                        )
+                                        yield _sse("tool", entry)
+                answer = "".join(answer_parts)
+                usage = _context_usage(input_tokens, settings, [*history, current], tool_outputs)
+                session_store.save(
+                    session_id, request.project_id,
+                    [*history, current, {
+                        "role": "assistant", "content": answer,
+                        "tool_calls": list(calls.values()), "context_usage": usage,
+                    }],
+                )
+                yield _sse("done", {
+                    "session_id": session_id,
+                    "context_usage": usage,
+                    "project": _project_view(projects.get(request.project_id)) if request.project_id else None,
+                })
+            except Exception:
+                LOGGER.exception("Streaming lighting agent failed")
+                yield _sse("error", {"message": "照明问答服务暂不可用，请稍后重试"})
+
+        return StreamingResponse(
+            events(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/api/chat/{session_id}")
     def chat_history(session_id: str, project_id: str | None = None) -> dict[str, Any]:

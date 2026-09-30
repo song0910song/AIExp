@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass, replace
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -37,15 +35,6 @@ def _optional_bool(name: str) -> bool | None:
     return value.strip().casefold() in {"1", "true", "yes", "on"}
 
 
-def _supports_prompt_cache(model: str | None, base_url: str | None) -> bool:
-    match = re.match(r"^gpt-(\d+)\.(\d+)", (model or "").strip().casefold())
-    endpoint = urlsplit(base_url) if base_url else None
-    is_openai_api = endpoint is None or (
-        endpoint.scheme == "https" and endpoint.hostname == "api.openai.com"
-    )
-    return bool(match) and (int(match.group(1)), int(match.group(2))) >= (5, 6) and is_openai_api
-
-
 @dataclass(frozen=True, slots=True)
 class Settings:
     llm_model: str | None = os.getenv("LIGHTING_LLM_MODEL")
@@ -65,6 +54,8 @@ class Settings:
         "LIGHTING_LLM_PROMPT_CACHE_KEY", "lighting-design-agent-v1"
     ).strip() or "lighting-design-agent-v1"
     llm_prompt_cache_ttl: str = os.getenv("LIGHTING_LLM_PROMPT_CACHE_TTL", "30m")
+    llm_context_window_tokens: int = int(os.getenv("LIGHTING_LLM_CONTEXT_WINDOW_TOKENS", "128000"))
+    llm_context_window_estimated: bool = not bool(os.getenv("LIGHTING_LLM_CONTEXT_WINDOW_TOKENS"))
     chat_session_ttl_hours: int = int(os.getenv("LIGHTING_CHAT_SESSION_TTL_HOURS", "168"))
     chat_session_max_messages: int = int(os.getenv("LIGHTING_CHAT_SESSION_MAX_MESSAGES", "80"))
 
@@ -108,10 +99,9 @@ class Settings:
         return replace(self, llm_reasoning_effort=effort)
 
     def prompt_cache_options(self) -> dict[str, str] | None:
-        enabled = self.llm_prompt_cache_enabled
-        if enabled is False or (enabled is None and not _supports_prompt_cache(self.llm_model, self.llm_base_url)):
+        if self.llm_prompt_cache_enabled is False:
             return None
-        return {"mode": "implicit", "ttl": "30m"}
+        return {"mode": "implicit", "ttl": self.llm_prompt_cache_ttl}
 
     def validate_for_agent(self) -> None:
         if not self.llm_model or not self.llm_api_key:

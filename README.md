@@ -3,9 +3,9 @@
 当前版本的主界面是**一个项目问答窗口**。在同一会话中：
 
 1. 上传 DXF 或 DWG，查看二维轮廓与面积候选，确认房间边界后再用于后续提问。DWG 解析依赖本机 ODA File Converter。
-2. 上传 PDF、DOCX、MD 或 TXT 到项目资料或公共规范库；直接在对话中提问，助手检索片段并注明来源。扫描 PDF 需要可用的 OCR 服务。
+2. 对话附件上传项目资料；侧栏的全局资料入口打开右侧面板，可上传、查看所有项目共用的 PDF、DOCX、MD 或 TXT 及正文。直接在对话中提问，助手检索片段并注明来源。扫描 PDF 需要可用的 OCR 服务。
 3. 询问照明设计知识、检索 DIALux Luminaire Finder；候选保存在当前项目，在会话中的候选列表里点击发送，通过本机 `dial://` 协议打开灯具导入。
-4. 在输入区选择思考强度；模型提示词缓存由环境变量控制，页面显示当前开关状态。
+4. 问答逐段输出并展示工具调用过程；输入区可选思考强度，显示最近一次请求的上下文窗口占比。模型提示词缓存默认开启，不占用对话界面空间。
 
 发送灯具只是唤起导入对话框；**不会驱动 DIALux 建模、计算或生成仿真结果**。已移除流明法、配光预览、重设计、自算报告和 DIALux 结果导入。历史项目中的原有记录仍保存在数据库，当前工作台不展示或修改这些数据。
 
@@ -27,10 +27,12 @@ LIGHTING_LLM_MODEL=your-model
 LIGHTING_LLM_BASE_URL=https://your-compatible-endpoint/v1
 LIGHTING_LLM_REASONING_EFFORTS=none,low,medium,high
 LIGHTING_LLM_REASONING_EFFORT_DEFAULT=medium
-# 可选：使用兼容网关的隐式缓存；默认只对受支持的 OpenAI 模型自动启用
+# 默认启用隐式缓存；若当前兼容网关不接受缓存参数，可设为 false
 LIGHTING_LLM_PROMPT_CACHE_ENABLED=true
 LIGHTING_LLM_PROMPT_CACHE_KEY=lighting-design-agent-v1
 LIGHTING_LLM_PROMPT_CACHE_TTL=30m
+# 可选：填写当前模型的真实上下文容量；未配置时按 128000 token 估算占比
+LIGHTING_LLM_CONTEXT_WINDOW_TOKENS=128000
 # 可选：本机 DWG 转换
 ODA_FILE_CONVERTER_PATH=C:\path\to\ODAFileConverter.exe
 # 可选：无需嵌入模型时使用本地关键词检索

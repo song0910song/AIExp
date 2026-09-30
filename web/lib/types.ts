@@ -79,4 +79,28 @@ export type DocumentRecord = {
 };
 
 export type DocumentContent = DocumentRecord & { content: string };
-export type ChatMessage = { role: "user" | "assistant"; content: string };
+export type ContextUsage = {
+  input_tokens: number;
+  window_tokens: number;
+  percentage: number;
+  estimated: boolean;
+};
+export type ToolCall = {
+  id: string;
+  name: string;
+  input: string;
+  status: "running" | "completed" | "error";
+  summary: string;
+};
+export type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+  tool_calls?: ToolCall[];
+  context_usage?: ContextUsage;
+};
+export type ChatStreamEvent =
+  | { type: "session"; session_id: string }
+  | { type: "delta"; text: string }
+  | ({ type: "tool" } & ToolCall)
+  | { type: "done"; session_id: string; project: Project | null; context_usage: ContextUsage }
+  | { type: "error"; message: string };

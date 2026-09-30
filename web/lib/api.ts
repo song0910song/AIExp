@@ -1,21 +1,68 @@
-import type { ChatMessage, DocumentContent, DocumentRecord, Evidence, Health, Luminaire, Project } from "./types";
+import type { ChatMessage, ChatStreamEvent, DocumentContent, DocumentRecord, Evidence, Health, Luminaire, Project } from "./types";
 
 const ROOT = "/backend";
+
+async function assertOk(response: Response): Promise<void> {
+  if (response.ok) return;
+  let detail = `请求失败（${response.status}）`;
+  try {
+    const error = await response.json();
+    detail = typeof error.detail === "string" ? error.detail : error.detail?.message ?? detail;
+  } catch { /* The server did not return JSON. */ }
+  throw new Error(detail);
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${ROOT}${path}`, {
     ...init,
     headers: init?.body instanceof FormData ? init.headers : { "Content-Type": "application/json", ...init?.headers },
   });
-  if (!response.ok) {
-    let detail = `请求失败（${response.status}）`;
-    try {
-      const error = await response.json();
-      detail = typeof error.detail === "string" ? error.detail : error.detail?.message ?? detail;
-    } catch { /* The server did not return JSON. */ }
-    throw new Error(detail);
-  }
+  await assertOk(response);
   return response.status === 204 ? undefined as T : response.json() as Promise<T>;
+}
+
+async function streamChat(
+  projectId: string, message: string, reasoningEffort: string, sessionId: string | undefined,
+  onEvent: (event: ChatStreamEvent) => void, signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${ROOT}/chat/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_id: projectId, message, session_id: sessionId, reasoning_effort: reasoningEffort }),
+    signal,
+  });
+  await assertOk(response);
+  if (!response.body) throw new Error("浏览器未提供流式响应");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let completed = false;
+  function dispatch(block: string) {
+    const eventName = block.match(/^event: (.+)$/m)?.[1];
+    const data = block.match(/^data: (.+)$/m)?.[1];
+    if (!eventName || !data) return;
+    const event = { type: eventName, ...JSON.parse(data) } as ChatStreamEvent;
+    if (event.type === "error") throw new Error(event.message);
+    if (event.type === "done") completed = true;
+    onEvent(event);
+  }
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      buffer = buffer.replace(/\r\n/g, "\n");
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        dispatch(buffer.slice(0, boundary));
+        buffer = buffer.slice(boundary + 2);
+        boundary = buffer.indexOf("\n\n");
+      }
+      if (done) break;
+    }
+    if (!completed) throw new Error("响应意外中断，请重试");
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 export const api = {
@@ -56,7 +103,7 @@ export const api = {
     const data = new FormData();
     data.append("file", file);
     data.append("source_type", projectId ? "project_document" : "standard");
-    return request<{ indexed_chunks: number }>(
+    return request<{ indexed_chunks: number; sha256: string; source_name: string }>(
       projectId ? `/projects/${projectId}/documents` : "/documents",
       { method: "POST", body: data },
     );
@@ -80,6 +127,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ project_id: projectId, message, session_id: sessionId, reasoning_effort: reasoningEffort }),
     }),
+  streamChat,
   chatHistory: (projectId: string, sessionId: string) =>
     request<{ session_id: string; messages: ChatMessage[] }>(
       `/chat/${sessionId}?project_id=${encodeURIComponent(projectId)}`,

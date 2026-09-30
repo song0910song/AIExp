@@ -33,6 +33,7 @@ def build_agent(
         "timeout": settings.llm_timeout_seconds,
         "max_retries": settings.llm_max_retries,
         "use_responses_api": False,
+        "stream_usage": True,
         "http_socket_options": (),
     }
     if settings.llm_reasoning_effort is not None:
