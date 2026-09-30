@@ -19,6 +19,7 @@ from .storage import SQLiteDatabase
 
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]{1,}")
 CHINESE_PHRASE_PATTERN = re.compile(r"[\u4e00-\u9fff]{3,}")
+INTERNAL_LOCATOR_PATTERN = re.compile(r"^chunks?\s+\d+(?:\s*(?:[-–—,]\s*\d+))*$", re.IGNORECASE)
 
 # Hugging Face tokenizers use interior mutable state and can raise
 # ``RuntimeError: Already borrowed`` when one BGE tokenizer is entered from
@@ -40,6 +41,14 @@ def tokenize(value: str) -> list[str]:
         else:
             tokens.append(part)
     return tokens
+
+
+def public_locator(locator: str | None) -> str | None:
+    """Return a user-facing source location, hiding internal RAG chunk labels."""
+
+    if not locator or INTERNAL_LOCATOR_PATTERN.fullmatch(locator.strip()):
+        return None
+    return locator.strip()
 
 # 提取中文关键词
 def chroma_keyword_terms(query: str, *, maximum: int = 12) -> list[str]:
@@ -718,7 +727,11 @@ def create_evidence_store(settings: Settings | None = None) -> LocalEvidenceStor
 def format_evidence(evidence: list[Evidence]) -> str:
     if not evidence:
         return "未检索到可引用的资料。不得据此编造规范结论。"
-    return "\n\n".join(
-        f"来源：{item.source_name}（{item.locator or '未标注位置'}）\n原文：{item.excerpt}"
-        for item in evidence
-    )
+    formatted: list[str] = []
+    for item in evidence:
+        location = public_locator(item.locator)
+        source = f"来源：{item.source_name}"
+        if location:
+            source += f"（{location}）"
+        formatted.append(f"{source}\n原文：{item.excerpt}")
+    return "\n\n".join(formatted)

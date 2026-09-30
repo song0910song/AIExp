@@ -8,15 +8,43 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import { api } from "@/lib/api";
 import type { ChatMessage, ContextUsage, DocumentContent, DocumentRecord, Health, Luminaire, Project, ToolCall } from "@/lib/types";
 import { CreateProjectModal } from "./CreateProjectModal";
 
 const sessionKey = (id: string) => `lighting-chat:${id}`;
 const messageError = (reason: unknown) => reason instanceof Error ? reason.message : "操作失败，请重试";
+const supportedProjectFile = /\.(dxf|dwg|pdf|docx|md|txt)$/i;
+const maxProjectFileBytes = 50 * 1024 * 1024;
+const protectedMarkdownPattern = /(```[\s\S]*?```|`[^`\n]*`|\$\$[\s\S]*?\$\$|\$[^$\n]+\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\])/g;
+const bareMathTokenPattern = /(?<![$\\\w])((?:[A-Z](?:[A-Za-z])?|UGR|CCT|LPD)(?:_\{[^{}\n]+\}|_[A-Za-z0-9]+)(?:\^\{[^{}\n]+\}|\^[A-Za-z0-9]+)?)(?!\w)/g;
+const fileSizeLabel = (bytes: number) => bytes < 1024
+  ? `${bytes} B`
+  : bytes < 1024 * 1024
+    ? `${(bytes / 1024).toFixed(2)} KB`
+    : `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 const usageLabel = (usage: ContextUsage | null) => usage
   ? `${usage.estimated ? "约" : ""}${usage.percentage === 0 && usage.input_tokens > 0 ? "<0.01" : usage.percentage}%`
   : "--";
+
+function assistantMarkdown(content: string): string {
+  const withoutInternalLocators = content.replace(
+    /\s*[（(]?\s*chunks?\s+\d+(?:\s*(?:[-–—,]\s*\d+))*\s*[）)]?/gi,
+    "",
+  );
+  const protectedParts: string[] = [];
+  const protectedContent = withoutInternalLocators.replace(protectedMarkdownPattern, (part) => {
+    const marker = `\uE000${protectedParts.length}\uE001`;
+    protectedParts.push(/^\$\$[\s\S]*\$\$$/.test(part)
+      ? `$$\n${part.slice(2, -2).trim()}\n$$`
+      : part);
+    return marker;
+  });
+  const normalized = protectedContent.replace(bareMathTokenPattern, (token) => `$${token}$`);
+  return normalized.replace(/\uE000(\d+)\uE001/g, (_marker, index: string) => protectedParts[Number(index)] ?? "");
+}
 
 export function LightingWorkbench() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -220,6 +248,7 @@ function ChatView({ project, health, onProject }: {
   const [files, setFiles] = useState<File[]>([]);
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [busy, setBusy] = useState(false);
+  const [workingStatus, setWorkingStatus] = useState("");
   const [sending, setSending] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -253,12 +282,30 @@ function ChatView({ project, health, onProject }: {
     if (list && followRef.current) list.scrollTop = list.scrollHeight;
   }, [messages, busy, documents, project.floor_plan]);
 
+  function addFiles(selected: FileList | null) {
+    const choices = Array.from(selected ?? []);
+    if (!choices.length) return;
+    const accepted: File[] = [];
+    const rejected: string[] = [];
+    for (const file of choices) {
+      if (!supportedProjectFile.test(file.name)) rejected.push(`${file.name}：格式不支持`);
+      else if (!file.size) rejected.push(`${file.name}：文件为空`);
+      else if (file.size > maxProjectFileBytes) rejected.push(`${file.name}：超过 50 MB`);
+      else accepted.push(file);
+    }
+    if (accepted.length) setFiles((old) => [...old, ...accepted]);
+    setError(rejected.length ? `${rejected.join("；")}。支持 DXF、DWG、PDF、DOCX、MD、TXT。` : "");
+    setNotice("");
+  }
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if ((!draft.trim() && !files.length) || busy) return;
     setBusy(true); setError(""); setNotice("");
+    setWorkingStatus(files.length ? "正在上传文件" : "正在生成回答");
     let current = project;
     const uploaded: string[] = [];
+    let uploading = files.length > 0;
     try {
       for (const file of files) {
         if (/\.(dxf|dwg)$/i.test(file.name)) {
@@ -269,10 +316,13 @@ function ChatView({ project, health, onProject }: {
           await api.uploadDocument(file, current.project_id);
           uploaded.push(`项目资料「${file.name}」`);
         }
+        setFiles((old) => old.slice(1));
       }
       if (files.length) {
-        setFiles([]);
-        setDocuments(await api.documents(current.project_id));
+        uploading = false;
+        setWorkingStatus("正在刷新项目资料");
+        try { setDocuments(await api.documents(current.project_id)); }
+        catch (reason) { setNotice(`文件已保存，但资料列表刷新失败：${messageError(reason)}`); }
       }
       const question = [draft.trim(), uploaded.length ? `本轮已上传：${uploaded.join("、")}。请先读取已上传资料，并结合本轮问题分析。` : ""].filter(Boolean).join("\n\n");
       setDraft("");
@@ -283,6 +333,7 @@ function ChatView({ project, health, onProject }: {
         else setError("尚未配置问答模型，请先设置 LIGHTING_LLM_MODEL 和 LIGHTING_LLM_API_KEY。");
         return;
       }
+      setWorkingStatus("正在生成回答");
       setMessages((old) => [...old, { role: "assistant", content: "", tool_calls: [] }]);
       const controller = new AbortController();
       streamRef.current = controller;
@@ -308,8 +359,14 @@ function ChatView({ project, health, onProject }: {
           if (event.project) onProject(event.project);
         }
       }, controller.signal);
-    } catch (reason) { setError(messageError(reason)); }
-    finally { streamRef.current = null; setBusy(false); }
+    } catch (reason) {
+      setError(uploading ? `文件上传失败：${messageError(reason)}` : messageError(reason));
+      if (uploading && uploaded.length) {
+        setNotice(`已保存 ${uploaded.join("、")}；未完成的文件仍在输入框中。`);
+        void api.documents(current.project_id).then(setDocuments).catch(() => {});
+      }
+    }
+    finally { streamRef.current = null; setBusy(false); setWorkingStatus(""); }
   }
 
   async function resetChat() {
@@ -336,16 +393,16 @@ function ChatView({ project, health, onProject }: {
         {documents.length ? <details className="context-details"><summary><BookOpen size={15} />项目资料 · {documents.length}<ChevronDown size={14} /></summary><div>{documents.map((document) => <div key={document.source_hash}><FileText size={14} />{document.source_name}</div>)}</div></details> : null}
         {project.luminaires.length ? <details className="context-details product-context"><summary><Lightbulb size={15} />候选灯具 · {project.luminaires.length}<ChevronDown size={14} /></summary><div>{project.luminaires.toReversed().map((item) => <div className="context-product" key={item.luminaire_id}><span><strong>{item.article_name}</strong><small>{item.brand_name ?? "品牌未提供"} · {[item.power_w !== null ? `${item.power_w} W` : null, item.cct_k !== null ? `${item.cct_k} K` : null, item.cri !== null ? `Ra ${item.cri}` : null].filter(Boolean).join(" · ")}</small></span><button className="icon-button" disabled={Boolean(sending)} title="发送到 DIALux" aria-label={`发送 ${item.article_name} 到 DIALux`} onClick={() => void sendLuminaire(item)}>{sending === item.luminaire_id ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></div>)}</div></details> : null}
         {!messages.length ? <div className="chat-empty"><Lightbulb size={26} /><h2>照明设计智能体</h2><p>询问规范、解读图纸，或按条件寻找灯具。</p></div> : messages.map((item, index) => (
-          <article key={index} className={`chat-message ${item.role}`}><div className="message-label">{item.role === "user" ? "你" : "照明助手"}</div>{item.tool_calls?.length ? <details className="tool-process" open={index === messages.length - 1 && busy}><summary><Wrench size={14} />工具调用 · {item.tool_calls.length} 项<ChevronDown size={14} /></summary><div>{item.tool_calls.map((call) => <div className="tool-step" key={call.id}><span className={call.status === "running" ? "tool-status running" : call.status === "error" ? "tool-status failed" : "tool-status completed"}>{call.status === "running" ? <LoaderCircle className="spin" size={13} /> : call.status === "error" ? <X size={13} /> : <Check size={13} />}</span><span><strong>{({ get_project: "读取项目与 CAD", search_evidence: "检索资料", search_luminaires: "检索 DIALux 灯具" } as Record<string, string>)[call.name] ?? call.name}</strong>{call.input ? <small title={call.input}>{call.input}</small> : null}{call.summary ? <small>{call.summary}</small> : null}</span></div>)}</div></details> : null}{item.content ? <div className="message-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.content}</ReactMarkdown></div> : null}</article>
+          <article key={index} className={`chat-message ${item.role}`}><div className="message-label">{item.role === "user" ? "你" : "照明助手"}</div>{item.tool_calls?.length ? <details className="tool-process" open={index === messages.length - 1 && busy}><summary><Wrench size={14} />工具调用 · {item.tool_calls.length} 项<ChevronDown size={14} /></summary><div>{item.tool_calls.map((call) => <div className="tool-step" key={call.id}><span className={call.status === "running" ? "tool-status running" : call.status === "error" ? "tool-status failed" : "tool-status completed"}>{call.status === "running" ? <LoaderCircle className="spin" size={13} /> : call.status === "error" ? <X size={13} /> : <Check size={13} />}</span><span><strong>{({ get_project: "读取项目与 CAD", search_evidence: "检索资料", search_luminaires: "检索 DIALux 灯具" } as Record<string, string>)[call.name] ?? call.name}</strong>{call.input ? <small title={call.input}>{call.input}</small> : null}{call.summary ? <small>{call.summary}</small> : null}</span></div>)}</div></details> : null}{item.content ? <div className="message-content"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{ table: ({ node: _node, ...props }) => <div className="markdown-table-scroll"><table {...props} /></div> }}>{item.role === "assistant" ? assistantMarkdown(item.content) : item.content}</ReactMarkdown></div> : null}</article>
         ))}
-        {busy ? <div className="chat-working"><LoaderCircle className="spin" size={16} />正在处理</div> : null}
+        {busy ? <div className="chat-working" role="status"><LoaderCircle className="spin" size={16} />{workingStatus}</div> : null}
       </div>
       {error ? <div className="inline-error" role="alert">{error}</div> : null}
       {notice ? <div className="notice" role="status">{notice}</div> : null}
       <form className="chat-compose" onSubmit={(event) => void submit(event)}>
-        {files.length ? <div className="compose-files">{files.map((file, index) => <span key={index}><FileText size={13} />{file.name}<button type="button" aria-label={`移除 ${file.name}`} onClick={() => setFiles((old) => old.filter((_, position) => position !== index))}><X size={12} /></button></span>)}</div> : null}
+        {files.length ? <div className="compose-files" aria-label="待发送的项目附件" aria-live="polite">{files.map((file, index) => <div className="compose-file" key={`${file.name}-${file.lastModified}-${index}`}><span className="compose-file-icon"><FileText size={22} /></span><span className="compose-file-info"><strong title={file.name}>{file.name}</strong><small>{file.name.split(".").at(-1)?.toUpperCase()} · {fileSizeLabel(file.size)} · {workingStatus === "正在上传文件" ? "上传中" : "待发送"}</small></span><button className="icon-button" type="button" disabled={busy} title={`移除 ${file.name}`} aria-label={`移除 ${file.name}`} onClick={() => setFiles((old) => old.filter((_, position) => position !== index))}><X size={15} /></button></div>)}</div> : null}
         <div className="compose-input"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="询问规范、分析图纸、检索灯具…" rows={2} disabled={busy} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button className="icon-button send-button" type="submit" disabled={(!draft.trim() && !files.length) || busy} title="发送" aria-label="发送"><ArrowUp size={19} /></button></div>
-        <div className="compose-footer"><button className="icon-button" type="button" disabled={busy} title="添加项目 CAD 或资料文件" aria-label="添加项目 CAD 或资料文件" onClick={() => fileInputRef.current?.click()}><Paperclip size={18} /></button><input ref={fileInputRef} type="file" hidden multiple accept=".dxf,.dwg,.pdf,.docx,.md,.txt" onChange={(event) => { setFiles((old) => [...old, ...Array.from(event.target.files ?? [])]); event.target.value = ""; }} /><span className="compose-scope">项目资料</span><span className="compose-spacer" />{health?.llm_reasoning_efforts?.length ? <label className="effort-select" title="思考强度"><Brain size={15} /><select aria-label="思考强度" value={effort} onChange={(event) => { setEffort(event.target.value); window.localStorage.setItem("lighting-reasoning-effort", event.target.value); }}>{health.llm_reasoning_effort_options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label> : null}<span className="context-meter" title={contextUsage ? `上次请求输入 ${contextUsage.input_tokens.toLocaleString()} / ${contextUsage.window_tokens.toLocaleString()} token${contextUsage.estimated ? "（按默认窗口或估算用量）" : ""}` : "尚无上下文用量"}><Gauge size={14} />上下文 {usageLabel(contextUsage)}<span className="context-meter-track"><span style={{ width: `${Math.min(100, contextUsage?.percentage ?? 0)}%` }} /></span></span><span className="model-label">{health?.llm_model ?? "模型未配置"}</span></div>
+        <div className="compose-footer"><button className="icon-button" type="button" disabled={busy} title="添加项目 CAD 或资料文件" aria-label="添加项目 CAD 或资料文件" onClick={() => fileInputRef.current?.click()}><Paperclip size={18} /></button><input ref={fileInputRef} type="file" hidden multiple accept=".dxf,.dwg,.pdf,.docx,.md,.txt" onChange={(event) => { addFiles(event.target.files); event.target.value = ""; }} /><span className="compose-scope">项目资料</span><span className="compose-spacer" />{health?.llm_reasoning_efforts?.length ? <label className="effort-select" title="思考强度"><Brain size={15} /><select aria-label="思考强度" value={effort} onChange={(event) => { setEffort(event.target.value); window.localStorage.setItem("lighting-reasoning-effort", event.target.value); }}>{health.llm_reasoning_effort_options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label> : null}<span className="context-meter" title={contextUsage ? `上次请求输入 ${contextUsage.input_tokens.toLocaleString()} / ${contextUsage.window_tokens.toLocaleString()} token${contextUsage.estimated ? "（按默认窗口或估算用量）" : ""}` : "尚无上下文用量"}><Gauge size={14} />上下文 {usageLabel(contextUsage)}<span className="context-meter-track"><span style={{ width: `${Math.min(100, contextUsage?.percentage ?? 0)}%` }} /></span></span><span className="model-label">{health?.llm_model ?? "模型未配置"}</span></div>
       </form>
     </section>
   );

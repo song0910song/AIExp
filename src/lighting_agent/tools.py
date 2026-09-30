@@ -7,6 +7,7 @@ from typing import Any
 from langchain_core.tools import tool
 
 from .dialux_api import candidate_summary
+from .rag import public_locator
 from .schemas import LuminaireSearchRequest
 
 
@@ -38,20 +39,21 @@ def make_tools(*, projects: Any, evidence: Any, dialux: Any, project_id: str | N
 
     @tool
     def search_evidence(query: str) -> dict:
-        """Search indexed standards and project documents; return exact excerpts and locators."""
+        """Search indexed standards and project documents; return exact excerpts and meaningful source locations."""
 
         results = evidence.search(query, top_k=5, project_id=project_id)
-        return {
-            "evidence": [
-                {
-                    "source": item.source_name,
-                    "type": item.source_type,
-                    "locator": item.locator,
-                    "excerpt": item.excerpt,
-                }
-                for item in results
-            ]
-        }
+        evidence_items = []
+        for item in results:
+            entry = {
+                "source": item.source_name,
+                "type": item.source_type,
+                "excerpt": item.excerpt,
+            }
+            location = public_locator(item.locator)
+            if location:
+                entry["locator"] = location
+            evidence_items.append(entry)
+        return {"evidence": evidence_items}
 
     @tool
     def search_luminaires(

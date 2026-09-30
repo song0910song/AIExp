@@ -28,7 +28,7 @@ from .dialux_protocol import DialuxProtocolError, open_in_dialux
 from .document_loader import DocumentLoadError, load_document
 from .floor_plan import MAX_DRAWING_BYTES, FloorPlanParseError, parse_floor_plan
 from .project_store import ProjectNotFoundError, ProjectStore, RevisionConflictError
-from .rag import EvidenceNotFoundError, create_evidence_store
+from .rag import EvidenceNotFoundError, create_evidence_store, public_locator
 from .schemas import DesignBrief, LuminaireSearchRequest, ProjectState, ProjectUpdate, StrictModel
 from .storage import SQLiteDatabase
 from .workspace import WorkspaceError, WorkspaceEvidenceStore, WorkspaceProjectStore
@@ -445,7 +445,12 @@ def create_app(
         if request.project_id:
             projects.get(request.project_id)
         results = evidence.search(request.query, top_k=request.top_k, project_id=request.project_id)
-        return {"evidence": [item.model_dump(mode="json") for item in results]}
+        return {
+            "evidence": [
+                {**item.model_dump(mode="json"), "locator": public_locator(item.locator)}
+                for item in results
+            ]
+        }
 
     @app.get("/api/documents")
     def list_documents() -> list[dict[str, Any]]:
