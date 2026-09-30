@@ -19,7 +19,7 @@ const messageError = (reason: unknown) => reason instanceof Error ? reason.messa
 const supportedProjectFile = /\.(dxf|dwg|pdf|docx|md|txt)$/i;
 const maxProjectFileBytes = 50 * 1024 * 1024;
 const protectedMarkdownPattern = /(```[\s\S]*?```|`[^`\n]*`|\$\$[\s\S]*?\$\$|\$[^$\n]+\$|\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\])/g;
-const bareMathTokenPattern = /(?<![$\\\w])((?:[A-Z](?:[A-Za-z])?|UGR|CCT|LPD)(?:_\{[^{}\n]+\}|_[A-Za-z0-9]+)(?:\^\{[^{}\n]+\}|\^[A-Za-z0-9]+)?)(?!\w)/g;
+const bareMathTokenPattern = /(?<![$\\\w])((?:[A-Z](?:[A-Za-z])?|UGR|CCT|LPD)(?:\\?_\{[^{}\n]+\}|\\?_[A-Za-z0-9]+)(?:\\?\^\{[^{}\n]+\}|\\?\^[A-Za-z0-9]+)?)(?!\w)/g;
 const fileSizeLabel = (bytes: number) => bytes < 1024
   ? `${bytes} B`
   : bytes < 1024 * 1024
@@ -42,7 +42,10 @@ function assistantMarkdown(content: string): string {
       : part);
     return marker;
   });
-  const normalized = protectedContent.replace(bareMathTokenPattern, (token) => `$${token}$`);
+  const normalized = protectedContent.replace(
+    bareMathTokenPattern,
+    (token) => `$${token.replace(/\\([_^])/g, "$1")}$`,
+  );
   return normalized.replace(/\uE000(\d+)\uE001/g, (_marker, index: string) => protectedParts[Number(index)] ?? "");
 }
 
