@@ -158,8 +158,8 @@ def test_keyword_search_saves_fixture_and_explicit_send_launches_handler(environ
 def test_agent_tools_are_read_only(environment):
     _, projects, evidence = environment
     tools = make_tools(projects=projects, evidence=evidence, dialux=Catalogue(), project_id=None)
-    assert {item.name for item in tools} == {"get_project", "search_evidence", "search_luminaires"}
-    assert tools[2].invoke({"keyword": "panel"})["candidates"][0]["luminaire_id"] == "demo-1"
+    assert {item.name for item in tools} == {"get_project", "analyze_floor_plan", "search_evidence", "search_luminaires"}
+    assert tools[3].invoke({"keyword": "panel"})["candidates"][0]["luminaire_id"] == "demo-1"
 
 
 def test_updating_old_project_preserves_historical_fields(environment):

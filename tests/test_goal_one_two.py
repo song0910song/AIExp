@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from io import BytesIO, StringIO
 import math
+import base64
 from pathlib import Path
 
 import ezdxf
@@ -13,11 +14,12 @@ from fastapi.testclient import TestClient
 from lighting_agent.document_loader import DocumentLoadError, load_document
 from lighting_agent.document_loader import _extract_text, _markdown_tables, _ocr_layout
 from lighting_agent.floor_plan import parse_floor_plan
+from lighting_agent.drawing_preview import render_drawing_preview
 from lighting_agent.project_store import ProjectStore
 from lighting_agent.rag import LocalEvidenceStore
-from lighting_agent.schemas import StandardRecord
+from lighting_agent.schemas import StandardRecord, DesignRule
 from lighting_agent.rules import rule_conflicts
-from lighting_agent.schemas import DesignRule
+from lighting_agent.tools import make_tools
 from lighting_agent.web_api import create_app
 
 
@@ -117,6 +119,57 @@ def test_semantic_furniture_is_not_a_room_and_missing_heights_not_invented(tmp_p
     assert plan.spatial_model.elements[0].height_m is None
     assert plan.spatial_model.elements[0].room_id is not None
     assert all(room.height_m is None for room in plan.spatial_model.rooms)
+
+
+def test_dialux_aperture_codes_are_not_exposed_as_furniture_or_room_candidates(tmp_path):
+    document, path = cad(tmp_path, [(0, 0)])
+    aperture = document.blocks.new("2CC")
+    aperture.add_lwpolyline([(0, 0), (.2, 0), (.2, .1), (0, .1)], close=True)
+    document.modelspace().add_blockref("2CC", (2, 0), dxfattribs={"layer": "DLX_APERT"})
+    document.saveas(path)
+    plan = parse(path)
+    assert len(plan.area_candidates) == 1
+    assert plan.spatial_model.elements == []
+    assert render_drawing_preview(plan).startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_dimension_entities_are_presented_as_human_readable_evidence(tmp_path):
+    document, path = cad(tmp_path, [(0, 0)])
+    document.modelspace().add_linear_dim(base=(0, 5), p1=(0, 0), p2=(5, 0)).render()
+    document.saveas(path)
+    plan = parse(path)
+    assert any(label.text == "5" for label in plan.drawing_labels)
+
+
+def test_floor_plan_analysis_sends_rendered_image_and_never_surface_cad_tags(environment, tmp_path):
+    client, projects, evidence = environment
+    state = imported_project(client, tmp_path)
+
+    class Vision:
+        def invoke(self, messages):
+            image = messages[1].content[1]["image_url"]["url"]
+            assert image.startswith("data:image/png;base64,")
+            preview = base64.b64decode(image.split(",", 1)[1])
+            assert preview.startswith(b"\x89PNG")
+            assert "DLX_APERT" not in messages[1].content[0]["text"]
+            return type("Response", (), {"content": '{"summary":"识别到会议室","spaces":[],"recognized_features":[],"scale_basis":"CAD 单位","design_implications":[],"clarifications":[]}'} )()
+
+    tool = next(item for item in make_tools(projects=projects, evidence=evidence, dialux=object(),
+                                            project_id=state["project_id"], vision_model=Vision())
+                if item.name == "analyze_floor_plan")
+    result = tool.invoke({})
+    assert result["status"] == "vision_analyzed"
+    assert result["analysis"]["summary"] == "识别到会议室"
+
+
+def test_floor_plan_analysis_reports_non_vision_model_without_fabricating(environment, tmp_path):
+    client, projects, evidence = environment
+    state = imported_project(client, tmp_path)
+    tool = next(item for item in make_tools(projects=projects, evidence=evidence, dialux=object(),
+                                            project_id=state["project_id"]) if item.name == "analyze_floor_plan")
+    result = tool.invoke({})
+    assert result["status"] == "vision_unavailable"
+    assert "不能声称" in result["message"]
 
 
 def test_xref_and_unknown_units_are_visible(tmp_path):

@@ -43,8 +43,14 @@ def build_agent(
         options["prompt_cache_options"] = cache_options
         options["model_kwargs"] = {"prompt_cache_key": settings.llm_prompt_cache_key}
     model = ChatOpenAI(**options)
+    vision_model = model
+    if settings.llm_vision_model and settings.llm_vision_model != settings.llm_model:
+        vision_model = ChatOpenAI(**{**options, "model": settings.llm_vision_model})
     return create_agent(
         model=model,
-        tools=make_tools(projects=projects, evidence=evidence, dialux=dialux, project_id=project_id),
+        tools=make_tools(
+            projects=projects, evidence=evidence, dialux=dialux, project_id=project_id,
+            vision_model=vision_model,
+        ),
         system_prompt=SYSTEM_PROMPT,
     )

@@ -26,8 +26,8 @@ GAP_TOLERANCE_M = 0.001
 GEOMETRY = {"LINE", "LWPOLYLINE", "POLYLINE", "ARC", "CIRCLE", "ELLIPSE", "SPLINE"}
 ANNOTATIONS = {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "DIMENSION", "LEADER", "POINT", "HATCH"}
 KINDS = {
-    "door": r"door|门|dlx_apert", "window": r"window|窗",
-    "column": r"column|柱", "furniture": r"furn|desk|chair|table|家具|桌|椅|柜|dlx_obj",
+    "door": r"door|门", "window": r"window|窗",
+    "column": r"column|柱", "furniture": r"furn|desk|chair|table|家具|桌|椅|柜",
     "obstruction": r"obstruct|遮挡|设备",
 }
 
@@ -47,7 +47,7 @@ def inspect_drawing(document, scale: float | None) -> dict[str, Any]:
     for name in xrefs:
         issues.append(ModelIssue(code="external_reference", message=f"外部参照 {name} 未自动载入", severity="error"))
 
-    def expand(entities, chain: str = "", block_name: str = "", depth: int = 0):
+    def expand(entities, chain: str = "", block_name: str = "", depth: int = 0, inherited_layer: str = ""):
         nonlocal visited
         if depth > MAX_DEPTH:
             issues.append(ModelIssue(code="block_depth", message="块嵌套超过安全上限", severity="error", source_handle=chain))
@@ -68,14 +68,16 @@ def inspect_drawing(document, scale: float | None) -> dict[str, Any]:
                     issues.append(ModelIssue(code="block_transform", message=str(reason), source_handle=handle, severity="error"))
                 try:
                     inserts = list(entity.multi_insert()) if entity.mcount > 1 else [entity]
+                    source_layer = str(entity.dxf.get("layer", "0"))
+                    effective_layer = source_layer if source_layer != "0" else inherited_layer
                     for n, insert in enumerate(inserts):
-                        expand(insert.virtual_entities(skipped_entity_callback=skipped), f"{handle}[{n}]", name, depth + 1)
-                        expand(insert.attribs, f"{handle}[{n}]/attributes", name, depth + 1)
+                        expand(insert.virtual_entities(skipped_entity_callback=skipped), f"{handle}[{n}]", name, depth + 1, effective_layer)
+                        expand(insert.attribs, f"{handle}[{n}]/attributes", name, depth + 1, effective_layer)
                     repairs.append(f"展开块 {name} ({handle})，保留 WCS 平移/缩放/旋转")
                 except Exception as error:
                     issues.append(ModelIssue(code="block_transform", message=f"块 {name}: {error}", source_handle=handle, severity="error"))
                 continue
-            records.append((entity, handle, block_name))
+            records.append((entity, handle, block_name, inherited_layer))
     expand(document.modelspace())
     tolerance = CURVE_TOLERANCE_M / scale if scale else 0.001
     paths: list[DrawingPath] = []
@@ -85,12 +87,23 @@ def inspect_drawing(document, scale: float | None) -> dict[str, Any]:
     semantic_handles: set[str] = set()
     closed: list[tuple[Polygon, str, list[str], float]] = []
     vertices = 0
-    for entity, handle, block_name in records:
+    for entity, handle, block_name, inherited_layer in records:
         kind = entity.dxftype()
-        layer = str(entity.dxf.get("layer", "0"))
+        source_layer = str(entity.dxf.get("layer", "0"))
+        layer = source_layer if source_layer != "0" else inherited_layer or source_layer
         if kind in {"TEXT", "MTEXT", "ATTRIB"}:
             value = entity.plain_text() if kind == "MTEXT" else str(entity.dxf.text)
             labels.append(DrawingLabel(text=value, position=_point(entity.dxf.insert), layer=layer, source_handle=handle, elevation_raw=float(entity.dxf.insert.z)))
+        elif kind == "DIMENSION":
+            try:
+                value = str(entity.dxf.get("text", ""))
+                if "<>" in value or not value.strip():
+                    value = value.replace("<>", f"{entity.get_measurement():g}") or f"{entity.get_measurement():g}"
+                position = entity.dxf.get("text_midpoint", entity.dxf.defpoint)
+                labels.append(DrawingLabel(text=value, position=_point(position), layer=layer,
+                                           source_handle=handle, elevation_raw=float(position.z)))
+            except (AttributeError, ValueError, TypeError) as error:
+                issues.append(ModelIssue(code="dimension_unreadable", message="一处尺寸标注无法读取数值，请对照原图核对", source_handle=handle))
         if kind not in GEOMETRY:
             if kind not in ANNOTATIONS:
                 unsupported[kind] += 1
@@ -131,12 +144,13 @@ def inspect_drawing(document, scale: float | None) -> dict[str, Any]:
             if kind == "POLYLINE":
                 analytic["vertices"] = [{"point": list(v.dxf.location), "bulge": v.dxf.get("bulge", 0)} for v in entity.vertices]
             sources[handle] = analytic
+            internal_auxiliary = bool(re.fullmatch(r"DLX_(?:APERT|OBJ|LUM|CALC)(?:_.*)?", layer, re.I))
             semantic = next((k for k, pattern in KINDS.items() if re.search(pattern, f"{layer} {block_name}", re.I)), None)
             if semantic:
                 semantic_handles.add(handle)
                 group = handle.split("]")[0] + "]" if block_name else handle
                 semantic_groups.setdefault((semantic, group), []).append(drawing_path)
-            if is_closed and len(coords) >= 3 and not semantic:
+            if is_closed and len(coords) >= 3 and not semantic and not internal_auxiliary:
                 polygon = Polygon(coords)
                 if not polygon.is_valid or polygon.area <= 0:
                     issues.append(ModelIssue(code="invalid_boundary", message="闭合边界自交或退化，请人工修正", source_handle=handle, position=_point(coords[0])))
@@ -149,7 +163,9 @@ def inspect_drawing(document, scale: float | None) -> dict[str, Any]:
                 break
 
     preferred = {p.layer for p in paths if re.search(r"wall|cont|墙|房间|room|structural", p.layer, re.I)}
-    contour_paths = [p for p in paths if p.source_handle not in semantic_handles and (not preferred or p.layer in preferred) and
+    contour_paths = [p for p in paths if p.source_handle not in semantic_handles and
+                     not re.fullmatch(r"DLX_(?:APERT|OBJ|LUM|CALC)(?:_.*)?", p.layer, re.I) and
+                     (not preferred or p.layer in preferred) and
                      not any(re.search(pattern, p.layer, re.I) for pattern in KINDS.values())]
     by_elevation: dict[float, list[DrawingPath]] = {}
     for path in contour_paths:
@@ -199,7 +215,9 @@ def inspect_drawing(document, scale: float | None) -> dict[str, Any]:
                         "elevation_m": FieldProvenance(source="cad", locator=handle)}))
     if unsupported:
         issues.append(ModelIssue(code="incomplete_read", message="存在未完整建模实体，不能声称完整读取"))
-    return dict(area_candidates=candidates, elements=elements, layers=sorted({str(e.dxf.get("layer", "0")) for e, _, _ in records}),
+    return dict(area_candidates=candidates, elements=elements, layers=sorted({
+                    str(e.dxf.get("layer", "0")) if str(e.dxf.get("layer", "0")) != "0" else inherited_layer or "0"
+                    for e, _, _, inherited_layer in records}),
                 external_references=xrefs, unsupported_entities=dict(unsupported),
                 read_complete=not xrefs and not unsupported and not any(i.severity == "error" for i in issues),
                 issues=issues, repairs=repairs, drawing_paths=paths, drawing_labels=labels)

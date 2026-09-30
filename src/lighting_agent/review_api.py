@@ -19,7 +19,7 @@ from .spatial_model import assess_model
 
 class ModelReviewRequest(StrictModel):
     expected_revision: int = Field(ge=0)
-    meters_per_unit: float = Field(gt=0, allow_inf_nan=False)
+    meters_per_unit: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     rooms: list[SpatialRoom]
     elements: list[SpatialElement]
     coverage_confirmed: bool = False
@@ -155,10 +155,10 @@ def install_review_routes(app, projects, evidence, project_root, project_view):
         plan.spatial_model = model
         plan.meters_per_drawing_unit = model.meters_per_unit
         for candidate in plan.area_candidates:
-            candidate.area_m2 = candidate.raw_area * model.meters_per_unit**2
+            candidate.area_m2 = candidate.raw_area * model.meters_per_unit**2 if model.meters_per_unit else None
             xs, ys = [p.x for p in candidate.boundary], [p.y for p in candidate.boundary]
-            candidate.length_m = (max(xs) - min(xs)) * model.meters_per_unit
-            candidate.width_m = (max(ys) - min(ys)) * model.meters_per_unit
+            candidate.length_m = (max(xs) - min(xs)) * model.meters_per_unit if model.meters_per_unit else None
+            candidate.width_m = (max(ys) - min(ys)) * model.meters_per_unit if model.meters_per_unit else None
         # Legacy single-room measurements are no longer a source of truth after editing.
         brief = state.brief.model_copy(deep=True)
         for field in ("area_m2", "length_m", "width_m"):

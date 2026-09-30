@@ -244,6 +244,14 @@ def _tool_result_summary(name: str, content: Any) -> str:
     if isinstance(result, dict):
         if name == "search_evidence" and isinstance(result.get("evidence"), list):
             return f"检索到 {len(result['evidence'])} 条资料"
+        if name == "analyze_floor_plan":
+            if result.get("status") == "vision_analyzed":
+                return f"已完成图面识别，检测到 {result.get('parsed_room_count', 0)} 个空间候选"
+            return "图面视觉识别未完成"
+        if name == "analyze_floor_plan":
+            if result.get("status") == "vision_analyzed":
+                return f"已完成图面识别，检测到 {result.get('parsed_room_count', 0)} 个空间候选"
+            return "图面视觉识别未完成"
         if name == "search_luminaires" and isinstance(result.get("candidates"), list):
             return f"找到 {len(result['candidates'])} 款灯具"
     return "调用完成"

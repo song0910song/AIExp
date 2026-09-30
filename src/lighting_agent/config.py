@@ -38,6 +38,7 @@ def _optional_bool(name: str) -> bool | None:
 @dataclass(frozen=True, slots=True)
 class Settings:
     llm_model: str | None = os.getenv("LIGHTING_LLM_MODEL")
+    llm_vision_model: str | None = os.getenv("LIGHTING_VISION_MODEL")
     llm_base_url: str | None = os.getenv("LIGHTING_LLM_BASE_URL")
     llm_api_key: str | None = os.getenv("LIGHTING_LLM_API_KEY")
     llm_temperature: float = float(os.getenv("LIGHTING_LLM_TEMPERATURE", "0.3"))
@@ -106,6 +107,9 @@ class Settings:
     def validate_for_agent(self) -> None:
         if not self.llm_model or not self.llm_api_key:
             raise RuntimeError("LIGHTING_LLM_MODEL and LIGHTING_LLM_API_KEY are required for chat")
+
+    def vision_model_name(self) -> str | None:
+        return (self.llm_vision_model or self.llm_model) if self.llm_api_key else None
 
 
 def ensure_data_directories() -> None:

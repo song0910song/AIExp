@@ -1,6 +1,8 @@
 """Room review and readiness, separate from CAD file-read completeness."""
 from __future__ import annotations
 
+import re
+
 from shapely import Point, Polygon
 
 from .schemas import FieldProvenance, FloorPlan, SpatialModel, SpatialRoom
@@ -83,6 +85,8 @@ def assess_model(model: SpatialModel, plan: FloorPlan) -> SpatialModel:
             if a.floor == b.floor and polygons[a.room_id].intersection(polygons[b.room_id]).area > 1e-8:
                 missing.append(f"房间 {a.name or a.room_id} 与 {b.name or b.room_id} 边界重叠；请修正或排除外轮廓候选")
     for element in model.elements:
+        if re.search(r"\bDLX_(?:APERT|OBJ|LUM|CALC)\b", element.name, re.I):
+            continue
         if len(element.footprint) >= 3:
             footprint = Polygon([(p.x, p.y) for p in element.footprint])
             if footprint.is_valid and footprint.area > 0:

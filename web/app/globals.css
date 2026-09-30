@@ -226,7 +226,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); box-sha
   .compose-scope { display: none; }
 }
 
-/* Goal 1/2 review stays within the project conversation. */
+/* Project assets stay in an optional drawer; the conversation remains chronological. */
 .review-panel { border: 1px solid var(--line); background: #fff; margin: 0 0 14px; font-size: 12px; }
 .review-panel > summary { padding: 12px; cursor: pointer; color: var(--accent); font-weight: 600; background: #f7faf8; }
 .review-body { display: grid; gap: 12px; padding: 14px; }
@@ -251,3 +251,53 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); box-sha
 .review-table-scroll { overflow-x: auto; }
 .review-table-scroll table { border-collapse: collapse; width: 100%; margin: 6px 0; }
 .review-table-scroll td { border: 1px solid var(--line); padding: 6px; white-space: pre-wrap; }
+
+.chat-heading-actions { display: flex; align-items: center; gap: 4px; }
+.project-workspace-backdrop { position: fixed; inset: 0; z-index: 40; border: 0; padding: 0; background: #15272478; }
+.project-workspace { position: fixed; inset: 0 0 0 auto; z-index: 41; display: flex; flex-direction: column; width: min(540px, calc(100vw - 18px)); min-width: 0; min-height: 0; background: var(--paper); border-left: 1px solid var(--line); box-shadow: -12px 0 30px #14232120; }
+.project-workspace-heading { flex: none; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 18px 12px; border-bottom: 1px solid var(--line); }
+.project-workspace-heading h2 { margin: 0; font-size: 16px; }
+.project-workspace-heading small { display: block; margin-top: 5px; color: var(--muted); overflow-wrap: anywhere; }
+.project-workspace-tabs { display: flex; gap: 4px; flex: none; padding: 8px 14px 0; border-bottom: 1px solid var(--line); }
+.project-workspace-tabs button { border: 0; border-bottom: 2px solid transparent; background: transparent; padding: 9px 11px; color: var(--muted); cursor: pointer; }
+.project-workspace-tabs button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.project-workspace-content { flex: 1; min-height: 0; overflow: auto; padding: 12px 16px 26px; }
+.project-workspace-content > .review-panel { border: 0; margin: 0; background: transparent; }
+.project-workspace-content > .review-panel > summary { padding: 4px 0 12px; background: transparent; }
+.project-workspace-content .cad-canvas { height: min(38vh, 330px); }
+.room-scope-review { display: grid; gap: 12px; }
+.scope-state { display: flex; flex-direction: column; gap: 4px; }
+.scope-state span, .scope-hint, .workspace-empty { color: var(--muted); }
+.scope-table-scroll { overflow-x: auto; }
+.scope-table { width: 100%; border-collapse: collapse; }
+.scope-table th, .scope-table td { padding: 10px 8px; border-bottom: 1px solid var(--line); text-align: left; }
+.scope-table tbody tr { cursor: pointer; }
+.scope-table tbody tr.selected { background: var(--accent-soft); }
+.scope-table tbody th { font-weight: 500; }
+.scope-table input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
+.workspace-empty { padding: 18px 4px; }
+.workspace-assets, .workspace-products { margin-top: 14px; }
+.workspace-assets > div, .workspace-product { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.workspace-assets > div { justify-content: flex-start; color: var(--muted); }
+.workspace-assets span, .workspace-assets small, .workspace-product strong, .workspace-product small { display: block; min-width: 0; overflow-wrap: anywhere; }
+.workspace-assets small, .workspace-product small { color: var(--muted); margin-top: 3px; }
+.workspace-product > div { min-width: 0; }
+.design-questionnaire { margin-top: 14px; border: 1px solid var(--line); border-left: 3px solid var(--accent); background: #fafcfb; }
+.design-questionnaire > header { padding: 12px 14px 4px; }
+.design-questionnaire > header p { margin: 5px 0; color: var(--muted); }
+.questionnaire-table-scroll { overflow-x: auto; }
+.questionnaire-table-scroll table { width: 100%; border-collapse: collapse; }
+.questionnaire-table-scroll th, .questionnaire-table-scroll td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.questionnaire-table-scroll thead th { color: var(--muted); font-size: 11px; font-weight: 500; }
+.questionnaire-table-scroll tbody th { min-width: 115px; font-weight: 600; }
+.questionnaire-table-scroll tbody td { min-width: 125px; }
+.questionnaire-table-scroll td small { display: block; margin-top: 5px; color: var(--accent); }
+.questionnaire-table-scroll select { max-width: 100%; min-height: 36px; }
+.design-questionnaire > footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; }
+.design-questionnaire > footer > span { color: var(--muted); font-size: 11px; }
+@media (max-width: 600px) {
+  .project-workspace { width: 100%; border-left: 0; }
+  .design-questionnaire > footer { align-items: flex-start; flex-direction: column; }
+  .questionnaire-table-scroll th, .questionnaire-table-scroll td { padding: 7px; }
+  .questionnaire-table-scroll tbody th { min-width: 90px; }
+}
