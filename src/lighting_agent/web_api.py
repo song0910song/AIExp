@@ -6,11 +6,9 @@ import hashlib
 import json
 import logging
 import re
-import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Lock
-from typing import Annotated, Any, Callable, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -21,17 +19,17 @@ from starlette.concurrency import run_in_threadpool
 
 from .agent import SYSTEM_PROMPT, build_agent
 from .config import (
-    DATABASE_FILE, REASONING_EFFORT_METADATA, Settings, USER_DOCUMENTS_DIRECTORY, ensure_data_directories,
+    REASONING_EFFORT_METADATA, Settings, USER_DOCUMENTS_DIRECTORY, ensure_data_directories,
 )
 from .dialux_api import DialuxAPI, DialuxAPIError
 from .dialux_protocol import DialuxProtocolError, open_in_dialux
 from .document_loader import DocumentLoadError, load_document
 from .floor_plan import MAX_DRAWING_BYTES, FloorPlanParseError, parse_floor_plan
+from .legacy_migration import migrate_legacy_workspaces
 from .project_store import ProjectNotFoundError, ProjectStore, RevisionConflictError
 from .rag import EvidenceNotFoundError, create_evidence_store, public_locator
 from .schemas import DesignBrief, LuminaireSearchRequest, ProjectState, ProjectUpdate, StrictModel
 from .storage import SQLiteDatabase
-from .workspace import WorkspaceError, WorkspaceEvidenceStore, WorkspaceProjectStore
 from .review_api import install_review_routes
 
 LOGGER = logging.getLogger(__name__)
@@ -40,7 +38,10 @@ LOGGER = logging.getLogger(__name__)
 class ProjectCreateRequest(StrictModel):
     project_name: str = Field(min_length=1, max_length=160)
     space_type: str | None = Field(default=None, max_length=100)
-    workspace_selection_id: str | None = None
+
+
+class DeleteDocumentsRequest(StrictModel):
+    source_hashes: list[str] = Field(min_length=1, max_length=100)
 
 
 class ProjectBriefRequest(StrictModel):
@@ -134,26 +135,6 @@ class ChatSessionStore:
             )
 
 
-def choose_workspace_directory() -> Path | None:
-    if sys.platform != "win32":
-        raise RuntimeError("项目文件夹选择仅支持运行服务的 Windows 本机")
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-
-        window = tk.Tk()
-        window.withdraw()
-        window.attributes("-topmost", True)
-        window.update()
-        try:
-            selected = filedialog.askdirectory(parent=window, title="选择照明项目文件夹", mustexist=True)
-        finally:
-            window.destroy()
-    except Exception as error:
-        raise RuntimeError(f"无法打开 Windows 文件夹选择器：{error}") from error
-    return Path(selected).resolve() if selected else None
-
-
 def _project_view(state: ProjectState) -> dict[str, Any]:
     return {
         "project_id": state.project_id,
@@ -209,6 +190,15 @@ def _document_view(item: Any) -> dict[str, Any]:
         "indexed_chunks": item.indexed_chunks,
         "project_id": item.project_id,
     }
+
+
+def _remove_managed_upload(artifact: dict[str, Any] | None, documents_root: Path) -> None:
+    if not artifact or not artifact.get("source_path"):
+        return
+    root = documents_root.resolve()
+    source = Path(str(artifact["source_path"])).resolve()
+    if source.is_relative_to(root) and source.is_file():
+        source.unlink()
 
 
 def _merge_chunks(chunks: list[str]) -> str:
@@ -285,38 +275,28 @@ def _context_usage(
 
 def create_app(
     *,
-    project_store: ProjectStore | WorkspaceProjectStore | None = None,
+    project_store: ProjectStore | None = None,
     evidence_store: Any | None = None,
     dialux_api: DialuxAPI | None = None,
-    directory_picker: Callable[[], Path | None] | None = None,
     user_documents_directory: Path | None = None,
 ) -> FastAPI:
     ensure_data_directories()
-    projects = project_store or WorkspaceProjectStore()
+    projects = project_store or ProjectStore()
+    if project_store is None:
+        migrated = migrate_legacy_workspaces(projects)
+        if migrated:
+            LOGGER.info("Imported %s project(s) from legacy workspaces", migrated)
     global_evidence = evidence_store or create_evidence_store()
-    evidence = (
-        WorkspaceEvidenceStore(global_evidence, projects)
-        if isinstance(projects, WorkspaceProjectStore)
-        else global_evidence
-    )
+    evidence = global_evidence
     dialux = dialux_api or DialuxAPI()
     settings = Settings()
-    sessions = ChatSessionStore(
-        DATABASE_FILE if isinstance(projects, WorkspaceProjectStore) else projects.database_path,
-        settings,
-    )
-    picker = directory_picker or choose_workspace_directory
+    sessions = ChatSessionStore(projects.database_path, settings)
     documents_root = user_documents_directory or USER_DOCUMENTS_DIRECTORY
-    selections: dict[str, Path] = {}
-    selection_lock = Lock()
 
     def project_root(project_id: str) -> Path:
-        directory_for = getattr(projects, "directory_for", None)
-        return directory_for(project_id) if callable(directory_for) else projects.directory
+        return projects.directory
 
     def project_sessions(project_id: str | None) -> ChatSessionStore:
-        if project_id and isinstance(projects, WorkspaceProjectStore):
-            return ChatSessionStore(projects.database_path_for(project_id), settings)
         return sessions
 
     app = FastAPI(title="照明设计知识工作台 API", version="0.2.0")
@@ -357,35 +337,10 @@ def create_app(
     def list_projects() -> list[dict[str, Any]]:
         return [_project_view(item) for item in sorted(projects.list(), key=lambda item: item.updated_at, reverse=True)]
 
-    @app.post("/api/workspaces/select-directory")
-    def select_workspace_directory() -> dict[str, Any]:
-        try:
-            directory = picker()
-        except RuntimeError as error:
-            raise HTTPException(status_code=503, detail=str(error)) from error
-        if directory is None:
-            return {"selected": False}
-        directory = directory.resolve()
-        if not directory.is_dir():
-            raise HTTPException(status_code=422, detail="项目文件夹不存在")
-        selection_id = uuid4().hex
-        with selection_lock:
-            selections[selection_id] = directory
-        return {"selected": True, "selection_id": selection_id, "directory": str(directory)}
-
     @app.post("/api/projects", status_code=201)
     def create_project(request: ProjectCreateRequest) -> dict[str, Any]:
         brief = DesignBrief(project_name=request.project_name, space_type=request.space_type)
-        if not isinstance(projects, WorkspaceProjectStore):
-            return _project_view(projects.create(brief))
-        with selection_lock:
-            directory = selections.pop(request.workspace_selection_id, None)
-        if directory is None:
-            raise HTTPException(status_code=422, detail="请先选择项目文件夹")
-        try:
-            return _project_view(projects.create_workspace(brief, directory))
-        except WorkspaceError as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
+        return _project_view(projects.create(brief))
 
     @app.get("/api/projects/{project_id}")
     def get_project(project_id: str) -> dict[str, Any]:
@@ -495,6 +450,31 @@ def create_app(
     @app.get("/api/documents/{source_hash}")
     def get_document(source_hash: str) -> dict[str, Any]:
         return document_content(source_hash, None)
+
+    def delete_global_documents(source_hashes: list[str]) -> None:
+        unique_hashes = list(dict.fromkeys(source_hashes))
+        available = {item.source_hash for item in evidence.list_documents()}
+        missing = [source_hash for source_hash in unique_hashes if source_hash not in available]
+        if missing:
+            raise HTTPException(status_code=404, detail="全局资料不存在: " + ", ".join(missing))
+        artifacts = {
+            source_hash: evidence.get_document_artifact(source_hash)
+            for source_hash in unique_hashes
+        }
+        for source_hash in unique_hashes:
+            try:
+                evidence.delete_document(source_hash)
+            except EvidenceNotFoundError as error:
+                raise HTTPException(status_code=404, detail="全局资料不存在") from error
+            _remove_managed_upload(artifacts[source_hash], documents_root)
+
+    @app.delete("/api/documents/{source_hash}", status_code=204)
+    def delete_document(source_hash: str) -> None:
+        delete_global_documents([source_hash])
+
+    @app.post("/api/documents/delete", status_code=204)
+    def delete_documents(request: DeleteDocumentsRequest) -> None:
+        delete_global_documents(request.source_hashes)
 
     @app.get("/api/projects/{project_id}/documents/{source_hash}")
     def get_project_document(project_id: str, source_hash: str) -> dict[str, Any]:

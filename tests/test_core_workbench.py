@@ -68,6 +68,8 @@ def test_route_inventory_only_exposes_four_capabilities(environment):
     assert "/api/projects/{project_id}/floor-plan" in paths
     assert "/api/evidence/search" in paths
     assert "/api/chat" in paths
+    assert "/api/documents/{source_hash}" in paths
+    assert "/api/workspaces/select-directory" not in paths
     assert "/api/projects/{project_id}/luminaires/{luminaire_id}/send-to-dialux" in paths
     assert not any(
         fragment in path
@@ -134,6 +136,55 @@ def test_project_documents_are_private_but_global_documents_are_searchable(envir
     assert client.delete(f"/api/projects/{one}").status_code == 204
     assert client.get(f"/api/projects/{one}").status_code == 404
     assert client.post("/api/evidence/search", json={"query": "Global standard"}).json()["evidence"]
+
+
+def test_global_documents_can_be_deleted_individually_and_in_batches(environment, tmp_path):
+    client, _, _ = environment
+    upload_root = tmp_path / "documents"
+    first = client.post(
+        "/api/documents", files={"file": ("first.md", b"Global fixture first", "text/markdown")}
+    )
+    second = client.post(
+        "/api/documents", files={"file": ("second.md", b"Global fixture second", "text/markdown")}
+    )
+    third = client.post(
+        "/api/documents", files={"file": ("third.md", b"Global fixture third", "text/markdown")}
+    )
+    assert first.status_code == second.status_code == third.status_code == 201
+    records = {item["source_name"]: item["source_hash"] for item in client.get("/api/documents").json()}
+    first_path = upload_root / "first.md"
+    assert first_path.is_file()
+
+    removed_one = client.delete(f"/api/documents/{records['first.md']}")
+    assert removed_one.status_code == 204
+    assert not first_path.exists()
+    assert client.get(f"/api/documents/{records['first.md']}").status_code == 404
+
+    rejected = client.post(
+        "/api/documents/delete",
+        json={"source_hashes": [records["second.md"], "missing-document"]},
+    )
+    assert rejected.status_code == 404
+    assert records["second.md"] in {item["source_hash"] for item in client.get("/api/documents").json()}
+
+    removed_many = client.post(
+        "/api/documents/delete",
+        json={"source_hashes": [records["second.md"], records["third.md"]]},
+    )
+    assert removed_many.status_code == 204
+    assert client.get("/api/documents").json() == []
+    assert client.post("/api/evidence/search", json={"query": "Global fixture"}).json()["evidence"] == []
+
+
+def test_project_uploads_are_stored_under_the_project_store_directory(environment):
+    client, projects, _ = environment
+    project_id = client.post("/api/projects", json={"project_name": "Stored locally"}).json()["project_id"]
+    response = client.post(
+        f"/api/projects/{project_id}/documents",
+        files={"file": ("brief.md", b"Project material", "text/markdown")},
+    )
+    assert response.status_code == 201
+    assert (projects.directory / f"{project_id}.documents" / "brief.md").is_file()
 
 
 def test_keyword_search_saves_fixture_and_explicit_send_launches_handler(environment, monkeypatch):

@@ -20,6 +20,17 @@ class DocumentLoadError(ValueError):
     pass
 
 
+def _paddleocr_error_message(operation: str, error: Exception) -> str:
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code in {401, 403}:
+        return (
+            f"PaddleOCR authentication failed (HTTP {status_code}). "
+            "Check that PADDLEOCR_ACCESS_TOKEN is a valid, current AI Studio access token."
+        )
+    return f"PaddleOCR {operation} failed: {error}"
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedDocument:
     source_path: Path
@@ -41,6 +52,12 @@ class PaddleOCRClient:
         self.settings = settings or Settings()
         self.session = session or requests.Session()
 
+    def _auth_headers(self) -> dict[str, str]:
+        token = (self.settings.paddleocr_access_token or "").strip()
+        if not token:
+            raise DocumentLoadError("PADDLEOCR_ACCESS_TOKEN is required for OCR")
+        return {"Authorization": f"Bearer {token}"}
+
     def extract_pdf(self, path: Path) -> str:
         return _extract_text(self.extract_pdf_result(path)) or ""
 
@@ -51,12 +68,13 @@ class PaddleOCRClient:
                     self.settings.paddleocr_api_url,
                     files={"file": (path.name, file_handle, "application/pdf")},
                     data={"model": self.settings.paddleocr_model},
+                    headers=self._auth_headers(),
                     timeout=self.settings.paddleocr_timeout_seconds,
                 )
             response.raise_for_status()
             payload = response.json()
         except (OSError, requests.RequestException, ValueError) as error:
-            raise DocumentLoadError(f"PaddleOCR submission failed: {error}") from error
+            raise DocumentLoadError(_paddleocr_error_message("submission", error)) from error
         job_id = _nested_value(payload, "job_id") or _nested_value(payload, "id")
         if str(_nested_value(payload, "status")).casefold() in {"failed", "error", "cancelled"}:
             raise DocumentLoadError("PaddleOCR submission returned a failed status")
@@ -72,11 +90,15 @@ class PaddleOCRClient:
         job_url = f"{self.settings.paddleocr_api_url.rstrip('/')}/{job_id}"
         while time.monotonic() < deadline:
             try:
-                response = self.session.get(job_url, timeout=min(30, self.settings.paddleocr_timeout_seconds))
+                response = self.session.get(
+                    job_url,
+                    headers=self._auth_headers(),
+                    timeout=min(30, self.settings.paddleocr_timeout_seconds),
+                )
                 response.raise_for_status()
                 payload = response.json()
             except (requests.RequestException, ValueError) as error:
-                raise DocumentLoadError(f"PaddleOCR status request failed: {error}") from error
+                raise DocumentLoadError(_paddleocr_error_message("status request", error)) from error
             status = str(_nested_value(payload, "status") or "").casefold()
             if status in {"failed", "error", "cancelled"}:
                 raise DocumentLoadError(f"PaddleOCR job {job_id} ended with status {status}")

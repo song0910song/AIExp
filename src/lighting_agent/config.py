@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIRECTORY = PROJECT_ROOT / "data"
 DATABASE_FILE = DATA_DIRECTORY / "lighting_design.sqlite3"
 PROJECTS_DIRECTORY = DATA_DIRECTORY / "projects"
-WORKSPACE_REGISTRY_FILE = DATA_DIRECTORY / "workspace_registry.sqlite3"
+LEGACY_WORKSPACE_REGISTRY_FILE = DATA_DIRECTORY / "workspace_registry.sqlite3"
 USER_DOCUMENTS_DIRECTORY = PROJECT_ROOT / "src" / "data" / "user_docs"
 
 load_dotenv(PROJECT_ROOT / ".env")
@@ -82,6 +82,7 @@ class Settings:
     paddleocr_api_url: str = os.getenv(
         "PADDLEOCR_API_URL", "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
     )
+    paddleocr_access_token: str | None = os.getenv("PADDLEOCR_ACCESS_TOKEN")
     paddleocr_model: str = os.getenv("PADDLEOCR_MODEL", "PaddleOCR-VL-1.6")
     paddleocr_timeout_seconds: float = float(os.getenv("PADDLEOCR_TIMEOUT_SECONDS", "900"))
     paddleocr_poll_interval_seconds: float = float(os.getenv("PADDLEOCR_POLL_INTERVAL_SECONDS", "5"))

@@ -86,12 +86,10 @@ export const api = {
   projects: () => request<Project[]>("/projects"),
   project: (id: string) => request<Project>(`/projects/${id}`),
   deleteProject: (id: string) => request<void>(`/projects/${id}`, { method: "DELETE" }),
-  chooseDirectory: () =>
-    request<{ selected: boolean; selection_id?: string; directory?: string }>("/workspaces/select-directory", { method: "POST" }),
-  createProject: (name: string, spaceType: string, selectionId: string) =>
+  createProject: (name: string, spaceType: string) =>
     request<Project>("/projects", {
       method: "POST",
-      body: JSON.stringify({ project_name: name, space_type: spaceType || null, workspace_selection_id: selectionId }),
+      body: JSON.stringify({ project_name: name, space_type: spaceType || null }),
     }),
   updateProject: (project: Project, name: string, spaceType: string) =>
     request<Project>(`/projects/${project.project_id}/brief`, {
@@ -111,6 +109,10 @@ export const api = {
     ),
   documents: (projectId?: string) =>
     request<DocumentRecord[]>(projectId ? `/projects/${projectId}/documents` : "/documents"),
+  deleteDocument: (sourceHash: string) =>
+    request<void>(`/documents/${encodeURIComponent(sourceHash)}`, { method: "DELETE" }),
+  deleteDocuments: (sourceHashes: string[]) =>
+    request<void>("/documents/delete", { method: "POST", body: JSON.stringify({ source_hashes: sourceHashes }) }),
   document: (sourceHash: string, projectId?: string) =>
     request<DocumentContent>(
       projectId ? `/projects/${projectId}/documents/${encodeURIComponent(sourceHash)}` : `/documents/${encodeURIComponent(sourceHash)}`,

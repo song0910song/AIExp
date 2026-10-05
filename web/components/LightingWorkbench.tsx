@@ -180,6 +180,8 @@ export function LightingWorkbench() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [globalDocuments, setGlobalDocuments] = useState<DocumentRecord[]>([]);
   const [globalBusy, setGlobalBusy] = useState(false);
+  const [globalDeleting, setGlobalDeleting] = useState(false);
+  const [selectedGlobalHashes, setSelectedGlobalHashes] = useState<Set<string>>(new Set());
   const [globalError, setGlobalError] = useState("");
   const [globalNotice, setGlobalNotice] = useState("");
   const [globalPanelOpen, setGlobalPanelOpen] = useState(false);
@@ -255,6 +257,23 @@ export function LightingWorkbench() {
       setGlobalBusy(false);
     }
   }
+  async function deleteGlobalDocuments(sourceHashes: string[]) {
+    if (!sourceHashes.length || globalBusy || globalDeleting) return;
+    const names = sourceHashes.map((hash) => globalDocuments.find((item) => item.source_hash === hash)?.source_name ?? hash);
+    const label = names.length === 1 ? `「${names[0]}」` : `${names.length} 份全局资料`;
+    if (!window.confirm(`删除${label}及其索引？此操作不可恢复。`)) return;
+    setGlobalDeleting(true); setGlobalError(""); setGlobalNotice("");
+    try {
+      if (sourceHashes.length === 1) await api.deleteDocument(sourceHashes[0]);
+      else await api.deleteDocuments(sourceHashes);
+      const removed = new Set(sourceHashes);
+      setGlobalDocuments((old) => old.filter((item) => !removed.has(item.source_hash)));
+      setSelectedGlobalHashes((old) => new Set([...old].filter((hash) => !removed.has(hash))));
+      setSelectedGlobalHash((old) => old && removed.has(old) ? null : old);
+      setGlobalNotice(`已删除 ${sourceHashes.length} 份全局资料。`);
+    } catch (reason) { setGlobalError(messageError(reason)); }
+    finally { setGlobalDeleting(false); }
+  }
   function updateProject(next: Project) {
     setProject(next);
     setProjects((old) => old.map((item) => item.project_id === next.project_id ? next : item));
@@ -305,11 +324,27 @@ export function LightingWorkbench() {
         <button className="global-panel-backdrop" aria-label="关闭全局资料" onClick={() => setGlobalPanelOpen(false)} />
         <aside className="global-panel" aria-label="全局资料详情">
           <header className="global-panel-heading"><div><h2>全局资料</h2><small>所有项目可检索 · {globalDocuments.length} 份</small></div><button className="icon-button" title="关闭资料面板" aria-label="关闭资料面板" onClick={() => setGlobalPanelOpen(false)}><X size={18} /></button></header>
-          <div className="global-panel-upload"><button className="button primary" disabled={globalBusy} onClick={() => globalInputRef.current?.click()}>{globalBusy ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}上传资料</button><input ref={globalInputRef} type="file" hidden multiple accept=".pdf,.docx,.md,.txt" onChange={(event) => { void uploadGlobalDocuments(event.target.files); event.target.value = ""; }} /><small>PDF、DOCX、MD、TXT</small></div>
+          <div className="global-panel-upload"><button className="button primary" disabled={globalBusy || globalDeleting} onClick={() => globalInputRef.current?.click()}>{globalBusy ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}上传资料</button><input ref={globalInputRef} type="file" hidden multiple accept=".pdf,.docx,.md,.txt" onChange={(event) => { void uploadGlobalDocuments(event.target.files); event.target.value = ""; }} /><small>PDF、DOCX、MD、TXT</small></div>
           {globalError ? <div className="inline-error" role="alert">{globalError}</div> : null}
           {globalNotice ? <div className="notice" role="status">{globalNotice}</div> : null}
           <div className="global-panel-list" aria-label="已上传的全局资料">
-            {globalDocuments.length ? globalDocuments.map((item) => <button className={selectedGlobalHash === item.source_hash ? "global-panel-item active" : "global-panel-item"} key={item.source_hash} title={item.source_name} onClick={() => setSelectedGlobalHash(item.source_hash)}><FileText size={16} /><span><strong>{item.source_name}</strong><small>{item.page_count ? `${item.page_count} 页 · ` : ""}{item.indexed_chunks} 个索引片段</small></span></button>) : <p className="global-panel-empty">暂无全局资料</p>}
+            <div className="global-panel-select-bar">
+              <label><input type="checkbox" checked={globalDocuments.length > 0 && selectedGlobalHashes.size === globalDocuments.length} disabled={!globalDocuments.length || globalBusy || globalDeleting} onChange={(event) => setSelectedGlobalHashes(event.target.checked ? new Set(globalDocuments.map((item) => item.source_hash)) : new Set())} />全选</label>
+              {selectedGlobalHashes.size ? <><span>{selectedGlobalHashes.size} 项已选</span><button className="button danger" disabled={globalBusy || globalDeleting} onClick={() => void deleteGlobalDocuments([...selectedGlobalHashes])}>{globalDeleting ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}删除所选</button></> : null}
+            </div>
+            {globalDocuments.length ? globalDocuments.map((item) => (
+              <div className="global-panel-row" key={item.source_hash}>
+                <input type="checkbox" aria-label={`选择 ${item.source_name}`} checked={selectedGlobalHashes.has(item.source_hash)} disabled={globalBusy || globalDeleting} onChange={(event) => setSelectedGlobalHashes((old) => {
+                  const next = new Set(old);
+                  if (event.target.checked) next.add(item.source_hash); else next.delete(item.source_hash);
+                  return next;
+                })} />
+                <button className={selectedGlobalHash === item.source_hash ? "global-panel-item active" : "global-panel-item"} title={item.source_name} onClick={() => setSelectedGlobalHash(item.source_hash)}>
+                  <FileText size={16} /><span><strong>{item.source_name}</strong><small>{item.page_count ? `${item.page_count} 页 · ` : ""}{item.indexed_chunks} 个索引片段</small></span>
+                </button>
+                <button className="icon-button global-document-delete" title={`删除 ${item.source_name}`} aria-label={`删除 ${item.source_name}`} disabled={globalBusy || globalDeleting} onClick={() => void deleteGlobalDocuments([item.source_hash])}><Trash2 size={16} /></button>
+              </div>
+            )) : <p className="global-panel-empty">暂无全局资料</p>}
           </div>
           {selectedGlobalHash ? <section className="global-panel-detail">
             {globalDetailBusy ? <div className="global-panel-empty"><LoaderCircle className="spin" size={16} />正在读取资料</div> : globalDetailError ? <div className="inline-error" role="alert">{globalDetailError}</div> : globalContent ? <>

@@ -56,7 +56,7 @@ cd web
 npm run dev
 ```
 
-打开 http://localhost:3000。启动脚本会自动拉起 FastAPI；API 文档为 http://127.0.0.1:8000/docs。创建项目时会在选定文件夹下保存项目数据库与上传资料。灯具发送到 DIALux 需要后端与装有 DIALux 的 Windows 桌面运行在同一台机器上。兼容网关是否接受缓存扩展参数需按网关协议配置。
+打开 http://localhost:3000。启动脚本会自动拉起 FastAPI；API 文档为 http://127.0.0.1:8000/docs。项目数据库保存在 `data/lighting_design.sqlite3`，项目图纸和资料统一保存在 `data/projects`。灯具发送到 DIALux 需要后端与装有 DIALux 的 Windows 桌面运行在同一台机器上。兼容网关是否接受缓存扩展参数需按网关协议配置。
 
 CLI 可使用 `uv run python main.py --help` 查看 `analyze-cad`、`add-document`、`search-evidence` 和 `search-luminaires` 等命令。
 
