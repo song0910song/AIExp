@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowUp, BookOpen, Brain, Check, FileText, FolderOpen, Gauge,
-  Lightbulb, LoaderCircle, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Paperclip, Plus, RotateCcw,
+  LayoutDashboard, Lightbulb, LoaderCircle, PanelLeftClose, PanelLeftOpen, PanelRightClose, Paperclip, Plus, RotateCcw,
   Send, Trash2, Upload, X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -133,19 +133,49 @@ function LightingQuestionnaire({ form, disabled, onSubmit }: {
   form: LightingQuestionForm; disabled: boolean;
   onSubmit: (answers: Array<{ label: string; value: string }>) => void;
 }) {
-  const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(
-    form.rows.map(row => [row.id, row.recommended && row.options.includes(row.recommended) ? row.recommended : ""]),
+  const [values, setValues] = useState<Record<string, { choice: string; custom: string }>>(() => Object.fromEntries(
+    form.rows.map(row => [row.id, {
+      choice: row.recommended && row.options.includes(row.recommended) ? row.recommended : "",
+      custom: "",
+    }]),
   ));
-  const complete = form.rows.every(row => !row.required || Boolean(values[row.id]));
+  const complete = form.rows.every(row => !row.required || Boolean(
+    values[row.id]?.choice || values[row.id]?.custom.trim(),
+  ));
   return <form className="design-questionnaire" onSubmit={event => {
     event.preventDefault();
-    onSubmit(form.rows.map(row => ({ label: row.label, value: values[row.id] || "待补充" })));
+    onSubmit(form.rows.map(row => {
+      const answer = values[row.id];
+      return { label: row.label, value: answer?.custom.trim() || answer?.choice || "待补充" };
+    }));
   }}>
     <header><div><strong>{form.title}</strong>{form.intro ? <p>{form.intro}</p> : null}</div></header>
     <div className="questionnaire-table-scroll"><table><thead><tr><th>需要确认</th><th>当前识别 / 建议</th><th>你的选择</th></tr></thead><tbody>
-      {form.rows.map(row => <tr key={row.id}><th scope="row">{row.label}{row.required ? <span aria-label="必需"> *</span> : null}</th><td>{row.context || "根据已上传资料整理"}{row.recommended ? <small>推荐：{row.recommended}</small> : null}</td><td><select aria-label={row.label} required={row.required} disabled={disabled} value={values[row.id] ?? ""} onChange={event => setValues(current => ({ ...current, [row.id]: event.target.value }))}><option value="">请选择</option>{row.options.map(option => <option value={option} key={option}>{option}</option>)}</select></td></tr>)}
+      {form.rows.map(row => <tr key={row.id}>
+        <th scope="row">{row.label}{row.required ? <span aria-label="必需"> *</span> : null}</th>
+        <td>{row.context || "根据已上传资料整理"}{row.recommended ? <small>推荐：{row.recommended}</small> : null}</td>
+        <td>
+          <select aria-label={row.label} aria-required={row.required} disabled={disabled} value={values[row.id]?.choice ?? ""} onChange={event => setValues(current => ({
+            ...current,
+            [row.id]: { choice: event.target.value, custom: current[row.id]?.custom ?? "" },
+          }))}>
+            <option value="">请选择</option>{row.options.map(option => <option value={option} key={option}>{option}</option>)}
+          </select>
+          <input
+            className="questionnaire-custom-answer"
+            aria-label={`${row.label}，自行填写`}
+            disabled={disabled}
+            value={values[row.id]?.custom ?? ""}
+            placeholder="其他答案（优先采用）"
+            onChange={event => setValues(current => ({
+              ...current,
+              [row.id]: { choice: current[row.id]?.choice ?? "", custom: event.target.value },
+            }))}
+          />
+        </td>
+      </tr>)}
     </tbody></table></div>
-    <footer><span>仅确认系统无法从图纸或资料中可靠判断的设计事项。</span><button className="button primary" type="submit" disabled={disabled || !complete}><Check size={15} />提交并继续</button></footer>
+    <footer><span>可选择推荐项，也可自行填写；仅确认系统无法可靠判断的设计事项。</span><button className="button primary" type="submit" disabled={disabled || !complete}><Check size={15} />提交并继续</button></footer>
   </form>;
 }
 
@@ -178,6 +208,7 @@ export function LightingWorkbench() {
   const [error, setError] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [globalDocuments, setGlobalDocuments] = useState<DocumentRecord[]>([]);
   const [globalBusy, setGlobalBusy] = useState(false);
   const [globalDeleting, setGlobalDeleting] = useState(false);
@@ -279,12 +310,14 @@ export function LightingWorkbench() {
     setProjects((old) => old.map((item) => item.project_id === next.project_id ? next : item));
   }
   function selectProject(id: string) {
+    setWorkspaceOpen(false);
     window.localStorage.setItem("lighting-active-project", id);
     setMobileOpen(false);
     void refresh(id);
   }
   async function deleteCurrentProject() {
     if (!project || !window.confirm(`删除项目「${project.brief.project_name}」及其项目文件、资料和会话？此操作不可恢复。`)) return;
+    setWorkspaceOpen(false);
     try {
       await api.deleteProject(project.project_id);
       window.localStorage.removeItem(sessionKey(project.project_id));
@@ -314,11 +347,11 @@ export function LightingWorkbench() {
         <div className="sidebar-footer"><span className={health?.llm_configured ? "service-dot online" : "service-dot"} />{health?.llm_model ?? "模型未配置"}</div>
       </aside>
       <main className="workspace-main">
-        <header className="topbar"><button className="mobile-sidebar-toggle icon-button" title="打开侧边栏" aria-label="打开侧边栏" aria-expanded={mobileOpen} onClick={toggleSidebar}><PanelLeftOpen size={19} /></button><div className="topbar-project"><small>当前项目</small><strong>{project?.brief.project_name ?? "未选择项目"}</strong></div><div className="topbar-actions">{project ? <button className="icon-button" title="删除项目" aria-label="删除项目" onClick={() => void deleteCurrentProject()}><Trash2 size={17} /></button> : null}<button className="icon-button" title="刷新项目" aria-label="刷新项目" onClick={() => void refresh(project?.project_id)}><RotateCcw size={17} /></button></div></header>
+        <header className="topbar"><button className="mobile-sidebar-toggle icon-button" title="打开侧边栏" aria-label="打开侧边栏" aria-expanded={mobileOpen} onClick={toggleSidebar}><PanelLeftOpen size={19} /></button><div className="topbar-project"><small>当前项目</small><strong>{project?.brief.project_name ?? "未选择项目"}</strong></div><div className="topbar-actions">{project ? <><button className="icon-button workspace-button" type="button" aria-expanded={workspaceOpen} onClick={() => setWorkspaceOpen(true)} title="项目工作区" aria-label="打开项目工作区"><LayoutDashboard size={19} strokeWidth={2.2} /></button><button className="icon-button" title="删除项目" aria-label="删除项目" onClick={() => void deleteCurrentProject()}><Trash2 size={17} /></button></> : null}<button className="icon-button" title="刷新项目" aria-label="刷新项目" onClick={() => void refresh(project?.project_id)}><RotateCcw size={17} /></button></div></header>
         {error ? <div className="banner error-text" role="alert">{error}</div> : null}
         {loading ? <div className="center-state"><LoaderCircle className="spin" size={24} />正在载入工作区</div> : !project ? (
           <div className="center-state"><FolderOpen size={30} /><h2>开始一个照明项目</h2><button className="button primary" onClick={() => setCreateOpen(true)}><Plus size={16} />新建项目</button></div>
-        ) : <ChatView key={project.project_id} project={project} health={health} onProject={updateProject} />}
+        ) : <ChatView key={project.project_id} project={project} health={health} onProject={updateProject} workspaceOpen={workspaceOpen} setWorkspaceOpen={setWorkspaceOpen} />}
       </main>
       {globalPanelOpen ? <>
         <button className="global-panel-backdrop" aria-label="关闭全局标准资料" onClick={() => setGlobalPanelOpen(false)} />
@@ -358,6 +391,7 @@ export function LightingWorkbench() {
       {createOpen ? <CreateProjectModal onClose={() => setCreateOpen(false)} onCreated={(next) => {
         setProjects((old) => [next, ...old]);
         setProject(next);
+        setWorkspaceOpen(false);
         setCreateOpen(false);
         window.localStorage.setItem("lighting-active-project", next.project_id);
       }} /> : null}
@@ -365,8 +399,9 @@ export function LightingWorkbench() {
   );
 }
 
-function ChatView({ project, health, onProject }: {
+function ChatView({ project, health, onProject, workspaceOpen, setWorkspaceOpen }: {
   project: Project; health: Health | null; onProject: (value: Project) => void;
+  workspaceOpen: boolean; setWorkspaceOpen: (open: boolean) => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessionId, setSessionId] = useState<string | undefined>();
@@ -381,7 +416,6 @@ function ChatView({ project, health, onProject }: {
   const [effort, setEffort] = useState("medium");
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
   const [dismissedQuestionnaires, setDismissedQuestionnaires] = useState<Set<number>>(() => new Set());
-  const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<"drawing" | "documents" | "products">("drawing");
   const messagesRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLFormElement>(null);
@@ -505,12 +539,6 @@ function ChatView({ project, health, onProject }: {
     finally { streamRef.current = null; setBusy(false); setWorkingStatus(""); }
   }
 
-  async function resetChat() {
-    if (busy) return;
-    if (sessionId) await api.clearChat(project.project_id, sessionId).catch(() => {});
-    window.localStorage.removeItem(sessionKey(project.project_id));
-    setMessages([]); setSessionId(undefined); setContextUsage(null); setDismissedQuestionnaires(new Set()); setError(""); setNotice("");
-  }
   async function sendLuminaire(item: Luminaire) {
     setSending(item.luminaire_id); setError(""); setNotice("");
     try {
@@ -530,7 +558,6 @@ function ChatView({ project, health, onProject }: {
 
   return (
     <section className="chat-view">
-      <header className="section-heading"><div><h1>照明设计</h1><p>{project.brief.project_name}</p></div><div className="chat-heading-actions"><button className="icon-button" type="button" aria-expanded={workspaceOpen} onClick={() => setWorkspaceOpen(true)} title="项目工作区" aria-label="打开项目工作区"><PanelRightOpen size={18} /></button><button className="icon-button" disabled={busy} onClick={() => void resetChat()} title="新对话" aria-label="新对话"><Plus size={18} /></button></div></header>
       <div className="chat-messages" ref={messagesRef} onScroll={(event) => { const list = event.currentTarget; followRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 120; }}>
         {!messages.length ? <div className="chat-empty"><Lightbulb size={26} /><h2>从一个设计任务开始</h2><p>上传平面图或设计资料，或描述你想完成的照明设计。</p></div> : messages.map((item, index) => {
           const questionForm = item.role === "assistant" ? parseLightingQuestions(item.content) : null;
