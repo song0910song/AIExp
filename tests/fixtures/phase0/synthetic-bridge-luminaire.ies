@@ -1,0 +1,16 @@
+IESNA:LM-63-2002
+[TEST] Synthetic bridge validation only
+[TESTLAB] Lighting Agent test fixture
+[ISSUEDATE] 2026-10-05
+[MANUFAC] NOT A COMMERCIAL PRODUCT
+[LUMCAT] SYNTHETIC-1000LM
+[LUMINAIRE] Isotropic test source for DIALux bridge validation only
+[LAMPCAT] SYNTHETIC
+[LAMP] Synthetic 1000 lm source
+[LAMPUSED] 1
+TILT=NONE
+1 1000 1 5 1 1 2 0.10 0.10 0.03
+1.0 1.0 10.0
+0 30 60 90 180
+0
+79.5775 79.5775 79.5775 79.5775 79.5775

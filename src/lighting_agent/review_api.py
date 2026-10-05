@@ -1,4 +1,4 @@
-"""Human review API for goals 1/2; no DIALux execution endpoints."""
+"""Human review and IFC preparation API; DIALux execution stays separate."""
 from __future__ import annotations
 
 import hashlib
@@ -7,9 +7,10 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import Field
 
+from .ifc_export import IfcExportError, IfcExportOptions, export_spatial_model
 from .project_store import ProjectStore, RevisionConflictError
 from .rules import calculation_mapping, evidence_items, generate_candidates, rule_conflicts, validate_rule
 from .schemas import (DesignRule, FieldProvenance, ProjectUpdate, RuleSet, SpatialElement,
@@ -25,6 +26,13 @@ class ModelReviewRequest(StrictModel):
     coverage_confirmed: bool = False
     elements_reviewed: bool = False
     note: str = Field(min_length=1, max_length=2000)
+
+
+class IFCExportRequest(StrictModel):
+    expected_revision: int = Field(ge=0)
+    wall_thickness_m: float = Field(gt=0, allow_inf_nan=False)
+    floor_slab_thickness_m: float = Field(gt=0, allow_inf_nan=False)
+    ceiling_slab_thickness_m: float = Field(gt=0, allow_inf_nan=False)
 
 
 class StandardRegistration(StrictModel):
@@ -177,6 +185,41 @@ def install_review_routes(app, projects, evidence, project_root, project_view):
                 "source_asset": plan.asset.model_dump(mode="json"),
                 "source_geometry": [c.model_dump(mode="json", exclude={"points"}) for c in plan.area_candidates],
                 "ifc_generated": False}
+
+    @app.post("/api/projects/{project_id}/spatial-model/ifc")
+    def export_ifc(project_id: str, request: IFCExportRequest):
+        state = state_for(project_id, request.expected_revision)
+        plan = state.floor_plan
+        if not plan or not plan.spatial_model:
+            raise HTTPException(422, "尚未建立空间模型")
+        if plan.spatial_model.source_sha256 != plan.asset.sha256:
+            raise HTTPException(422, "空间模型与当前 CAD 文件不匹配，请重新核对")
+        try:
+            result = export_spatial_model(
+                assess_model(plan.spatial_model.model_copy(deep=True), plan),
+                IfcExportOptions(
+                    wall_thickness_m=request.wall_thickness_m,
+                    floor_slab_thickness_m=request.floor_slab_thickness_m,
+                    ceiling_slab_thickness_m=request.ceiling_slab_thickness_m,
+                    project_name=state.brief.project_name,
+                    project_id=state.project_id,
+                ),
+            )
+        except (IfcExportError, ValueError) as error:
+            raise HTTPException(422, str(error)) from error
+        filename = f"{project_id}-model-v{plan.spatial_model.version}.ifc"
+        return Response(
+            content=result.data,
+            media_type="application/x-step",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-IFC-Schema": result.schema,
+                "X-IFC-SHA256": result.sha256,
+                "X-Project-Revision": str(state.revision),
+                "X-Spatial-Model-Version": str(plan.spatial_model.version),
+                "X-Source-CAD-SHA256": plan.spatial_model.source_sha256,
+            },
+        )
 
     @app.get("/api/standards")
     def list_standards(project_id: str | None = None):

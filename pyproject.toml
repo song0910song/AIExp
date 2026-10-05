@@ -23,6 +23,7 @@ dependencies = [
     "uvicorn>=0.35",
     "ezdxf>=1.4",
     "shapely>=2.1.2",
+    "ifcopenshell>=0.9.0",
 ]
 
 [project.scripts]

@@ -1,0 +1,43 @@
+{
+  "version": 7,
+  "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "meters_per_unit": 1,
+  "coverage_confirmed": true,
+  "elements_reviewed": true,
+  "design_ready": true,
+  "rooms": [
+    {
+      "room_id": "room-1",
+      "floor": "1F",
+      "number": "101",
+      "name": "Bridge test room",
+      "usage": "Office",
+      "boundary": [{"x": 0, "y": 0}, {"x": 6, "y": 0}, {"x": 6, "y": 4}, {"x": 0, "y": 4}],
+      "area_m2": 24,
+      "elevation_m": 0,
+      "height_m": 3,
+      "ceiling_height_m": 2.8,
+      "wall_reflectance": 0.5,
+      "ceiling_reflectance": 0.7,
+      "floor_reflectance": 0.2,
+      "status": "confirmed"
+    }
+  ],
+  "elements": [
+    {
+      "element_id": "desk-1",
+      "kind": "furniture",
+      "name": "Test desk",
+      "room_id": "room-1",
+      "footprint": [{"x": 1, "y": 1}, {"x": 2.2, "y": 1}, {"x": 2.2, "y": 1.6}, {"x": 1, "y": 1.6}],
+      "length_m": 1.2,
+      "width_m": 0.6,
+      "elevation_m": 0,
+      "height_m": 0.75,
+      "rotation_deg": 0,
+      "material": "Synthetic laminate",
+      "reflectance": 0.3,
+      "status": "confirmed"
+    }
+  ]
+}
