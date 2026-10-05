@@ -13,7 +13,7 @@ import rehypeKatex from "rehype-katex";
 import { api } from "@/lib/api";
 import type { ChatMessage, ContextUsage, DocumentContent, DocumentRecord, Health, Luminaire, Project, ToolCall } from "@/lib/types";
 import { CreateProjectModal } from "./CreateProjectModal";
-import { DocumentPages, StandardsReview } from "./StandardsReview";
+import { DocumentPages } from "./DocumentPages";
 import { RoomScopeReview } from "./RoomScopeReview";
 
 const sessionKey = (id: string) => `lighting-chat:${id}`;
@@ -245,7 +245,7 @@ export function LightingWorkbench() {
         latestHash = result.sha256;
         uploaded += 1;
       }
-      setGlobalNotice(`已上传 ${uploaded} 份全局资料，所有项目均可检索。`);
+      setGlobalNotice(`已上传 ${uploaded} 份全局标准资料，所有项目均可检索。`);
     } catch (reason) { setGlobalError(`已上传 ${uploaded} 份；${messageError(reason)}`); }
     finally {
       try {
@@ -260,7 +260,7 @@ export function LightingWorkbench() {
   async function deleteGlobalDocuments(sourceHashes: string[]) {
     if (!sourceHashes.length || globalBusy || globalDeleting) return;
     const names = sourceHashes.map((hash) => globalDocuments.find((item) => item.source_hash === hash)?.source_name ?? hash);
-    const label = names.length === 1 ? `「${names[0]}」` : `${names.length} 份全局资料`;
+    const label = names.length === 1 ? `「${names[0]}」` : `${names.length} 份全局标准资料`;
     if (!window.confirm(`删除${label}及其索引？此操作不可恢复。`)) return;
     setGlobalDeleting(true); setGlobalError(""); setGlobalNotice("");
     try {
@@ -270,7 +270,7 @@ export function LightingWorkbench() {
       setGlobalDocuments((old) => old.filter((item) => !removed.has(item.source_hash)));
       setSelectedGlobalHashes((old) => new Set([...old].filter((hash) => !removed.has(hash))));
       setSelectedGlobalHash((old) => old && removed.has(old) ? null : old);
-      setGlobalNotice(`已删除 ${sourceHashes.length} 份全局资料。`);
+      setGlobalNotice(`已删除 ${sourceHashes.length} 份全局标准资料。`);
     } catch (reason) { setGlobalError(messageError(reason)); }
     finally { setGlobalDeleting(false); }
   }
@@ -307,9 +307,9 @@ export function LightingWorkbench() {
             </button>
           ))}
         </div>
-        <section className="global-documents" aria-label="全局资料">
-          <div className="sidebar-label">全局资料 <span>{globalDocuments.length}</span></div>
-          <button className="button global-upload" title="打开全局资料（所有项目可用）" aria-expanded={globalPanelOpen} onClick={() => { setMobileOpen(false); setGlobalPanelOpen(true); }}><Upload size={16} /><span>上传全局资料</span></button>
+        <section className="global-documents" aria-label="全局标准资料">
+          <div className="sidebar-label">全局标准资料 <span>{globalDocuments.length}</span></div>
+          <button className="button global-upload" title="打开全局标准资料（所有项目可用）" aria-expanded={globalPanelOpen} onClick={() => { setMobileOpen(false); setGlobalPanelOpen(true); }}><Upload size={16} /><span>上传标准资料</span></button>
         </section>
         <div className="sidebar-footer"><span className={health?.llm_configured ? "service-dot online" : "service-dot"} />{health?.llm_model ?? "模型未配置"}</div>
       </aside>
@@ -321,13 +321,13 @@ export function LightingWorkbench() {
         ) : <ChatView key={project.project_id} project={project} health={health} onProject={updateProject} />}
       </main>
       {globalPanelOpen ? <>
-        <button className="global-panel-backdrop" aria-label="关闭全局资料" onClick={() => setGlobalPanelOpen(false)} />
-        <aside className="global-panel" aria-label="全局资料详情">
-          <header className="global-panel-heading"><div><h2>全局资料</h2><small>所有项目可检索 · {globalDocuments.length} 份</small></div><button className="icon-button" title="关闭资料面板" aria-label="关闭资料面板" onClick={() => setGlobalPanelOpen(false)}><X size={18} /></button></header>
+        <button className="global-panel-backdrop" aria-label="关闭全局标准资料" onClick={() => setGlobalPanelOpen(false)} />
+        <aside className="global-panel" aria-label="全局标准资料详情">
+          <header className="global-panel-heading"><div><h2>全局标准资料</h2><small>所有项目可检索 · {globalDocuments.length} 份</small></div><button className="icon-button" title="关闭资料面板" aria-label="关闭资料面板" onClick={() => setGlobalPanelOpen(false)}><X size={18} /></button></header>
           <div className="global-panel-upload"><button className="button primary" disabled={globalBusy || globalDeleting} onClick={() => globalInputRef.current?.click()}>{globalBusy ? <LoaderCircle className="spin" size={16} /> : <Upload size={16} />}上传资料</button><input ref={globalInputRef} type="file" hidden multiple accept=".pdf,.docx,.md,.txt" onChange={(event) => { void uploadGlobalDocuments(event.target.files); event.target.value = ""; }} /><small>PDF、DOCX、MD、TXT</small></div>
           {globalError ? <div className="inline-error" role="alert">{globalError}</div> : null}
           {globalNotice ? <div className="notice" role="status">{globalNotice}</div> : null}
-          <div className="global-panel-list" aria-label="已上传的全局资料">
+          <div className="global-panel-list" aria-label="已上传的全局标准资料">
             <div className="global-panel-select-bar">
               <label><input type="checkbox" checked={globalDocuments.length > 0 && selectedGlobalHashes.size === globalDocuments.length} disabled={!globalDocuments.length || globalBusy || globalDeleting} onChange={(event) => setSelectedGlobalHashes(event.target.checked ? new Set(globalDocuments.map((item) => item.source_hash)) : new Set())} />全选</label>
               {selectedGlobalHashes.size ? <><span>{selectedGlobalHashes.size} 项已选</span><button className="button danger" disabled={globalBusy || globalDeleting} onClick={() => void deleteGlobalDocuments([...selectedGlobalHashes])}>{globalDeleting ? <LoaderCircle className="spin" size={15} /> : <Trash2 size={15} />}删除所选</button></> : null}
@@ -344,7 +344,7 @@ export function LightingWorkbench() {
                 </button>
                 <button className="icon-button global-document-delete" title={`删除 ${item.source_name}`} aria-label={`删除 ${item.source_name}`} disabled={globalBusy || globalDeleting} onClick={() => void deleteGlobalDocuments([item.source_hash])}><Trash2 size={16} /></button>
               </div>
-            )) : <p className="global-panel-empty">暂无全局资料</p>}
+            )) : <p className="global-panel-empty">暂无全局标准资料</p>}
           </div>
           {selectedGlobalHash ? <section className="global-panel-detail">
             {globalDetailBusy ? <div className="global-panel-empty"><LoaderCircle className="spin" size={16} />正在读取资料</div> : globalDetailError ? <div className="inline-error" role="alert">{globalDetailError}</div> : globalContent ? <>
@@ -382,7 +382,7 @@ function ChatView({ project, health, onProject }: {
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
   const [dismissedQuestionnaires, setDismissedQuestionnaires] = useState<Set<number>>(() => new Set());
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
-  const [workspaceTab, setWorkspaceTab] = useState<"drawing" | "rules" | "products">("drawing");
+  const [workspaceTab, setWorkspaceTab] = useState<"drawing" | "documents" | "products">("drawing");
   const messagesRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLFormElement>(null);
   const draftRef = useRef("");
@@ -551,8 +551,8 @@ function ChatView({ project, health, onProject }: {
         <button className="project-workspace-backdrop" type="button" aria-label="关闭项目工作区" onClick={() => setWorkspaceOpen(false)} />
         <aside className="project-workspace" aria-label="项目工作区">
           <header className="project-workspace-heading"><div><h2>{project.brief.project_name}</h2><small>{project.floor_plan?.asset.source_name ?? "尚未上传图纸"} · {documents.length} 份项目资料 · {project.luminaires.length} 款候选灯具</small></div><button className="icon-button" type="button" onClick={() => setWorkspaceOpen(false)} title="关闭项目工作区" aria-label="关闭项目工作区"><PanelRightClose size={18} /></button></header>
-          <nav className="project-workspace-tabs" aria-label="项目工作区分区"><button type="button" className={workspaceTab === "drawing" ? "active" : ""} aria-selected={workspaceTab === "drawing"} onClick={() => setWorkspaceTab("drawing")}>图纸</button><button type="button" className={workspaceTab === "rules" ? "active" : ""} aria-selected={workspaceTab === "rules"} onClick={() => setWorkspaceTab("rules")}>规范资料</button><button type="button" className={workspaceTab === "products" ? "active" : ""} aria-selected={workspaceTab === "products"} onClick={() => setWorkspaceTab("products")}>灯具</button></nav>
-          <div className="project-workspace-content">{workspaceTab === "drawing" ? <RoomScopeReview project={project} onProject={onProject} /> : workspaceTab === "rules" ? <><StandardsReview project={project} onProject={onProject} /><div className="workspace-assets">{documents.map((document) => <div key={document.source_hash}><FileText size={15} /><span>{document.source_name}<small>{document.page_count ? `${document.page_count} 页` : "项目资料"}</small></span></div>)}</div></> : <div className="workspace-products">{project.luminaires.length ? project.luminaires.toReversed().map((item) => <article className="workspace-product" key={item.luminaire_id}><div><strong>{item.article_name}</strong><small>{item.brand_name ?? "品牌未提供"} · {[item.power_w !== null ? `${item.power_w} W` : null, item.cct_k !== null ? `${item.cct_k} K` : null, item.cri !== null ? `Ra ${item.cri}` : null].filter(Boolean).join(" · ")}</small></div><button className="icon-button" disabled={Boolean(sending)} title="发送到本机 DIALux" aria-label={`发送 ${item.article_name} 到 DIALux`} onClick={() => void sendLuminaire(item)}>{sending === item.luminaire_id ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></article>) : <p>灯具候选会在设计过程中显示在这里。</p>}</div>}</div>
+          <nav className="project-workspace-tabs" aria-label="项目工作区分区"><button type="button" className={workspaceTab === "drawing" ? "active" : ""} aria-selected={workspaceTab === "drawing"} onClick={() => setWorkspaceTab("drawing")}>图纸</button><button type="button" className={workspaceTab === "documents" ? "active" : ""} aria-selected={workspaceTab === "documents"} onClick={() => setWorkspaceTab("documents")}>项目资料</button><button type="button" className={workspaceTab === "products" ? "active" : ""} aria-selected={workspaceTab === "products"} onClick={() => setWorkspaceTab("products")}>灯具</button></nav>
+          <div className="project-workspace-content">{workspaceTab === "drawing" ? <RoomScopeReview project={project} onProject={onProject} /> : workspaceTab === "documents" ? <div className="workspace-assets">{documents.length ? documents.map((document) => <div key={document.source_hash}><FileText size={15} /><span>{document.source_name}<small>{document.page_count ? `${document.page_count} 页` : "项目资料"}</small></span></div>) : <p>暂无项目资料</p>}</div> : <div className="workspace-products">{project.luminaires.length ? project.luminaires.toReversed().map((item) => <article className="workspace-product" key={item.luminaire_id}><div><strong>{item.article_name}</strong><small>{item.brand_name ?? "品牌未提供"} · {[item.power_w !== null ? `${item.power_w} W` : null, item.cct_k !== null ? `${item.cct_k} K` : null, item.cri !== null ? `Ra ${item.cri}` : null].filter(Boolean).join(" · ")}</small></div><button className="icon-button" disabled={Boolean(sending)} title="发送到本机 DIALux" aria-label={`发送 ${item.article_name} 到 DIALux`} onClick={() => void sendLuminaire(item)}>{sending === item.luminaire_id ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}</button></article>) : <p>灯具候选会在设计过程中显示在这里。</p>}</div>}</div>
         </aside>
       </> : null}
     </section>

@@ -9,6 +9,7 @@ from pathlib import Path
 import ezdxf
 import fitz
 import pytest
+import requests
 from fastapi.testclient import TestClient
 
 from lighting_agent.document_loader import DocumentLoadError, load_document
@@ -217,6 +218,56 @@ class FakeOCR:
         return "| Space | Illuminance lx |\n|---|---|\n| Office | >= 500 |\nFootnote: maintained."
 
 
+class BatchOCR:
+    def __init__(self):
+        self.calls = []
+
+    def extract_pdf_result(self, path):
+        with fitz.open(path) as pdf:
+            page_count = len(pdf)
+        self.calls.append(page_count)
+        return {
+            "result": {
+                "layoutParsingResults": [
+                    {"markdown": {"text": f"Batch OCR page {index + 1}"}}
+                    for index in range(page_count)
+                ]
+            }
+        }
+
+
+class SplitOnPayloadLimitOCR(BatchOCR):
+    def extract_pdf_result(self, path):
+        with fitz.open(path) as pdf:
+            page_count = len(pdf)
+        self.calls.append(page_count)
+        if page_count > 1:
+            response = requests.Response()
+            response.status_code = 413
+            raise requests.HTTPError("request body too large", response=response)
+        return {
+            "result": {
+                "layoutParsingResults": [
+                    {"markdown": {"text": f"Split OCR page {len(self.calls)}"}}
+                ]
+            }
+        }
+
+
+def make_two_scan_pdf(tmp_path):
+    path = tmp_path / "two-scans.pdf"
+    with fitz.open() as image_document:
+        image_page = image_document.new_page(width=40, height=40)
+        image_page.draw_rect(fitz.Rect(5, 5, 35, 35), color=(0, 0, 0), fill=(1, 1, 1))
+        image = image_page.get_pixmap().tobytes("png")
+    with fitz.open() as document:
+        document.new_page(width=200, height=200).insert_image(fitz.Rect(0, 0, 100, 100), stream=image)
+        document.new_page(width=200, height=200).insert_text((20, 30), "Native middle page")
+        document.new_page(width=200, height=200).insert_image(fitz.Rect(0, 0, 100, 100), stream=image)
+        document.save(path)
+    return path
+
+
 def test_mixed_pdf_extracts_each_scanned_page_with_physical_locators(tmp_path):
     path = make_pdf(tmp_path)
     ocr = FakeOCR()
@@ -236,6 +287,34 @@ def test_mixed_pdf_extracts_each_scanned_page_with_physical_locators(tmp_path):
     assert "Footnote" in chunks[1].content
     assert "Third page" not in chunks[1].content
     assert store.get_document_artifact(parsed.sha256)["review_required"]
+
+
+def test_scanned_pages_are_submitted_in_one_batch_and_mapped_back(tmp_path):
+    path = make_two_scan_pdf(tmp_path)
+    ocr = BatchOCR()
+
+    parsed = load_document(path, allowed_root=tmp_path, ocr_client=ocr)
+
+    assert ocr.calls == [2]
+    assert parsed.pages[0].status == "ocr_review"
+    assert parsed.pages[1].text == "Native middle page"
+    assert parsed.pages[1].status == "extracted"
+    assert parsed.pages[2].status == "ocr_review"
+    assert "Batch OCR page 1" in parsed.pages[0].text
+    assert "Batch OCR page 2" in parsed.pages[2].text
+
+
+def test_oversized_ocr_batch_is_split_and_retried(tmp_path):
+    path = make_two_scan_pdf(tmp_path)
+    ocr = SplitOnPayloadLimitOCR()
+
+    parsed = load_document(path, allowed_root=tmp_path, ocr_client=ocr)
+
+    assert ocr.calls == [2, 1, 1]
+    assert parsed.pages[0].status == "ocr_review"
+    assert parsed.pages[2].status == "ocr_review"
+    assert "Split OCR page 2" in parsed.pages[0].text
+    assert "Split OCR page 3" in parsed.pages[2].text
 
 
 def test_native_text_does_not_hide_scan_on_same_page(tmp_path):

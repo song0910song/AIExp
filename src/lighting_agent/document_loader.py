@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import math
 import re
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 import requests
 
@@ -20,6 +23,9 @@ class DocumentLoadError(ValueError):
     pass
 
 
+_PADDLEOCR_MAX_BATCH_PAGES = 1000
+
+
 def _paddleocr_error_message(operation: str, error: Exception) -> str:
     response = getattr(error, "response", None)
     status_code = getattr(response, "status_code", None)
@@ -28,6 +34,10 @@ def _paddleocr_error_message(operation: str, error: Exception) -> str:
             f"PaddleOCR authentication failed (HTTP {status_code}). "
             "Check that PADDLEOCR_ACCESS_TOKEN is a valid, current AI Studio access token."
         )
+    if status_code is not None:
+        details = " ".join(str(getattr(response, "text", "") or "").split())
+        suffix = f": {details[:800]}" if details else ""
+        return f"PaddleOCR {operation} failed (HTTP {status_code}){suffix}"
     return f"PaddleOCR {operation} failed: {error}"
 
 
@@ -42,10 +52,10 @@ class ParsedDocument:
 
 
 class PaddleOCRClient:
-    """Minimal polling client for a configured PaddleOCR job endpoint.
+    """Client for PaddleOCR's synchronous API and asynchronous v2 jobs endpoint.
 
     Deployments can supply a compatible endpoint through `PADDLEOCR_API_URL`.
-    Text PDFs never make a remote call; this client is only a scan fallback.
+    Text PDFs never make a remote call; scanned pages are submitted as one batch.
     """
 
     def __init__(self, settings: Settings | None = None, session: requests.Session | None = None) -> None:
@@ -62,12 +72,60 @@ class PaddleOCRClient:
         return _extract_text(self.extract_pdf_result(path)) or ""
 
     def extract_pdf_result(self, path: Path) -> object:
+        if not urlsplit(self.settings.paddleocr_api_url).path.rstrip("/").endswith("/jobs"):
+            return self._extract_pdf_sync(path)
+        return self._extract_pdf_job(path)
+
+    def _extract_pdf_sync(self, path: Path) -> object:
+        token = (self.settings.paddleocr_access_token or "").strip()
+        if not token:
+            raise DocumentLoadError("PADDLEOCR_ACCESS_TOKEN is required for OCR")
+        headers = {
+            "Authorization": f"token {token}",
+            "Content-Type": "application/json",
+        }
+        try:
+            payload = {
+                "file": base64.b64encode(path.read_bytes()).decode("ascii"),
+                "fileType": 0,
+                "useDocOrientationClassify": False,
+                "useDocUnwarping": False,
+                "useChartRecognition": False,
+            }
+            response = self.session.post(
+                self.settings.paddleocr_api_url,
+                json=payload,
+                headers=headers,
+                timeout=self.settings.paddleocr_timeout_seconds,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except (OSError, requests.RequestException, ValueError) as error:
+            raise DocumentLoadError(_paddleocr_error_message("request", error)) from error
+        provider_error = _provider_error(result)
+        if provider_error:
+            raise DocumentLoadError(f"PaddleOCR request was rejected: {provider_error}")
+        if not _extract_text(result):
+            fields = ", ".join(_response_field_names(result)) or "no fields"
+            raise DocumentLoadError(
+                f"PaddleOCR response contained no OCR text (response fields: {fields})"
+            )
+        return result
+
+    def _extract_pdf_job(self, path: Path) -> object:
         try:
             with path.open("rb") as file_handle:
                 response = self.session.post(
                     self.settings.paddleocr_api_url,
                     files={"file": (path.name, file_handle, "application/pdf")},
-                    data={"model": self.settings.paddleocr_model},
+                    data={
+                        "model": self.settings.paddleocr_model,
+                        "optionalPayload": json.dumps({
+                            "useDocOrientationClassify": False,
+                            "useDocUnwarping": False,
+                            "useChartRecognition": False,
+                        }),
+                    },
                     headers=self._auth_headers(),
                     timeout=self.settings.paddleocr_timeout_seconds,
                 )
@@ -75,19 +133,32 @@ class PaddleOCRClient:
             payload = response.json()
         except (OSError, requests.RequestException, ValueError) as error:
             raise DocumentLoadError(_paddleocr_error_message("submission", error)) from error
-        job_id = _nested_value(payload, "job_id") or _nested_value(payload, "id")
-        if str(_nested_value(payload, "status")).casefold() in {"failed", "error", "cancelled"}:
+        provider_error = _provider_error(payload)
+        if provider_error:
+            raise DocumentLoadError(f"PaddleOCR submission was rejected: {provider_error}")
+        job_id = (
+            _nested_value(payload, "job_id")
+            or _nested_value(payload, "task_id")
+            or _nested_value(payload, "id")
+        )
+        if str(_nested_value(payload, "status") or _nested_value(payload, "task_status") or "").casefold() in {
+            "failed", "error", "cancelled"
+        }:
             raise DocumentLoadError("PaddleOCR submission returned a failed status")
         text = _extract_text(payload)
         if text:
             return payload
         if not job_id:
-            raise DocumentLoadError("PaddleOCR response contained neither text nor a job identifier")
+            fields = ", ".join(_response_field_names(payload)) or "no fields"
+            raise DocumentLoadError(
+                "PaddleOCR response contained neither OCR text nor a job/task identifier "
+                f"(response fields: {fields}); verify PADDLEOCR_API_URL and its response format"
+            )
         return self._poll(str(job_id))
 
     def _poll(self, job_id: str) -> object:
         deadline = time.monotonic() + self.settings.paddleocr_timeout_seconds
-        job_url = f"{self.settings.paddleocr_api_url.rstrip('/')}/{job_id}"
+        job_url = f"{self.settings.paddleocr_api_url.rstrip('/')}/{quote(job_id, safe='')}"
         while time.monotonic() < deadline:
             try:
                 response = self.session.get(
@@ -99,14 +170,59 @@ class PaddleOCRClient:
                 payload = response.json()
             except (requests.RequestException, ValueError) as error:
                 raise DocumentLoadError(_paddleocr_error_message("status request", error)) from error
-            status = str(_nested_value(payload, "status") or "").casefold()
+            provider_error = _provider_error(payload)
+            if provider_error:
+                raise DocumentLoadError(f"PaddleOCR status request failed: {provider_error}")
+            status = str(
+                _nested_value(payload, "state")
+                or _nested_value(payload, "status")
+                or _nested_value(payload, "task_status")
+                or ""
+            ).casefold()
             if status in {"failed", "error", "cancelled"}:
-                raise DocumentLoadError(f"PaddleOCR job {job_id} ended with status {status}")
+                reason = _nested_value(payload, "error_msg") or _nested_value(payload, "message")
+                detail = f": {reason}" if reason else ""
+                raise DocumentLoadError(f"PaddleOCR job {job_id} ended with status {status}{detail}")
+            if status in {"done", "completed", "succeeded", "success"}:
+                result_url = _nested_value(payload, "json_url")
+                if isinstance(result_url, str) and result_url.strip():
+                    return self._download_jsonl(result_url.strip())
             text = _extract_text(payload)
-            if text:
+            if text and status not in {"pending", "running"}:
                 return payload
+            if status in {"done", "completed", "succeeded", "success"}:
+                raise DocumentLoadError(
+                    f"PaddleOCR job {job_id} completed without OCR text or a JSON result URL"
+                )
             time.sleep(self.settings.paddleocr_poll_interval_seconds)
         raise DocumentLoadError(f"PaddleOCR job {job_id} timed out")
+
+    def _download_jsonl(self, result_url: str) -> object:
+        try:
+            response = self.session.get(
+                result_url,
+                timeout=min(30, self.settings.paddleocr_timeout_seconds),
+            )
+            response.raise_for_status()
+            lines = response.text.splitlines()
+            results = []
+            for line_number, line in enumerate(lines, 1):
+                if not line.strip():
+                    continue
+                try:
+                    item = json.loads(line)
+                except ValueError as error:
+                    raise DocumentLoadError(
+                        f"PaddleOCR result JSONL contains invalid JSON on line {line_number}"
+                    ) from error
+                results.append(item.get("result", item) if isinstance(item, dict) else item)
+        except (requests.RequestException, ValueError) as error:
+            if isinstance(error, DocumentLoadError):
+                raise
+            raise DocumentLoadError(_paddleocr_error_message("result download", error)) from error
+        if not results:
+            raise DocumentLoadError("PaddleOCR completed but returned an empty JSONL result")
+        return {"data": {"result": results}}
 
 
 def _checked_path(file_path: str | Path, allowed_root: Path = PROJECT_ROOT) -> Path:
@@ -203,6 +319,7 @@ def _read_pdf_pages(path: Path, ocr_client) -> list[EvidencePage]:
         if pdf.needs_pass:
             raise DocumentLoadError("PDF 已加密，请提供已解密副本")
         pages = []
+        ocr_targets = []
         for index, page in enumerate(pdf):
             prefix = f"p{index + 1}"
             text = page.get_text("text", sort=True).strip()
@@ -221,40 +338,128 @@ def _read_pdf_pages(path: Path, ocr_client) -> list[EvidencePage]:
             # footnote. Image size is not evidence that it is merely decorative.
             needs_ocr = bool(images) or "\ufffd" in text or (not text and bool(page.get_drawings()))
             if needs_ocr:
-                try:
-                    with tempfile.TemporaryDirectory(prefix="lighting-ocr-page-") as directory:
-                        single_path = Path(directory) / f"{prefix}.pdf"
-                        with fitz.open() as single:
-                            single.insert_pdf(pdf, from_page=index, to_page=index)
-                            single.save(single_path)
-                        payload = {}
-                        if hasattr(ocr_client, "extract_pdf_result"):
-                            payload = ocr_client.extract_pdf_result(single_path)
-                            recognized = _extract_text(payload) or ""
-                        else:
-                            recognized = ocr_client.extract_pdf(single_path)
-                    if not recognized.strip():
-                        raise DocumentLoadError("OCR 未返回正文")
-                    # Preserve native and recognized evidence separately. Do not attach a
-                    # fabricated bounding box to an OCR service's plain-text response.
-                    record.blocks.append(EvidenceBlock(block_id=f"{prefix}-ocr", text=recognized, kind="ocr", coordinate_space="unknown"))
-                    record.ocr_layout = _ocr_layout(payload, prefix)
-                    record.tables.extend(_markdown_tables(recognized, f"{prefix}-ocr"))
-                    record.text = text + ("\n\n" if text else "") + recognized
-                    record.status = "ocr_review"
-                    record.warnings.append("本页已逐页外部 OCR；文字、脚注、表格及布局需核对原页")
-                    if not record.ocr_layout or any(b.bbox is None for b in record.ocr_layout):
-                        record.warnings.append("OCR 未返回完整的 PDF 坐标；原始布局坐标按服务坐标系保留，不伪造页面位置")
-                except (DocumentLoadError, OSError, requests.RequestException) as error:
-                    record.status = "needs_review"
-                    record.warnings.append(f"本页 OCR 未完成，不能视为读取完整：{error}")
+                ocr_targets.append((index, record, prefix))
             elif not text:
                 record.status = "empty"
                 record.warnings.append("本页无可提取内容，请核对是否为空白页")
             pages.append(record)
+
+        for offset in range(0, len(ocr_targets), _PADDLEOCR_MAX_BATCH_PAGES):
+            batch = ocr_targets[offset:offset + _PADDLEOCR_MAX_BATCH_PAGES]
+            if hasattr(ocr_client, "extract_pdf_result"):
+                _process_ocr_result_batch(path, pdf, ocr_client, batch)
+            else:
+                for index, record, prefix in batch:
+                    try:
+                        with tempfile.TemporaryDirectory(prefix="lighting-ocr-page-") as directory:
+                            single_path = Path(directory) / f"{prefix}.pdf"
+                            _write_pdf_page_batch(pdf, [index], single_path)
+                            recognized = ocr_client.extract_pdf(single_path)
+                        if not recognized.strip():
+                            raise DocumentLoadError("OCR returned an empty result")
+                        _attach_ocr_result(record, {"text": recognized}, prefix, recognized)
+                    except (DocumentLoadError, OSError, requests.RequestException) as error:
+                        _mark_ocr_failure(record, error)
         return pages
     finally:
         pdf.close()
+
+
+def _process_ocr_result_batch(source_path: Path, pdf, ocr_client, batch) -> None:
+    try:
+        indexes = [target[0] for target in batch]
+        if len(indexes) == len(pdf) and indexes == list(range(len(pdf))):
+            payload = ocr_client.extract_pdf_result(source_path)
+        else:
+            with tempfile.TemporaryDirectory(prefix="lighting-ocr-batch-") as directory:
+                batch_path = Path(directory) / "pages.pdf"
+                _write_pdf_page_batch(pdf, indexes, batch_path)
+                payload = ocr_client.extract_pdf_result(batch_path)
+        page_payloads = _ocr_page_results(payload)
+        if len(page_payloads) != len(batch):
+            raise DocumentLoadError(
+                f"OCR returned {len(page_payloads)} page results for {len(batch)} submitted pages"
+            )
+        recognized_pages = [_extract_text(result) or "" for result in page_payloads]
+        if any(not text.strip() for text in recognized_pages):
+            raise DocumentLoadError("OCR returned an empty result for one or more pages")
+        for (_, record, prefix), result, recognized in zip(batch, page_payloads, recognized_pages):
+            _attach_ocr_result(record, result, prefix, recognized)
+    except (DocumentLoadError, OSError, requests.RequestException) as error:
+        cause = error.__cause__ or error
+        response = getattr(cause, "response", None)
+        status_code = getattr(response, "status_code", None)
+        should_split = (
+            len(batch) > 1
+            and (status_code in {413, 504}
+                 or isinstance(cause, requests.Timeout)
+                 or "timed out" in str(error).casefold())
+        )
+        if should_split:
+            midpoint = len(batch) // 2
+            _process_ocr_result_batch(source_path, pdf, ocr_client, batch[:midpoint])
+            _process_ocr_result_batch(source_path, pdf, ocr_client, batch[midpoint:])
+            return
+        for _, record, _ in batch:
+            _mark_ocr_failure(record, error)
+
+
+def _write_pdf_page_batch(pdf, page_indexes: list[int], output_path: Path) -> None:
+    import fitz
+
+    with fitz.open() as batch_pdf:
+        for index in page_indexes:
+            batch_pdf.insert_pdf(pdf, from_page=index, to_page=index)
+        batch_pdf.save(output_path)
+
+
+def _ocr_page_results(payload: object) -> list[object]:
+    page_results: list[object] = []
+
+    def collect_layout_results(value: object) -> None:
+        if isinstance(value, dict):
+            layouts = next(
+                (child for key, child in value.items()
+                 if _normalized_field_name(str(key)) == "layoutparsingresults"),
+                None,
+            )
+            if isinstance(layouts, list):
+                page_results.extend(layouts)
+                return
+            for child in value.values():
+                collect_layout_results(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_layout_results(child)
+
+    collect_layout_results(payload)
+    if page_results:
+        return page_results
+    result_list = _nested_value(payload, "result")
+    if isinstance(result_list, list) and result_list and all(_extract_text(item) for item in result_list):
+        return result_list
+    return [payload] if _extract_text(payload) else []
+
+
+def _attach_ocr_result(record: EvidencePage, payload: object, prefix: str, recognized: str) -> None:
+    record.blocks.append(EvidenceBlock(
+        block_id=f"{prefix}-ocr",
+        text=recognized,
+        kind="ocr",
+        coordinate_space="unknown",
+    ))
+    record.ocr_layout = _ocr_layout(payload, prefix)
+    record.tables.extend(_markdown_tables(recognized, f"{prefix}-ocr"))
+    record.text = record.text + ("\n\n" if record.text else "") + recognized
+    record.status = "ocr_review"
+    record.warnings.append("本页由外部 OCR 识别；文字、脚注、表格及布局需对照原页审核")
+    if not record.ocr_layout or any(block.bbox is None for block in record.ocr_layout):
+        record.warnings.append("OCR 未返回完整 PDF 坐标；布局坐标保留服务坐标系，未推断页面位置")
+
+
+def _mark_ocr_failure(record: EvidencePage, error: Exception) -> None:
+    record.status = "needs_review"
+    record.warnings.append(f"本页 OCR 未完成，不能视为读取完整：{error}")
 
 
 def _markdown_tables(text: str, prefix: str) -> list[EvidenceTable]:
@@ -319,8 +524,10 @@ def _ocr_layout(payload: object, prefix: str) -> list[EvidenceBlock]:
 
 def _nested_value(payload: object, key: str) -> object | None:
     if isinstance(payload, dict):
-        if key in payload:
-            return payload[key]
+        normalized_key = _normalized_field_name(key)
+        for candidate, value in payload.items():
+            if _normalized_field_name(str(candidate)) == normalized_key:
+                return value
         for value in payload.values():
             nested = _nested_value(value, key)
             if nested is not None:
@@ -331,6 +538,52 @@ def _nested_value(payload: object, key: str) -> object | None:
             if nested is not None:
                 return nested
     return None
+
+
+def _normalized_field_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.casefold())
+
+
+def _provider_error(payload: object) -> str | None:
+    error_code = _nested_value(payload, "error_code")
+    if error_code is None:
+        error_code = _nested_value(payload, "code")
+    if error_code not in (None, 0, "0", 200, "200", "success", "ok", "", False):
+        message = (
+            _nested_value(payload, "error_msg")
+            or _nested_value(payload, "error_message")
+            or _nested_value(payload, "message")
+            or _nested_value(payload, "msg")
+        )
+        return str(message or f"provider error code {error_code}")
+    success = _nested_value(payload, "success")
+    if success is False or (isinstance(success, str) and success.casefold() == "false"):
+        message = _nested_value(payload, "error_msg") or _nested_value(payload, "message")
+        return str(message or "provider reported success=false")
+    return None
+
+
+def _response_field_names(payload: object, *, limit: int = 12) -> list[str]:
+    names: list[str] = []
+
+    def collect(value: object) -> None:
+        if len(names) >= limit:
+            return
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if str(key) not in names:
+                    names.append(str(key))
+                collect(child)
+                if len(names) >= limit:
+                    return
+        elif isinstance(value, list):
+            for child in value[:3]:
+                collect(child)
+                if len(names) >= limit:
+                    return
+
+    collect(payload)
+    return names
 
 
 def _extract_text(payload: object) -> str | None:

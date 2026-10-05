@@ -119,7 +119,11 @@ def test_project_documents_are_private_but_global_documents_are_searchable(envir
         files={"file": ("private.md", b"Private project fixture detail", "text/markdown")},
     )
     assert global_doc.status_code == local_doc.status_code == 201
-    global_hash = client.get("/api/documents").json()[0]["source_hash"]
+    global_record = client.get("/api/documents").json()[0]
+    project_record = client.get(f"/api/projects/{one}/documents").json()[0]
+    assert global_record["source_type"] == "standard"
+    assert project_record["source_type"] == "project_document"
+    global_hash = global_record["source_hash"]
     assert "Global standard 500 lx" in client.get(f"/api/documents/{global_hash}").json()["content"]
     private_hash = client.get(f"/api/projects/{one}/documents").json()[0]["source_hash"]
     assert client.get(f"/api/projects/{two}/documents/{private_hash}").status_code == 404
