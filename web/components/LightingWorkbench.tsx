@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ArrowUp, BookOpen, Brain, Check, ChevronDown, FileText, FolderOpen, Gauge,
+  ArrowUp, BookOpen, Brain, Check, FileText, FolderOpen, Gauge,
   Lightbulb, LoaderCircle, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Paperclip, Plus, RotateCcw,
-  Send, Trash2, Upload, Wrench, X,
+  Send, Trash2, Upload, X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -55,6 +55,80 @@ function withoutLightingQuestions(content: string): string {
   return content.replace(/\n?```lighting-questions\s*\n[\s\S]*?\n```/i, "").trim();
 }
 
+const drawingReportKeys = ["summary", "spaces", "recognized_features", "scale_basis", "design_implications", "clarifications"];
+
+function drawingReportText(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  const report = value as Record<string, unknown>;
+  const lines: string[] = [];
+  if (typeof report.summary === "string" && report.summary.trim()) lines.push(report.summary.trim());
+  if (typeof report.scale_basis === "string" && report.scale_basis.trim()) lines.push(`图纸尺度依据：${report.scale_basis.trim()}`);
+  if (Array.isArray(report.spaces)) {
+    const spaces = report.spaces.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const space = item as Record<string, unknown>;
+      const name = typeof space.name === "string" ? space.name.trim() : "";
+      const usage = typeof space.usage === "string" ? space.usage.trim() : "";
+      return [name ? `${name}${usage ? `（${usage}）` : ""}` : usage].filter(Boolean);
+    });
+    if (spaces.length) lines.push(`识别到的空间：${spaces.join("、")}`);
+  }
+  if (Array.isArray(report.design_implications)) {
+    lines.push(...report.design_implications.filter((item): item is string => typeof item === "string" && Boolean(item.trim())));
+  }
+  return lines.join("\n\n");
+}
+
+function hideLeakedDrawingReports(content: string): string {
+  let output = "";
+  let cursor = 0;
+  while (cursor < content.length) {
+    const start = content.indexOf("{", cursor);
+    if (start < 0) return output + content.slice(cursor);
+    output += content.slice(cursor, start);
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+    for (let index = start; index < content.length; index += 1) {
+      const character = content[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') inString = true;
+      else if (character === "{") depth += 1;
+      else if (character === "}" && --depth === 0) { end = index + 1; break; }
+    }
+    const candidate = content.slice(start, end < 0 ? content.length : end);
+    const hasReportField = drawingReportKeys.some((key) => candidate.includes(`"${key}"`));
+    if (!hasReportField) {
+      output += "{";
+      cursor = start + 1;
+      continue;
+    }
+    if (end < 0) return output.trimEnd();
+    try {
+      const summary = drawingReportText(JSON.parse(candidate));
+      output += summary ? `\n\n${summary}\n\n` : "";
+    } catch {
+      output += "\n\n图纸识别结果已整理。\n\n";
+    }
+    cursor = end;
+  }
+  return output;
+}
+
+function questionnaireAnswered(messages: ChatMessage[], index: number): boolean {
+  for (const message of messages.slice(index + 1)) {
+    if (message.role === "assistant") return false;
+    if (message.content.trimStart().startsWith("设计事项确认：")) return true;
+  }
+  return false;
+}
+
 function LightingQuestionnaire({ form, disabled, onSubmit }: {
   form: LightingQuestionForm; disabled: boolean;
   onSubmit: (answers: Array<{ label: string; value: string }>) => void;
@@ -76,7 +150,7 @@ function LightingQuestionnaire({ form, disabled, onSubmit }: {
 }
 
 function assistantMarkdown(content: string): string {
-  const withoutInternalLocators = content.replace(
+  const withoutInternalLocators = hideLeakedDrawingReports(content).replace(
     /\s*[（(]?\s*chunks?\s+\d+(?:\s*(?:[-–—,]\s*\d+))*\s*[）)]?/gi,
     "",
   );
@@ -271,6 +345,7 @@ function ChatView({ project, health, onProject }: {
   const [notice, setNotice] = useState("");
   const [effort, setEffort] = useState("medium");
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
+  const [dismissedQuestionnaires, setDismissedQuestionnaires] = useState<Set<number>>(() => new Set());
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [workspaceTab, setWorkspaceTab] = useState<"drawing" | "rules" | "products">("drawing");
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -399,7 +474,7 @@ function ChatView({ project, health, onProject }: {
     if (busy) return;
     if (sessionId) await api.clearChat(project.project_id, sessionId).catch(() => {});
     window.localStorage.removeItem(sessionKey(project.project_id));
-    setMessages([]); setSessionId(undefined); setContextUsage(null); setError(""); setNotice("");
+    setMessages([]); setSessionId(undefined); setContextUsage(null); setDismissedQuestionnaires(new Set()); setError(""); setNotice("");
   }
   async function sendLuminaire(item: Luminaire) {
     setSending(item.luminaire_id); setError(""); setNotice("");
@@ -410,7 +485,8 @@ function ChatView({ project, health, onProject }: {
     finally { setSending(""); }
   }
 
-  function submitQuestionnaire(answers: Array<{ label: string; value: string }>) {
+  function submitQuestionnaire(index: number, answers: Array<{ label: string; value: string }>) {
+    setDismissedQuestionnaires((old) => new Set(old).add(index));
     const message = ["设计事项确认：", ...answers.map((answer) => `- ${answer.label}：${answer.value}`)].join("\n");
     draftRef.current = message;
     setDraft(message);
@@ -424,7 +500,8 @@ function ChatView({ project, health, onProject }: {
         {!messages.length ? <div className="chat-empty"><Lightbulb size={26} /><h2>从一个设计任务开始</h2><p>上传平面图或设计资料，或描述你想完成的照明设计。</p></div> : messages.map((item, index) => {
           const questionForm = item.role === "assistant" ? parseLightingQuestions(item.content) : null;
           const visibleContent = item.role === "assistant" ? withoutLightingQuestions(item.content) : item.content;
-          return <article key={index} className={`chat-message ${item.role}`}><div className="message-label">{item.role === "user" ? "你" : "照明设计助手"}</div>{item.tool_calls?.length ? <details className="tool-process" open={index === messages.length - 1 && busy}><summary><Wrench size={14} />设计进度 · {item.tool_calls.length} 项<ChevronDown size={14} /></summary><div>{item.tool_calls.map((call) => <div className="tool-step" key={call.id}><span className={call.status === "running" ? "tool-status running" : call.status === "error" ? "tool-status failed" : "tool-status completed"}>{call.status === "running" ? <LoaderCircle className="spin" size={13} /> : call.status === "error" ? <X size={13} /> : <Check size={13} />}</span><span><strong>{({ get_project: "读取项目状态", analyze_floor_plan: "分析建筑平面图", search_evidence: "核对项目与规范资料", search_luminaires: "筛选照明产品" } as Record<string, string>)[call.name] ?? "处理设计任务"}</strong>{call.summary ? <small>{call.summary}</small> : null}</span></div>)}</div></details> : null}{visibleContent ? <div className="message-content"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{ table: ({ node: _node, ...props }) => <div className="markdown-table-scroll"><table {...props} /></div> }}>{item.role === "assistant" ? assistantMarkdown(visibleContent) : visibleContent}</ReactMarkdown></div> : null}{questionForm ? <LightingQuestionnaire form={questionForm} disabled={busy} onSubmit={submitQuestionnaire} /> : null}</article>;
+          const showQuestionnaire = questionForm && !dismissedQuestionnaires.has(index) && !questionnaireAnswered(messages, index);
+          return <article key={index} className={`chat-message ${item.role}`}><div className="message-label">{item.role === "user" ? "你" : "照明设计助手"}</div>{visibleContent ? <div className="message-content"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{ table: ({ node: _node, ...props }) => <div className="markdown-table-scroll"><table {...props} /></div> }}>{item.role === "assistant" ? assistantMarkdown(visibleContent) : visibleContent}</ReactMarkdown></div> : null}{showQuestionnaire ? <LightingQuestionnaire form={questionForm} disabled={busy} onSubmit={(answers) => submitQuestionnaire(index, answers)} /> : null}</article>;
         })}
         {busy ? <div className="chat-working" role="status"><LoaderCircle className="spin" size={16} />{workingStatus}</div> : null}
       </div>

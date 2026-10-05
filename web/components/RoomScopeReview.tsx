@@ -52,9 +52,6 @@ export function RoomScopeReview({ project, onProject }: { project: Project; onPr
     prepared.rooms = prepared.rooms.map(item => item.status === "excluded"
       ? item : { ...item, status: "confirmed" as const });
     prepared.coverage_confirmed = true;
-    // Detailed furniture semantics remain the assistant's analysis task. The owner
-    // confirms the visible drawing and room scope, not CAD layer internals.
-    prepared.elements_reviewed = true;
     setBusy(true); setError("");
     try {
       onProject(await api.reviewModel(project, prepared, "业主已在工作区核对原图与本次设计房间范围；缺失工程参数留待助手基于图纸、标准和明确假设处理。"));

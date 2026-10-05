@@ -65,7 +65,7 @@ export function StandardsReview({ project, onProject }: { project: Project; onPr
   useEffect(() => { const r = rules.find(r => r.rule_id === choice); setDraft(r ? structuredClone(r) : null); }, [choice, project.rule_set?.version]);
   async function perform(work: () => Promise<void>) { setBusy(true); setError(""); setNotice(""); try { await work(); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); } finally { setBusy(false); } }
   return <details className="review-panel" onToggle={event => setOpen(event.currentTarget.open)}>
-    <summary>规范与规则 · {rules.length} 条 · {project.rule_set ? `v${project.rule_set.version} / ${project.rule_set.status === "bound" ? "已绑定" : project.rule_set.status === "stale" ? "关联已失效" : "待确认"}` : "未绑定版本"}</summary>
+    <summary>规则管理{rules.length ? ` · ${rules.length} 条` : ""}</summary>
     {open ? <div className="review-body"><p>仅以已上传的标准全文生成候选。登记标准类型与适用范围，逐条核对原页和脚注后确认；不会自动取最严值或判定设计通过。</p>
       <button type="button" disabled={busy} onClick={() => void perform(refresh)}>刷新资料与版本</button>
       <details><summary>1. 逐页证据与标准登记</summary>
