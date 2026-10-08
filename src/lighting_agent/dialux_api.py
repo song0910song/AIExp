@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from threading import Lock
 from typing import Any
 from urllib.parse import quote, urljoin, urlparse
@@ -72,7 +73,7 @@ CRI_PATTERN = re.compile(r"\b(?:CRI|Ra)\s*[:>=]?\s*(\d{2,3})\b", re.I)
 UGR_PATTERN = re.compile(r"\bUGR\s*(?:[:<≤]|max(?:\.|imum)?\s*)?\s*(\d{1,2}(?:[.,]\d)?)(?!\d)", re.I)
 # Same shape the site embeds behind its "Send to DIALux" button.
 DIALUX_PROTOCOL_LINK_PATTERN = re.compile(r"dial://[^\s\"'<>]+\.uld", re.I)
-PARSER_VERSION = "2.0"
+PARSER_VERSION = "2.1"
 
 POWER_FIELD_NAMES = (
     "nominal lamp power",
@@ -549,6 +550,7 @@ class DialuxAPI:
             ),
             image_url=self._absolute_url_if_present(item.get("mosaicImage")),
             photometry_image_url=self._absolute_url_if_present(item.get("imageTriplet")),
+            dialux_protocol_url=_optional_text(detail.get("dialux_protocol_url")),
             has_uld=bool(item.get("hasUld")),
             has_photometry_download=bool(item.get("hasPhotometryDownload")),
             detail_fields=detail_fields,
@@ -624,6 +626,96 @@ class DialuxAPI:
             )
         return match.group(0)
 
+    def download_luminaire_uld(self, detail_url: str, destination: Path) -> Path:
+        """Download the ULD referenced by a catalogue product into ``destination``.
+
+        The catalogue deliberately exposes the same file through two paths:
+        the ``dial://`` link used by the desktop dispatcher and an HTTPS file
+        endpoint.  The former is what the user sees, while this method safely
+        converts it to the latter so a confirmed DIALux run can reuse the
+        agent-selected product without asking the user to upload IES/LDT/ULD.
+        """
+
+        protocol_url = self.resolve_send_to_dialux_url(detail_url)
+        download_url = self._protocol_url_to_https(protocol_url)
+        _, response = self._trusted_get(
+            download_url,
+            headers={
+                "Accept": "application/vnd.dialux.uld, application/octet-stream;q=0.9, */*;q=0.1",
+                "User-Agent": self.headers["User-Agent"],
+            },
+            stream=True,
+        )
+
+        target = Path(destination).resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + ".part")
+        maximum = max(1, int(getattr(self.settings, "dialux_download_max_bytes", 50 * 1024 * 1024)))
+        total = 0
+        try:
+            headers = getattr(response, "headers", {}) or {}
+            declared = headers.get("Content-Length")
+            if declared:
+                try:
+                    if int(declared) > maximum:
+                        raise DialuxAPIError(
+                            "DIALux luminaire file exceeds the configured download limit",
+                            code="download_too_large",
+                        )
+                except ValueError:
+                    # An invalid vendor header is not a reason to trust it;
+                    # the streaming byte limit below remains authoritative.
+                    pass
+
+            iterator = getattr(response, "iter_content", None)
+            chunks = iterator(chunk_size=64 * 1024) if callable(iterator) else [getattr(response, "content", b"")]
+            with temporary.open("wb") as handle:
+                for chunk in chunks:
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > maximum:
+                        raise DialuxAPIError(
+                            "DIALux luminaire file exceeds the configured download limit",
+                            code="download_too_large",
+                        )
+                    handle.write(chunk)
+            if total == 0:
+                raise DialuxAPIError(
+                    "DIALux returned an empty luminaire file",
+                    code="empty_luminaire_file",
+                )
+            temporary.replace(target)
+        except DialuxAPIError:
+            temporary.unlink(missing_ok=True)
+            raise
+        except (OSError, requests.RequestException) as error:
+            temporary.unlink(missing_ok=True)
+            raise DialuxAPIError(
+                f"Unable to cache the DIALux luminaire file: {error}",
+                code="luminaire_file_write_failed",
+            ) from error
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
+        return target
+
+    def _protocol_url_to_https(self, protocol_url: str) -> str:
+        parsed = urlparse(protocol_url)
+        trusted = urlparse(self.base_url)
+        if parsed.scheme.casefold() != "dial" or parsed.netloc != trusted.netloc:
+            raise DialuxAPIError(
+                "DIALux luminaire protocol URL is outside the configured DIALux host",
+                code="untrusted_download_url",
+            )
+        if not parsed.path.casefold().endswith(".uld"):
+            raise DialuxAPIError(
+                "DIALux luminaire protocol URL does not reference a ULD file",
+                code="invalid_luminaire_file_url",
+            )
+        return parsed._replace(scheme="https").geturl()
+
     def _assert_dialux_url(self, value: str) -> None:
         candidate = urlparse(value)
         trusted = urlparse(self.base_url)
@@ -662,10 +754,18 @@ class DialuxAPI:
                     fields[key] = value
         warnings = [] if fields else ["No recognised technical field table was found on the detail page."]
         title = soup.title.get_text(" ", strip=True) if soup.title else None
+        protocol_url = None
+        for anchor in soup.select("a[href]"):
+            href = str(anchor.get("href") or "")
+            match = DIALUX_PROTOCOL_LINK_PATTERN.search(href)
+            if match:
+                protocol_url = match.group(0)
+                break
         return {
             "title": title,
             "fields": fields,
             "warnings": warnings,
+            "dialux_protocol_url": protocol_url,
         }
 
 
@@ -801,6 +901,7 @@ def candidate_summary(candidate: LuminaireCandidate) -> dict[str, Any]:
         "detail_status": candidate.detail_status,
         "parse_warnings": candidate.parse_warnings,
         "detail_url": candidate.detail_url,
+        "dialux_protocol_url": candidate.dialux_protocol_url,
         "project_brief_matching_status": (
             brief_validation.matching_status if brief_validation is not None else None
         ),

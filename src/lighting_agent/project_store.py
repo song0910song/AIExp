@@ -103,7 +103,9 @@ class ProjectStore:
     ) -> ProjectState:
         state = self.get(project_id)
         if area_candidate_index is None:
-            stored = plan.model_copy(update={"selected_area_candidate_index": None})
+            selected = next((index for index, room in enumerate(plan.spatial_model.rooms)
+                             if room.status == "confirmed"), None) if plan.spatial_model else None
+            stored = plan.model_copy(update={"selected_area_candidate_index": selected})
             if stored.spatial_model and state.floor_plan and state.floor_plan.spatial_model:
                 stored.spatial_model.version = state.floor_plan.spatial_model.version + 1
             brief = state.brief.model_copy(deep=True)
@@ -115,6 +117,19 @@ class ProjectStore:
                     brief.space_type = None
                     brief.confirmed_fields.discard("space_type")
                 brief.cad_confirmed_fields.clear()
+            if stored.spatial_model:
+                included = [room for room in stored.spatial_model.rooms if room.status == "confirmed"]
+                if included:
+                    brief = brief.model_copy(update={
+                        "area_m2": sum(room.area_m2 or 0 for room in included),
+                        "confirmed_fields": brief.confirmed_fields | {"area_m2"},
+                        "cad_confirmed_fields": brief.cad_confirmed_fields | {"area_m2"},
+                    })
+                    first = included[0]
+                    if first.usage:
+                        brief = brief.model_copy(update={"space_type": first.usage,
+                            "confirmed_fields": brief.confirmed_fields | {"space_type"},
+                            "cad_confirmed_fields": brief.cad_confirmed_fields | {"space_type"}})
             return self.update(project_id, ProjectUpdate(expected_revision=expected_revision, floor_plan=stored, brief=brief,
                 **self._invalidate(state, "CAD 重新导入；旧空间确认和计算关联需复核")))
         if area_candidate_index < 0 or area_candidate_index >= len(plan.area_candidates):

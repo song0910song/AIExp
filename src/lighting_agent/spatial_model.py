@@ -40,7 +40,7 @@ def build_spatial_model(plan: FloorPlan, elements: list) -> SpatialModel:
             element.room_id = matches[0].room_id
     model = SpatialModel(source_sha256=plan.asset.sha256, meters_per_unit=plan.meters_per_drawing_unit,
                          geometry_tolerance_m=0.001 if plan.meters_per_drawing_unit else None,
-                         rooms=rooms, elements=elements, audit_log=["CAD 导入；所有语义、尺寸及覆盖范围待人工核对"])
+                         rooms=rooms, elements=elements, audit_log=["CAD 导入；等待模型自动判定空间范围和语义"])
     return assess_model(model, plan)
 
 

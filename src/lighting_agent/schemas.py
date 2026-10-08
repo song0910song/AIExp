@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+import math
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -113,6 +114,10 @@ class LuminaireCandidate(CompatibleModel):
     detail_url: str
     image_url: str | None = None
     photometry_image_url: str | None = None
+    # The catalogue's validated ``dial://`` handoff link.  It is retained as
+    # provenance so a confirmed DIALux run can cache the same official ULD
+    # without requiring a user-uploaded IES/LDT/ULD file.
+    dialux_protocol_url: str | None = None
     has_uld: bool = False
     has_photometry_download: bool = False
     detail_fields: dict[str, str] = Field(default_factory=dict)
@@ -147,6 +152,20 @@ class ModelIssue(StrictModel):
     source_handle: str | None = None
     room_id: str | None = None
     position: CadPoint | None = None
+
+
+class ModelDecision(StrictModel):
+    """Auditable result of automatic CAD interpretation."""
+    decision_id: str = Field(default_factory=lambda: uuid4().hex)
+    target_id: str
+    target_type: Literal["room", "element", "drawing"]
+    action: Literal["include", "exclude", "set"]
+    field: str | None = None
+    value: Any | None = None
+    confidence: float = Field(ge=0, le=1)
+    evidence: list[str] = Field(default_factory=list)
+    rationale: str = ""
+    status: Literal["accepted", "rejected", "needs_attention"] = "accepted"
 
 
 class DrawingPath(StrictModel):
@@ -217,6 +236,10 @@ class SpatialModel(StrictModel):
     design_ready: bool = False
     outstanding: list[str] = Field(default_factory=list)
     audit_log: list[str] = Field(default_factory=list)
+    automation_status: Literal["pending", "auto_confirmed", "needs_attention"] = "pending"
+    model_decisions: list[ModelDecision] = Field(default_factory=list)
+    analysis_model: str | None = None
+    analysis_sha256: str | None = None
 
 
 class EvidenceBlock(StrictModel):
@@ -273,6 +296,109 @@ class CalculationConditions(StrictModel):
     glare_method: str | None = None
     glare_observers: str | None = None
     additional: str = ""
+
+
+class DialuxGeometryAssumptions(StrictModel):
+    """Explicit defaults used only after the user confirms a DIALux run."""
+
+    wall_thickness_m: float = Field(default=.12, gt=0, le=1, allow_inf_nan=False)
+    floor_slab_thickness_m: float = Field(default=.15, gt=0, le=1, allow_inf_nan=False)
+    ceiling_slab_thickness_m: float = Field(default=.10, gt=0, le=1, allow_inf_nan=False)
+    default_floor: str = Field(default="1F", min_length=1, max_length=80)
+    default_usage: str | None = Field(default=None, max_length=160)
+    default_room_height_m: float = Field(default=3.0, gt=0, le=100, allow_inf_nan=False)
+    default_clear_height_m: float = Field(default=2.8, gt=0, le=100, allow_inf_nan=False)
+    wall_reflectance: float = Field(default=.5, ge=0, le=1, allow_inf_nan=False)
+    ceiling_reflectance: float = Field(default=.7, ge=0, le=1, allow_inf_nan=False)
+    floor_reflectance: float = Field(default=.2, ge=0, le=1, allow_inf_nan=False)
+    door_mode: Literal["closed_door", "open_passage"] = "closed_door"
+    door_panel_thickness_m: float = Field(default=.04, gt=0, le=.2, allow_inf_nan=False)
+    glazing_panel_thickness_m: float = Field(default=.008, gt=0, le=.2, allow_inf_nan=False)
+    glazing_visible_transmittance: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    glazing_refractive_index: float | None = Field(default=None, ge=1, le=3, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_heights(self):
+        if self.default_clear_height_m > self.default_room_height_m:
+            raise ValueError("默认净高不能高于默认层高")
+        if self.glazing_visible_transmittance is not None and self.glazing_refractive_index is None:
+            raise ValueError("设置玻璃透射率时必须同时提供折射率")
+        if self.glazing_refractive_index is not None and self.glazing_visible_transmittance is None:
+            raise ValueError("设置玻璃折射率时必须同时提供透射率")
+        return self
+
+
+class DialuxLayoutItem(StrictModel):
+    room_id: str = Field(min_length=1, max_length=160)
+    name: str | None = Field(default=None, max_length=160)
+    position_m: list[float] = Field(min_length=3, max_length=3)
+    rotation_deg: list[float] = Field(default_factory=lambda: [0., 0., 0.], min_length=3, max_length=3)
+    dimming: float = Field(default=1., ge=0, le=1, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_vectors(self):
+        values = [*self.position_m, *self.rotation_deg]
+        if not all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in values):
+            raise ValueError("灯具位置和方向必须是有限数值")
+        return self
+
+
+class DialuxOptimizationRequest(StrictModel):
+    enabled: bool = False
+    max_iterations: int = Field(default=1, ge=1, le=8)
+    target_illuminance_lx: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    min_uniformity_u0: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    max_power_w: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    objective: Literal["min_power", "min_luminaire_count", "balanced"] = "balanced"
+
+    @model_validator(mode="after")
+    def validate_enabled(self):
+        if self.enabled and self.max_iterations < 2:
+            raise ValueError("布局优化至少需要两次候选计算")
+        if self.enabled and self.target_illuminance_lx is None and self.min_uniformity_u0 is None:
+            raise ValueError("布局优化至少需要平均照度或均匀度目标")
+        return self
+
+
+class DialuxRunRequest(StrictModel):
+    """Project-scoped request; confirmation is deliberately explicit."""
+
+    expected_revision: int = Field(ge=0)
+    photometry_path: str | None = Field(default=None, max_length=300)
+    luminaire_id: str | None = Field(default=None, max_length=200)
+    assumptions: DialuxGeometryAssumptions = Field(default_factory=DialuxGeometryAssumptions)
+    layout: list[DialuxLayoutItem] = Field(default_factory=list, max_length=200)
+    optimization: DialuxOptimizationRequest = Field(default_factory=DialuxOptimizationRequest)
+    confirm_assumptions: bool = False
+
+
+class DialuxReadiness(CompatibleModel):
+    status: Literal["ready", "needs_confirmation", "blocked"]
+    complexity: Literal["simple", "complex", "unknown"]
+    can_prepare: bool = False
+    can_start: bool = False
+    issues: list[str] = Field(default_factory=list)
+    assumptions: DialuxGeometryAssumptions = Field(default_factory=DialuxGeometryAssumptions)
+    rooms: list[dict[str, Any]] = Field(default_factory=list)
+    elements: list[dict[str, Any]] = Field(default_factory=list)
+    luminaire_id: str | None = None
+    luminaire_name: str | None = None
+    photometry_path: str | None = None
+    photometry_source: Literal["user_upload", "dialux_catalogue", "missing"] = "missing"
+
+
+class DialuxRunRecord(CompatibleModel):
+    run_id: str
+    project_id: str
+    status: Literal["draft", "prepared", "queued", "running", "completed", "needs_attention", "failed"]
+    profile: str
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    job_directory: str | None = None
+    readiness: DialuxReadiness | None = None
+    request: DialuxRunRequest | None = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
 
 
 class DesignRule(StrictModel):

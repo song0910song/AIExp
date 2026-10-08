@@ -22,13 +22,17 @@ from .config import (
     REASONING_EFFORT_METADATA, Settings, USER_DOCUMENTS_DIRECTORY, ensure_data_directories,
 )
 from .dialux_api import DialuxAPI, DialuxAPIError
+from .dialux_service import DialuxExecutionService, DialuxRunNotFoundError
 from .dialux_protocol import DialuxProtocolError, open_in_dialux
 from .document_loader import DocumentLoadError, load_document
 from .floor_plan import MAX_DRAWING_BYTES, FloorPlanParseError, parse_floor_plan
+from .cad_auto_analysis import apply_model_analysis
 from .legacy_migration import migrate_legacy_workspaces
 from .project_store import ProjectNotFoundError, ProjectStore, RevisionConflictError
 from .rag import EvidenceNotFoundError, create_evidence_store, public_locator
-from .schemas import DesignBrief, LuminaireSearchRequest, ProjectState, ProjectUpdate, StrictModel
+from .schemas import (
+    DesignBrief, DialuxRunRequest, LuminaireSearchRequest, ProjectState, ProjectUpdate, StrictModel,
+)
 from .storage import SQLiteDatabase
 from .review_api import install_review_routes
 
@@ -244,6 +248,14 @@ def _tool_result_summary(name: str, content: Any) -> str:
             return "图面视觉识别未完成"
         if name == "search_luminaires" and isinstance(result.get("candidates"), list):
             return f"找到 {len(result['candidates'])} 款灯具"
+        if name == "send_luminaire_to_dialux":
+            return "已请求本机 DIALux 导入灯具" if result.get("status") == "launched" else "DIALux 灯具发送未完成"
+        if name == "prepare_dialux_run":
+            return f"DIALux 任务状态：{result.get('status', 'unknown')}"
+        if name == "start_dialux_run":
+            return f"DIALux 任务已提交：{result.get('status', 'unknown')}"
+        if name == "get_dialux_run":
+            return f"DIALux 任务状态：{result.get('status', 'unknown')}"
     return "调用完成"
 
 
@@ -290,6 +302,7 @@ def create_app(
     evidence = global_evidence
     dialux = dialux_api or DialuxAPI()
     settings = Settings()
+    dialux_executor = DialuxExecutionService(projects, settings=settings, dialux_api=dialux)
     sessions = ChatSessionStore(projects.database_path, settings)
     documents_root = user_documents_directory or USER_DOCUMENTS_DIRECTORY
 
@@ -315,6 +328,10 @@ def create_app(
     @app.exception_handler(RevisionConflictError)
     async def stale_project(_, error: RevisionConflictError):
         return JSONResponse(status_code=409, content={"detail": str(error)})
+
+    @app.exception_handler(DialuxRunNotFoundError)
+    async def missing_dialux_run(_, error: DialuxRunNotFoundError):
+        return JSONResponse(status_code=404, content={"detail": str(error)})
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
@@ -379,6 +396,9 @@ def create_app(
             await run_in_threadpool(target.write_bytes, content)
         try:
             plan = await run_in_threadpool(parse_floor_plan, target, storage_path=target.relative_to(root).as_posix())
+            # CAD parsing is deterministic; model analysis is applied when a
+            # vision model is available. Without it the project remains
+            # explicitly attention-required and never enters DIALux.
             updated = projects.set_floor_plan(project_id, expected_revision, plan, None)
         except (FloorPlanParseError, ValueError) as error:
             if not existed:
@@ -560,6 +580,64 @@ def create_app(
             raise HTTPException(status_code=422, detail=error.as_dict()) from error
         return {"status": "launched", "luminaire_id": luminaire_id}
 
+    @app.post("/api/projects/{project_id}/dialux/light-files", status_code=201)
+    async def upload_photometry(
+        project_id: str,
+        file: Annotated[UploadFile, File()],
+        expected_revision: Annotated[int, Form(ge=0)],
+    ) -> dict[str, Any]:
+        state = projects.get(project_id)
+        if state.revision != expected_revision:
+            raise RevisionConflictError(f"Project revision is {state.revision}, expected {expected_revision}")
+        filename = _safe_name(file.filename or "photometry.ies")
+        if Path(filename).suffix.casefold() not in {".ies", ".ldt", ".uld"}:
+            raise HTTPException(status_code=415, detail="仅支持 IES、LDT 和 ULD 光度文件")
+        content = await _read_upload(file)
+        directory = project_root(project_id) / f"{project_id}.photometry"
+        target, existed = _upload_target(directory, filename, content)
+        if not existed:
+            await run_in_threadpool(target.write_bytes, content)
+        return {
+            "path": target.relative_to(projects.directory).as_posix(),
+            "source_name": target.name,
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+            "project_revision": state.revision,
+        }
+
+    @app.post("/api/projects/{project_id}/dialux/readiness")
+    def dialux_readiness(project_id: str, request: DialuxRunRequest) -> dict[str, Any]:
+        projects.get(project_id)
+        readiness, _, layout = dialux_executor.readiness(project_id, request)
+        return {"readiness": readiness.model_dump(mode="json"),
+                "layout": [item.model_dump(mode="json") for item in layout]}
+
+    @app.post("/api/projects/{project_id}/dialux/runs")
+    def prepare_dialux_run(project_id: str, request: DialuxRunRequest) -> dict[str, Any]:
+        projects.get(project_id)
+        record = dialux_executor.prepare(project_id, request)
+        return record.model_dump(mode="json")
+
+    @app.get("/api/projects/{project_id}/dialux/runs")
+    def list_dialux_runs(project_id: str) -> list[dict[str, Any]]:
+        return [record.model_dump(mode="json") for record in dialux_executor.list(project_id)]
+
+    @app.get("/api/projects/{project_id}/dialux/runs/{run_id}")
+    def get_dialux_run(project_id: str, run_id: str) -> dict[str, Any]:
+        return dialux_executor.get(project_id, run_id).model_dump(mode="json")
+
+    @app.post("/api/projects/{project_id}/dialux/runs/{run_id}/confirm")
+    def confirm_dialux_run(project_id: str, run_id: str) -> dict[str, Any]:
+        return dialux_executor.confirm(project_id, run_id).model_dump(mode="json")
+
+    @app.post("/api/projects/{project_id}/dialux/runs/{run_id}/start")
+    def start_dialux_run(project_id: str, run_id: str) -> dict[str, Any]:
+        return dialux_executor.start(project_id, run_id).model_dump(mode="json")
+
+    @app.post("/api/projects/{project_id}/dialux/runs/{run_id}/pause")
+    def pause_dialux_run(project_id: str, run_id: str) -> dict[str, Any]:
+        return dialux_executor.pause(project_id, run_id).model_dump(mode="json")
+
     @app.post("/api/chat")
     def chat(request: ChatRequest) -> dict[str, Any]:
         if request.project_id:
@@ -576,7 +654,7 @@ def create_app(
             agent = build_agent(
                 settings.with_reasoning_effort(request.reasoning_effort),
                 projects=projects, evidence=evidence,
-                dialux=dialux, project_id=request.project_id,
+                dialux=dialux, dialux_executor=dialux_executor, project_id=request.project_id,
             )
             response = agent.invoke(
                 {"messages": [{"role": item["role"], "content": item["content"]} for item in [*history, current]]},
@@ -614,7 +692,7 @@ def create_app(
             agent = build_agent(
                 settings.with_reasoning_effort(request.reasoning_effort),
                 projects=projects, evidence=evidence,
-                dialux=dialux, project_id=request.project_id,
+                dialux=dialux, dialux_executor=dialux_executor, project_id=request.project_id,
             )
         except Exception as error:
             LOGGER.exception("Failed to initialize lighting agent")

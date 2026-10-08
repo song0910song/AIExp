@@ -9,6 +9,7 @@
 - `dialux-result.json` 是固定的结构化仿真结果快照。
 - `synthetic-bridge-luminaire.ies` 仅用于人工 DIALux 桥接验证；不是商用灯具或设计数据。
 - `bridge-spatial-model.json` 是桥接测试共享的合成单房间模型；其中确认状态仅用于测试，`a` 重复构成的 CAD 哈希是占位符。`scripts/prepare_dialux_bridge.py` 生成对应 DXF 并替换为实际哈希，输出独立 IFC/IES 输入包。
+- `room-summary-5.14-zh.txt` 保留阶段 0 实际两页 PDF 的关键行与分页，压缩空行用于固定模板解析回归；原始 PDF SHA256 为 `effb5c21808d571ee262864558f823813bbfd16634b4813031e9e22d1bc27f12`。测试此文本不构成新的 DIALux 实机运行。
 
 项目输入只作为测试数据，不代表任何项目的合规结论。
 合成光度文件只验证导入/计算/导出链路，不得用于照明方案、产品选型或合规结论。

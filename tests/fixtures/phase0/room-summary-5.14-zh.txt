@@ -1,0 +1,35 @@
+bridge
+
+IFC bridge fixture · 1F · 101 - Bridge test room (灯光场景 1)
+摘要
+
+ 地面                 24.00 m²
+ 反射系数               天花板: 70.0 %,         安装高度               2.500 m
+                    墙壁: 50.0 %,
+                    地板: 20.0 %           高度 工作面             0.800 m
+ 维护系数               0.80 (一般情况)          边缘区 工作面            0.500 m
+                                                                      1
+bridge
+
+IFC bridge fixture · 1F · 101 - Bridge test room (灯光场景 1)
+摘要
+结果
+                               尺寸                     计算                        目标                       合格          索引
+工作面                            Ē直角                    23.2 lx                   ≥ 500 lx                             WP1
+                               Uo (g1)                0.46                      ≥ 0.60                               WP1
+                               照明功率密度                 0.67 W/m²                 –
+                                                      2.87 W/m²/100 lx          –
+眩光评估(1)                        RUG, max               22                        ≤ 19
+能耗估算(2)                        消耗量                    24.8 kWh/a                最大. 850 kWh/a
+空间                             照明功率密度                 0.42 W/m²                 –
+                                                      1.79 W/m²/100 lx          –
+(1) 基于 6.000 m x 4.000 m 的矩形空间和 0.25 的 SHR
+(2) 使用 DIN:18599-4 计算
+应用场所: DIALux 预设 (34.2 标准（办公室）)
+灯具列表
+ 件数      制造商             产品编号        品名                                                  RUG    P        Φ         发光效率
+ 1       NOT A      SYNTHET Isotropic test source for DIALux bridge validation only        22   10.0 W   1000 lm   100.0
+         COMMERCIAL IC-                                                                                            lm/W
+         PRODUCT    1000LM
+                                                                                                                           2
+

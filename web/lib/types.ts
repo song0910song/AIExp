@@ -104,6 +104,9 @@ export type Luminaire = {
   ugr: number | null;
   image_url: string | null;
   detail_url: string;
+  dialux_protocol_url?: string | null;
+  has_uld?: boolean;
+  has_photometry_download?: boolean;
   detail_fields: Record<string, string>;
   matching_status: "matches" | "incomplete" | "rejected";
 };

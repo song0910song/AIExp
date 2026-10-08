@@ -1,4 +1,4 @@
-"""A read-only, tool-grounded lighting knowledge assistant."""
+"""A tool-grounded lighting knowledge assistant with explicit DIALux handoff actions."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ def build_agent(
     projects: Any,
     evidence: Any,
     dialux: Any,
+    dialux_executor: Any | None = None,
     project_id: str | None = None,
 ) -> Any:
     settings = settings or Settings()
@@ -50,7 +51,7 @@ def build_agent(
         model=model,
         tools=make_tools(
             projects=projects, evidence=evidence, dialux=dialux, project_id=project_id,
-            vision_model=vision_model,
+            vision_model=vision_model, dialux_executor=dialux_executor,
         ),
         system_prompt=SYSTEM_PROMPT,
     )

@@ -69,6 +69,8 @@ class Settings:
     dialux_min_request_interval_seconds: float = float(os.getenv("DIALUX_MIN_REQUEST_INTERVAL_SECONDS", "0.05"))
     dialux_circuit_failure_threshold: int = int(os.getenv("DIALUX_CIRCUIT_FAILURE_THRESHOLD", "4"))
     dialux_circuit_cooldown_seconds: float = float(os.getenv("DIALUX_CIRCUIT_COOLDOWN_SECONDS", "60"))
+    dialux_download_max_bytes: int = int(os.getenv("DIALUX_DOWNLOAD_MAX_BYTES", str(50 * 1024 * 1024)))
+    dialux_executable: str | None = os.getenv("DIALUX_EXECUTABLE")
 
     rag_backend: str = os.getenv("LIGHTING_RAG_BACKEND", "chroma")
     embedding_model: str = os.getenv("LIGHTING_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
