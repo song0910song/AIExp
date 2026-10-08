@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from io import BytesIO, StringIO
+from io import StringIO
 from types import SimpleNamespace
 
 import ezdxf
@@ -44,7 +44,7 @@ def environment(tmp_path):
     evidence = LocalEvidenceStore(tmp_path / "evidence.sqlite3")
     app = create_app(
         project_store=projects, evidence_store=evidence, dialux_api=Catalogue(),
-        user_documents_directory=tmp_path / "documents",
+        user_documents_directory=tmp_path / "documents", vision_model=False,
     )
     return TestClient(app), projects, evidence
 
@@ -80,31 +80,6 @@ def test_route_inventory_only_exposes_four_capabilities(environment):
         "init-project", "show-project", "analyze-cad", "add-document",
         "search-evidence", "search-luminaires",
     }
-
-
-def test_cad_upload_keeps_geometry_unconfirmed_until_user_selects_it(environment):
-    client, projects, _ = environment
-    project = client.post("/api/projects", json={"project_name": "Room"}).json()
-    project_id = project["project_id"]
-    response = client.post(
-        f"/api/projects/{project_id}/floor-plan",
-        data={"expected_revision": "0"},
-        files={"file": ("room.dxf", BytesIO(drawing()), "application/dxf")},
-    )
-    assert response.status_code == 201, response.text
-    uploaded = response.json()["project"]
-    assert uploaded["floor_plan"]["area_candidates"][0]["area_m2"] == 20
-    assert uploaded["floor_plan"]["selected_area_candidate_index"] is None
-    assert projects.get(project_id).brief.area_m2 is None
-
-    confirmed = client.put(
-        f"/api/projects/{project_id}/floor-plan/selection",
-        params={"expected_revision": uploaded["revision"], "candidate_index": 0},
-    )
-    assert confirmed.status_code == 200, confirmed.text
-    assert confirmed.json()["floor_plan"]["selected_area_candidate_index"] == 0
-    assert projects.get(project_id).brief.area_m2 == 20
-    assert "area_m2" in projects.get(project_id).brief.confirmed_fields
 
 
 def test_project_documents_are_private_but_global_documents_are_searchable(environment):
@@ -255,7 +230,7 @@ def test_chat_rejects_another_projects_session(environment, monkeypatch):
         ),
     )
     client = TestClient(web_api.create_app(
-        project_store=projects, evidence_store=evidence, dialux_api=Catalogue(),
+        project_store=projects, evidence_store=evidence, dialux_api=Catalogue(), vision_model=False,
     ))
     project_one = client.post("/api/projects", json={"project_name": "First"}).json()["project_id"]
     project_two = client.post("/api/projects", json={"project_name": "Second"}).json()["project_id"]
@@ -278,6 +253,37 @@ def test_chat_rejects_another_projects_session(environment, monkeypatch):
     session_id = response.json()["session_id"]
     assert client.get(f"/api/chat/{session_id}", params={"project_id": project_two}).status_code == 404
     assert client.get(f"/api/chat/{session_id}", params={"project_id": project_one}).json()["messages"]
+
+
+def test_chat_hides_raw_cad_decisions_from_non_stream_answer(environment, monkeypatch):
+    from lighting_agent import web_api
+
+    _, projects, evidence = environment
+    monkeypatch.setattr(web_api, "Settings", lambda: SimpleNamespace(
+        llm_api_key="test", llm_model="test", rag_backend="local",
+        chat_session_max_messages=80, chat_session_ttl_hours=168, agent_max_steps=12,
+        llm_context_window_tokens=8192, llm_context_window_estimated=False,
+        supported_reasoning_efforts=lambda: ("medium",),
+        default_reasoning_effort=lambda: "medium", prompt_cache_options=lambda: None,
+        with_reasoning_effort=lambda effort: SimpleNamespace(llm_reasoning_effort=effort),
+    ))
+    project = projects.create(DesignBrief(project_name="Sanitize"))
+    raw = ('识别完成：{"candidate_id":"room-internal","action":"exclude",'
+           '"confidence":0.99,"evidence":["小面积"],"rationale":"非空间"}。')
+
+    monkeypatch.setattr(web_api, "build_agent", lambda *args, **kwargs: SimpleNamespace(
+        invoke=lambda *args, **kwargs: {"messages": [SimpleNamespace(content=raw)]},
+    ))
+    client = TestClient(web_api.create_app(
+        project_store=projects, evidence_store=evidence, dialux_api=Catalogue(), vision_model=False,
+    ))
+    response = client.post("/api/chat", json={"project_id": project.project_id, "message": "查看图纸"})
+    assert response.status_code == 200, response.text
+    answer = response.json()["answer"]
+    assert answer.startswith("识别完成：") and answer.endswith("。")
+    assert "room-internal" not in answer
+    assert "candidate_id" not in answer
+    assert "图纸识别结果已整理" in answer
 
 
 def test_stream_chat_shows_tool_progress_and_persists_history(environment, monkeypatch):
@@ -310,16 +316,22 @@ def test_stream_chat_shows_tool_progress_and_persists_history(environment, monke
                 content=json.dumps({"evidence": [{"source": "standard.md"}]}),
                 tool_call_id="call-1", name="search_evidence",
             )]}}
-            yield "messages", (AIMessageChunk(content="照明"), {})
+            yield "messages", (AIMessageChunk(content="图纸已读取："), {})
             yield "messages", (AIMessageChunk(
-                content="规范", usage_metadata={"input_tokens": 4096, "output_tokens": 2, "total_tokens": 4098},
+                content='{"candidate_id":"internal-1","action":"exclude","confidence":0.99,'
+                        '"evidence":["小面积"],"rationale":"内部判断"},\n'
+                        '{"candidate_id":"internal-2","action":"exclude"}',
+            ), {})
+            yield "messages", (AIMessageChunk(
+                content="识别结果已整理。",
+                usage_metadata={"input_tokens": 4096, "output_tokens": 2, "total_tokens": 4098},
             ), {})
 
         return SimpleNamespace(stream=stream)
 
     monkeypatch.setattr(web_api, "build_agent", fake_agent)
     client = TestClient(web_api.create_app(
-        project_store=projects, evidence_store=evidence, dialux_api=Catalogue(),
+        project_store=projects, evidence_store=evidence, dialux_api=Catalogue(), vision_model=False,
     ))
     response = client.post("/api/chat/stream", json={
         "project_id": project.project_id, "message": "照度要求？", "reasoning_effort": "high",
@@ -330,23 +342,26 @@ def test_stream_chat_shows_tool_progress_and_persists_history(environment, monke
         (block.split("\n")[0][7:], json.loads(block.split("\ndata: ", 1)[1]))
         for block in response.text.strip().split("\n\n")
     ]
-    assert [name for name, _ in events] == ["session", "tool", "tool", "delta", "delta", "done"]
+    assert [name for name, _ in events] == ["session", "tool", "tool", "delta", "done"]
     assert events[1][1]["status"] == "running"
     assert events[2][1]["summary"] == "检索到 1 条资料"
-    assert events[3][1]["text"] + events[4][1]["text"] == "照明规范"
+    answer = events[3][1]["text"]
+    assert answer.startswith("图纸已读取：") and answer.endswith("识别结果已整理。")
+    assert answer.count("图纸识别结果已整理") == 1
+    assert all(token not in answer for token in ("candidate_id", "confidence", "rationale", "internal-1"))
     assert events[-1][1]["context_usage"] == {
         "input_tokens": 4096, "window_tokens": 8192, "percentage": 50.0, "estimated": False,
     }
     session_id = events[-1][1]["session_id"]
     history = client.get(f"/api/chat/{session_id}", params={"project_id": project.project_id}).json()
-    assert history["messages"][-1]["content"] == "照明规范"
+    assert history["messages"][-1]["content"] == answer
     assert history["messages"][-1]["tool_calls"][0]["status"] == "completed"
     assert history["messages"][-1]["context_usage"]["percentage"] == 50.0
     client.post("/api/chat/stream", json={
         "project_id": project.project_id, "message": "还有呢？", "session_id": session_id,
         "reasoning_effort": "high",
     })
-    assert received[1][1] == {"role": "assistant", "content": "照明规范"}
+    assert received[1][1] == {"role": "assistant", "content": answer}
     assert "tool_calls" not in received[1][1]
 
 
@@ -369,7 +384,7 @@ def test_stream_error_does_not_store_incomplete_answer(environment, monkeypatch)
 
     monkeypatch.setattr(web_api, "build_agent", lambda *args, **kwargs: SimpleNamespace(stream=stream))
     client = TestClient(web_api.create_app(
-        project_store=projects, evidence_store=evidence, dialux_api=Catalogue(),
+        project_store=projects, evidence_store=evidence, dialux_api=Catalogue(), vision_model=False,
     ))
     response = client.post("/api/chat/stream", json={"project_id": project.project_id, "message": "你好"})
     assert "event: error" in response.text

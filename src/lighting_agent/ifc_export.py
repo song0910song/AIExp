@@ -27,6 +27,7 @@ from .spatial_model import REQUIRED_ROOM_FIELDS
 
 
 IFC_SCHEMA = "IFC4"
+MAX_IFC_PROFILE_VERTICES = 50_000
 
 
 class IfcExportError(ValueError):
@@ -196,6 +197,7 @@ def _validate_export_scope(model: SpatialModel) -> tuple[SpatialRoom, list[Spati
     if room.ceiling_height_m > room.height_m:
         raise IfcExportError(f"房间 {room.room_id} 吊顶高度不能高于层高")
     elements = [element for element in model.elements if element.status != "excluded"]
+    room_polygon = _room_polygon(room, model.meters_per_unit)
     for element in elements:
         if element.status != "confirmed":
             raise IfcExportError(f"构件 {element.element_id} 尚未确认")
@@ -211,6 +213,13 @@ def _validate_export_scope(model: SpatialModel) -> tuple[SpatialRoom, list[Spati
     if wrong_room:
         names = ", ".join(element.name or element.element_id for element in wrong_room)
         raise IfcExportError(f"构件不属于唯一导出房间：{names}")
+    for element in elements:
+        if element.elevation_m < room.elevation_m - 1e-7 or \
+                element.elevation_m + element.height_m > room.elevation_m + room.ceiling_height_m + 1e-7:
+            raise IfcExportError(f"构件 {element.name or element.element_id} 超出房间垂直范围")
+        footprint = _element_polygon(element, model.meters_per_unit)
+        if not room_polygon.buffer(1e-7).covers(footprint):
+            raise IfcExportError(f"构件 {element.name or element.element_id} 超出房间边界")
     return room, elements
 
 
@@ -226,6 +235,11 @@ def _room_polygon(room: SpatialRoom, meters_per_unit: float) -> Polygon:
 
 def _profile(document: Any, polygon: Polygon, name: str) -> Any:
     polygon = orient(polygon, sign=1.0)
+    vertex_count = sum(len(ring.coords) - 1 for ring in (polygon.exterior, *polygon.interiors))
+    if vertex_count > MAX_IFC_PROFILE_VERTICES:
+        raise IfcExportError(
+            f"IFC 几何 {name} 有 {vertex_count} 个轮廓顶点，超过安全上限 {MAX_IFC_PROFILE_VERTICES}"
+        )
     outer = _polyline(document, list(polygon.exterior.coords))
     if polygon.interiors:
         inner = tuple(_polyline(document, list(ring.coords)) for ring in polygon.interiors)
@@ -366,11 +380,7 @@ def _create_element(
 ) -> None:
     if len(element.footprint) < 3 or element.height_m is None:
         raise IfcExportError(f"构件 {element.element_id} 缺少可生成实体的边界或高度")
-    polygon = Polygon(
-        [(point.x * model.meters_per_unit, point.y * model.meters_per_unit) for point in element.footprint]
-    )
-    if not polygon.is_valid or polygon.area <= 0:
-        raise IfcExportError(f"构件 {element.name or element.element_id} 几何无效")
+    polygon = _element_polygon(element, model.meters_per_unit)
     classes = {
         "column": "IfcColumn",
         "furniture": "IfcFurniture",
@@ -438,3 +448,14 @@ def _assign_source_pset(
 def _assign_pset(document: Any, product: Any, name: str, properties: dict[str, Any]) -> None:
     pset = ifcopenshell.api.pset.add_pset(document, product=product, name=name)
     ifcopenshell.api.pset.edit_pset(document, pset=pset, properties=properties)
+
+
+def _element_polygon(element: SpatialElement, meters_per_unit: float) -> Polygon:
+    polygon = Polygon(
+        [(point.x * meters_per_unit, point.y * meters_per_unit) for point in element.footprint],
+        [[(point.x * meters_per_unit, point.y * meters_per_unit) for point in ring]
+         for ring in element.holes],
+    )
+    if not polygon.is_valid or polygon.area <= 0:
+        raise IfcExportError(f"构件 {element.name or element.element_id} 几何无效")
+    return orient(polygon, sign=1.0)

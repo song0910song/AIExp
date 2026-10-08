@@ -14,7 +14,7 @@
 
 用户已于 2026-10-06 确认：目标 3 只计算人工照明，不包含自然光计算。
 
-目前限定 Windows、DIALux 文件版本 `5.14.0.3`、中文界面。执行器包含固定合成 envelope profile，以及受控的通用 DXF/DWG profile：真实 CAD 的空间纳入/排除及语义由模型自动判断，单楼层、无孔、正交闭合模型通过校验后自动执行；源 CAD 哈希和模型判定均进入任务绑定。曲线、孔洞、斜墙、多楼层、重叠边界和无法唯一确定门窗宿主的模型自动阻断，不会自动近似。原生重算配置把已验收工程复制到每次尝试的独立目录，重新计算并回收真实输出。
+目前限定 Windows、DIALux 文件版本 `5.14.0.3`、中文界面。执行器包含固定合成 envelope profile，以及受控的通用 DXF/DWG profile：真实 CAD 的空间纳入/排除及语义由模型自动判断，源 CAD 哈希和模型判定均进入任务绑定。通用 IFC 几何现可保留单房间的曲线采样边界（1 mm 弦高容差）、孔洞、斜墙、闭合不规则家具/柱体，以及经过间距/重叠校验的同层多房间不规则围护。跨楼层、房间重叠或墙厚关系含糊、复杂房间门窗宿主不明确的模型仍阻断。IFC 几何通过本地序列化/实体几何测试不等同 DIALux 已接受；目标版本的复杂几何实机导入和计算仍需验收。原生重算配置把已验收工程复制到每次尝试的独立目录，重新计算并回收真实输出。
 
 原生重算配置的执行顺序：
 
@@ -26,7 +26,7 @@
 6. 重新运行 DIALux 光线追踪并导出 JPEG。
 7. 切换到另一工程后重新打开本次 `.evo`，核对结果仍一致，最后写入成果哈希。
 
-原生重算配置通过已验收原生模板固定几何、IES、布灯和计算面设置，模板文件哈希固定。IFC/IES 配置限定为固定合成双房间、共墙、关闭不透明门、测试玻璃和两灯布局；通用 profile 的 IFC 由模型自主判断且通过几何校验的 CAD 空间模型生成，单房间正交轮廓使用标准 IFC 导出器。编辑 job 中的布局/条件不能代替实际修改 DIALux 工程；扩展配置须有独立实机验收。
+原生重算配置通过已验收原生模板固定几何、IES、布灯和计算面设置，模板文件哈希固定。IFC/IES 配置限定为固定合成双房间、共墙、关闭不透明门、测试玻璃和两灯布局；通用 profile 的 IFC 由模型自主判断且通过几何校验的 CAD 空间模型生成，单房间任意平面轮廓使用标准 IFC 挤出剖面导出。编辑 job 中的布局/条件不能代替实际修改 DIALux 工程；扩展配置须有独立实机验收。
 
 ## 运行
 
@@ -48,20 +48,19 @@ uv run -m lighting_agent.dialux_runner run data/dialux-runs/new-envelope-job
 
 ### 使用真实 DXF/DWG 房间
 
-`prepare-real-cad` 会先重新读取原始 DXF/DWG，再由模型分析全部空间候选、图面文字和渲染图，自动选择本次设计空间并为排除候选写明理由。原始候选均保留以供追溯；只有通过实体白名单与语义判断的注释实体（如 `ACAD_TABLE`）可排除在 IFC 几何之外。未知实体、外部参照、模型冲突和几何错误自动阻断任务并归档诊断，不要求用户预选候选。
+真实 CAD 必须先经应用中的多模态自动分析和确定性校验。应用只有在 `SpatialModel.automation_status=auto_confirmed`、IFC 范围可安全表达且 DIALux 输入无歧义时才会准备并启动任务。旧的 `prepare-real-cad --candidate-index` 人工选择入口已删除，避免绕过模型判断。
+
+`prepare-generic` 仅接受已自动确认并保存的空间模型 JSON；不得手工挑选房间或把 pending 模型当作已审核模型。
 
 ```powershell
-uv run -m lighting_agent.dialux_runner prepare-real-cad `
-  --cad tests/fixtures/phase0/sample-room.dxf `
-  --photometry tests/fixtures/phase0/synthetic-bridge-luminaire.ies `
-  --output data/dialux-runs/real-cad-sample-20261007-v2 `
-  --dialux F:/dlalux/DIALux_x64.exe `
-  --project-name "Real CAD sample room" --project-id real-cad-sample `
-  --model-analysis auto --analysis-model <configured-vision-model>
-uv run -m lighting_agent.dialux_runner run data/dialux-runs/real-cad-sample-20261007-v2
+uv run -m lighting_agent.dialux_runner prepare-generic `
+  --cad <original.dxf> --model <auto-confirmed-spatial-model.json> `
+  --photometry <fixture.ies> --output <job-directory> `
+  --dialux <DIALux_x64.exe> --project-name "CAD lighting" --project-id cad-lighting
+uv run -m lighting_agent.dialux_runner run <job-directory>
 ```
 
-任务包中的 `model_decisions`、模型/假设哈希、`source_cad_sha256`、`spatial-model.json` 和 `bridge.ifc` 共同绑定自动判断。任务通过验证后，CLI/API 自动启动 DIALux；IFC 导入、计算、PDF、光线追踪和重开结果仍按同一桌面验收链执行。
+应用在线主流程在任务验证通过后自动启动 DIALux；单独运行 CLI 的 `run` 命令仍用于桌面执行器维护和恢复。
 
 ### 原生模板重算
 
@@ -124,7 +123,7 @@ PDF 内置办公室目标不是用户确认的规范，结构化结果的合规�
 ## 已验收与边界
 
 - 固定双房间 envelope profile 已完成 IFC 导入、共墙、门窗宿主、关闭门、显式玻璃光学参数、两灯人工照明计算、双 PDF、光线追踪和工程重开验收。
-- 通用 profile 已通过一份真实 DXF 的单房间实机验收；它仍不是任意真实项目执行器。复杂墙体、非矩形房间、任意 CAD、任意厂家 IES、更多灯具和更多房间仍需单独验收。
+- 通用 profile 已通过一份正交真实 DXF 的单房间实机验收；它仍不是任意真实项目执行器。代码现支持导出单房间复杂轮廓和不规则闭合构件，但曲线/孔洞/斜墙的 DIALux 实机导入计算、任意 CAD、任意厂家 IES、更多灯具和更多房间仍需单独验收。
 - 真实 CAD 的候选核对、显式排除、源哈希、IFC 生成、确认规则和人工照明计算设置均有任务级绑定。
 - 有次数/时间上限的布局优化与每次迭代独立计算。
 - 通用 profile 已接入智能体/API 的准备、确认、启动和结果回收；独立 CLI 仍可单独执行同一验证链。
@@ -142,9 +141,9 @@ PDF 内置办公室目标不是用户确认的规范，结构化结果的合规�
 3. 任务绑定项目 CAD 哈希、模型判断/假设哈希、空间模型、IFC4、光度文件哈希、布局、计算设置和 DIALux 版本；灯具光度数据可使用本地 IES/LDT/ULD，或从官方 `dial://` 缓存 ULD。
 4. 系统自动调用 `start_dialux_run`，执行器在独立 Windows 桌面会话中启动 DIALux；`get_dialux_run` 返回状态和已归档结果。
 
-通用 profile 当前采用模型自动判断和确定性门控：闭合、无孔、正交轮廓（矩形或阶梯形）和单楼层模型由模型自动选入/排除并在校验通过后执行；曲线、孔洞、斜墙、多楼层、重叠边界或门窗无法唯一宿主时自动阻断并返回原因。阻断项不会被自动近似为矩形，也不会等待人工预确认后越过硬校验。
+通用 profile 当前采用模型自动判断和确定性门控：矩形多房间仍使用已验证的共享墙 envelope；单房间曲线按 1 mm 弦高容差展成 IFC 轮廓，孔洞和斜墙保留原始多边形，不规则闭合家具/柱体保留外边界及内孔；同层、不重叠且墙间距无歧义的多房间不规则轮廓生成真实多边形围护墙。复杂房间含门窗时因宿主关系尚无目标版本验收而阻断。准备出的 IFC 仍必须通过版本绑定、几何校验及 DIALux 原始导入报告检查，实际计算必须由 DIALux 完成。多楼层、重叠边界、墙厚关系含糊、门窗宿主不唯一及无效/超限轮廓仍阻断；不会以外包矩形替代复杂房间。
 
-真实 CAD 扩展当前仍仅验收单房间无孔正交闭合轮廓（包括保留原始顶点的阶梯形轮廓），不把它强行变成外包矩形；门窗元素在未完成独立宿主验收前由规则引擎自动阻断该 profile。此限制与模型自主判断不冲突：模型只能决定空间语义和范围，不能授权执行器越过未验收的 IFC 几何能力。
+真实 CAD 实机验收目前仍只有单房间无孔正交闭合轮廓（包括保留原始顶点的阶梯形轮廓）。复杂几何已通过 IFC 生成、几何实体和自动化回归测试，但尚未完成 DIALux 5.14.0.3 导入/计算验收；因此运行时仍以 DIALux 原始报告为硬门槛，失败就进入 `needs_attention`。门窗元素仅在矩形 envelope profile 可唯一确定墙体宿主时支持。
 
 布局优化是有界的真实计算流程。系统最多生成 8 个确定性候选，每个候选使用独立不可变任务包并由 DIALux 重新计算；平均照度和均匀度是硬约束，未找到可行候选时结果标记为 `no_feasible_candidate`。功率和灯具数量只有在 DIALux 返回可验证字段后才能作为次级目标，不能由几何估算冒充。
 

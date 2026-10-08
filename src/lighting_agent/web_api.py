@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -17,7 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import Field
 from starlette.concurrency import run_in_threadpool
 
-from .agent import SYSTEM_PROMPT, build_agent
+from .agent import SYSTEM_PROMPT, build_agent, create_vision_model
 from .config import (
     REASONING_EFFORT_METADATA, Settings, USER_DOCUMENTS_DIRECTORY, ensure_data_directories,
 )
@@ -26,7 +25,6 @@ from .dialux_service import DialuxExecutionService, DialuxRunNotFoundError
 from .dialux_protocol import DialuxProtocolError, open_in_dialux
 from .document_loader import DocumentLoadError, load_document
 from .floor_plan import MAX_DRAWING_BYTES, FloorPlanParseError, parse_floor_plan
-from .cad_auto_analysis import apply_model_analysis
 from .legacy_migration import migrate_legacy_workspaces
 from .project_store import ProjectNotFoundError, ProjectStore, RevisionConflictError
 from .rag import EvidenceNotFoundError, create_evidence_store, public_locator
@@ -107,6 +105,8 @@ class ChatSessionStore:
             if not isinstance(item.get("content"), str):
                 continue
             message = {"role": item["role"], "content": item["content"]}
+            if item["role"] == "assistant":
+                message["content"] = _sanitize_assistant_content(message["content"])
             if item["role"] == "assistant" and isinstance(item.get("tool_calls"), list):
                 message["tool_calls"] = item["tool_calls"]
             if item["role"] == "assistant" and isinstance(item.get("context_usage"), dict):
@@ -116,7 +116,13 @@ class ChatSessionStore:
 
     def save(self, session_id: str, project_id: str | None, messages: list[dict[str, Any]]) -> None:
         now = datetime.now(UTC)
-        payload = json.dumps(messages[-max(1, self.settings.chat_session_max_messages):], ensure_ascii=False)
+        normalized = [
+            {**item, "content": _sanitize_assistant_content(item["content"])}
+            if item.get("role") == "assistant" and isinstance(item.get("content"), str)
+            else item
+            for item in messages
+        ]
+        payload = json.dumps(normalized[-max(1, self.settings.chat_session_max_messages):], ensure_ascii=False)
         with self.database.transaction() as connection:
             connection.execute(
                 """INSERT INTO chat_sessions
@@ -230,6 +236,100 @@ def _message_text(content: Any) -> str:
     return ""
 
 
+def _contains_internal_cad_decision(value: Any) -> bool:
+    """Return whether a decoded value contains model-only CAD decisions.
+
+    Candidate IDs, confidence values and evidence are useful to the validator,
+    but are implementation details rather than chat content.  Keep this check
+    deliberately narrow so ordinary JSON used in a design answer is preserved.
+    """
+    if isinstance(value, dict):
+        keys = set(value)
+        if {"candidate_id", "action"}.issubset(keys):
+            return True
+        return any(_contains_internal_cad_decision(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_internal_cad_decision(item) for item in value)
+    return False
+
+
+def _balanced_json_fragments(content: str) -> list[tuple[int, int, Any]]:
+    """Find balanced JSON objects/arrays embedded in otherwise natural text."""
+    fragments: list[tuple[int, int, Any]] = []
+    for start, opening in enumerate(content):
+        if opening not in "[{":
+            continue
+        closing = "]" if opening == "[" else "}"
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(content)):
+            character = content[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == '"':
+                    in_string = False
+                continue
+            if character == '"':
+                in_string = True
+            elif character == opening:
+                depth += 1
+            elif character == closing:
+                depth -= 1
+                if depth == 0:
+                    try:
+                        value = json.loads(content[start:index + 1])
+                    except (TypeError, ValueError):
+                        break
+                    fragments.append((start, index + 1, value))
+                    break
+    return fragments
+
+
+def _sanitize_assistant_content(content: str) -> str:
+    """Hide raw multimodal CAD decisions from the owner-facing chat.
+
+    The model is instructed to explain tool results in natural language, but a
+    provider may still echo a tool payload.  Sanitize at the API boundary as a
+    last line of defence; the structured decision remains persisted only in the
+    spatial model/audit data.
+    """
+    if not content or not isinstance(content, str):
+        return content
+    replacement = "图纸识别结果已整理，请查看图纸工作区中的空间范围和待确认事项。"
+    fragments = _balanced_json_fragments(content)
+    candidates = [fragment for fragment in fragments if _contains_internal_cad_decision(fragment[2])]
+    suspicious: list[tuple[int, int, Any]] = []
+    for fragment in candidates:
+        if suspicious and fragment[0] < suspicious[-1][1]:
+            continue
+        suspicious.append(fragment)
+    if not suspicious:
+        return content
+    groups: list[tuple[int, int]] = []
+    for start, end, _value in suspicious:
+        if groups and all(char.isspace() or char == "," for char in content[groups[-1][1]:start]):
+            groups[-1] = (groups[-1][0], end)
+        else:
+            groups.append((start, end))
+    output: list[str] = []
+    cursor = 0
+    for start, end in groups:
+        prefix = content[cursor:start]
+        if prefix.strip():
+            output.append(prefix)
+        output.append(replacement)
+        cursor = end
+    output.append(content[cursor:])
+    result = "".join(output)
+    # Avoid leaving a large run of punctuation/blank lines around a replaced
+    # JSON array, while preserving any natural-language answer around it.
+    return result.replace("\n\n\n", "\n\n").strip()
+
+
 def _tool_result_summary(name: str, content: Any) -> str:
     try:
         result = json.loads(content) if isinstance(content, str) else content
@@ -240,11 +340,8 @@ def _tool_result_summary(name: str, content: Any) -> str:
             return f"检索到 {len(result['evidence'])} 条资料"
         if name == "analyze_floor_plan":
             if result.get("status") == "vision_analyzed":
-                return f"已完成图面识别，检测到 {result.get('parsed_room_count', 0)} 个空间候选"
-            return "图面视觉识别未完成"
-        if name == "analyze_floor_plan":
-            if result.get("status") == "vision_analyzed":
-                return f"已完成图面识别，检测到 {result.get('parsed_room_count', 0)} 个空间候选"
+                analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else {}
+                return f"已完成图面识别，检测到 {analysis.get('room_count', 0)} 个空间候选"
             return "图面视觉识别未完成"
         if name == "search_luminaires" and isinstance(result.get("candidates"), list):
             return f"找到 {len(result['candidates'])} 款灯具"
@@ -291,6 +388,7 @@ def create_app(
     evidence_store: Any | None = None,
     dialux_api: DialuxAPI | None = None,
     user_documents_directory: Path | None = None,
+    vision_model: Any | None = None,
 ) -> FastAPI:
     ensure_data_directories()
     projects = project_store or ProjectStore()
@@ -302,6 +400,8 @@ def create_app(
     evidence = global_evidence
     dialux = dialux_api or DialuxAPI()
     settings = Settings()
+    cad_vision_model = (None if vision_model is False else
+                        vision_model if vision_model is not None else create_vision_model(settings))
     dialux_executor = DialuxExecutionService(projects, settings=settings, dialux_api=dialux)
     sessions = ChatSessionStore(projects.database_path, settings)
     documents_root = user_documents_directory or USER_DOCUMENTS_DIRECTORY
@@ -396,10 +496,17 @@ def create_app(
             await run_in_threadpool(target.write_bytes, content)
         try:
             plan = await run_in_threadpool(parse_floor_plan, target, storage_path=target.relative_to(root).as_posix())
-            # CAD parsing is deterministic; model analysis is applied when a
-            # vision model is available. Without it the project remains
-            # explicitly attention-required and never enters DIALux.
             updated = projects.set_floor_plan(project_id, expected_revision, plan, None)
+            analysis = None
+            if cad_vision_model is not None:
+                from .tools import make_tools
+
+                analyzer = next(item for item in make_tools(
+                    projects=projects, evidence=evidence, dialux=dialux, project_id=project_id,
+                    vision_model=cad_vision_model, dialux_executor=dialux_executor,
+                ) if item.name == "analyze_floor_plan")
+                analysis = await run_in_threadpool(analyzer.invoke, {})
+                updated = projects.get(project_id)
         except (FloorPlanParseError, ValueError) as error:
             if not existed:
                 target.unlink(missing_ok=True)
@@ -408,7 +515,8 @@ def create_app(
             if not existed:
                 target.unlink(missing_ok=True)
             raise
-        return {"floor_plan": plan.model_dump(mode="json"), "project": _project_view(updated)}
+        return {"floor_plan": updated.floor_plan.model_dump(mode="json"), "analysis": analysis,
+                "project": _project_view(updated)}
 
     @app.put("/api/projects/{project_id}/floor-plan/selection")
     def select_floor_plan_area(project_id: str, expected_revision: int, candidate_index: int) -> dict[str, Any]:
@@ -661,7 +769,7 @@ def create_app(
                 config={"recursion_limit": max(4, settings.agent_max_steps)},
             )
             final = response["messages"][-1]
-            answer = _message_text(final.content)
+            answer = _sanitize_assistant_content(_message_text(final.content))
             tokens = (getattr(final, "usage_metadata", None) or {}).get("input_tokens")
             usage = _context_usage(tokens, settings, [*history, current])
         except Exception as error:
@@ -722,7 +830,6 @@ def create_app(
                                 delta = _message_text(message.content)
                                 if delta:
                                     answer_parts.append(delta)
-                                    yield _sse("delta", {"text": delta})
                     elif mode == "updates":
                         for update in chunk.values():
                             for message in update.get("messages", []):
@@ -745,7 +852,6 @@ def create_app(
                                         fallback = _message_text(message.content)
                                         if fallback:
                                             answer_parts.append(fallback)
-                                            yield _sse("delta", {"text": fallback})
                                 elif getattr(message, "type", None) == "tool":
                                     tool_outputs.append(str(message.content))
                                     call_id = message.tool_call_id
@@ -757,7 +863,9 @@ def create_app(
                                             else _tool_result_summary(entry["name"], message.content)
                                         )
                                         yield _sse("tool", entry)
-                answer = "".join(answer_parts)
+                answer = _sanitize_assistant_content("".join(answer_parts))
+                if answer:
+                    yield _sse("delta", {"text": answer})
                 usage = _context_usage(input_tokens, settings, [*history, current], tool_outputs)
                 session_store.save(
                     session_id, request.project_id,

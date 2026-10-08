@@ -9,14 +9,14 @@ import threading
 from uuid import uuid4
 
 from .config import Settings
-from .dialux_runner.artifacts import RunError, RunStore, atomic_json, sha256
+from .dialux_runner.artifacts import RunError, atomic_json
 from .dialux_runner.generic_jobs import (
     GENERIC_PROFILE, auto_layout, generate_layout_candidates, prepare_generic_job,
     prepare_reviewed_model,
 )
 from .dialux_runner.runner import run_job
 from .schemas import (
-    DialuxGeometryAssumptions, DialuxLayoutItem, DialuxReadiness, DialuxRunRecord,
+    DialuxLayoutItem, DialuxReadiness, DialuxRunRecord,
     DialuxRunRequest, ProjectState,
 )
 
@@ -93,6 +93,12 @@ class DialuxExecutionService:
         if model is None:
             return DialuxReadiness(status="blocked", complexity="unknown", issues=["项目尚未确认空间模型"],
                                    assumptions=request.assumptions), None, []
+        if model.automation_status != "auto_confirmed":
+            return DialuxReadiness(
+                status="blocked", complexity="unknown",
+                issues=["CAD 模型尚未通过自动分析；禁止跳过模型判断启动 DIALux"],
+                assumptions=request.assumptions,
+            ), None, []
         effective, readiness = prepare_reviewed_model(
             model, request.assumptions, default_usage=state.brief.space_type,
             confirm=True,
@@ -109,7 +115,7 @@ class DialuxExecutionService:
             )
         if unsupported_optimization:
             readiness.issues.extend(unsupported_optimization)
-        layout = request.layout or (auto_layout(effective) if readiness.complexity == "simple" else [])
+        layout = request.layout or (auto_layout(effective) if readiness.can_prepare else [])
         candidate = self._luminaire(state, request.luminaire_id)
         readiness.luminaire_id = request.luminaire_id
         if candidate is not None:
@@ -134,14 +140,15 @@ class DialuxExecutionService:
             readiness.can_prepare = readiness.can_start = False
         else:
             readiness.issues.append("需要本地 IES、LDT 或 ULD 光度文件；产品目录链接不能替代计算文件")
-            readiness.status = "needs_confirmation" if readiness.complexity == "simple" else readiness.status
+            if readiness.can_prepare:
+                readiness.status = "needs_confirmation"
             readiness.can_prepare = False
             readiness.can_start = False
         if request.expected_revision != state.revision:
             readiness.issues.append(f"项目已更新，请重新读取当前版本（当前修订 {state.revision}）")
             readiness.status = "blocked"
             readiness.can_prepare = readiness.can_start = False
-        if not layout and readiness.complexity == "simple":
+        if not layout and readiness.can_prepare:
             readiness.issues.append("无法生成每个房间至少一盏灯的初始布局")
             readiness.can_prepare = readiness.can_start = False
         if unsupported_optimization:
@@ -150,7 +157,8 @@ class DialuxExecutionService:
         return readiness, effective, layout
 
     def prepare(self, project_id: str, request: DialuxRunRequest, *, run_id: str | None = None) -> DialuxRunRecord:
-        if request.expected_revision != self.projects.get(project_id).revision:
+        state_at_creation = self.projects.get(project_id)
+        if request.expected_revision != state_at_creation.revision:
             # Still create a diagnostic draft so the client can display why it
             # was rejected without losing the user's assumptions.
             pass
@@ -158,6 +166,9 @@ class DialuxExecutionService:
         record = DialuxRunRecord(
             run_id=run_id or uuid4().hex, project_id=project_id,
             status="draft", profile=GENERIC_PROFILE, readiness=readiness, request=request,
+            source_sha256=state_at_creation.floor_plan.asset.sha256 if state_at_creation.floor_plan else None,
+            model_analysis_sha256=(state_at_creation.floor_plan.spatial_model.analysis_sha256
+                                   if state_at_creation.floor_plan and state_at_creation.floor_plan.spatial_model else None),
         )
         self._save(record)
         if not readiness.can_prepare or effective is None:
@@ -224,6 +235,53 @@ class DialuxExecutionService:
         # as the immutable job has been prepared.  The start method is
         # idempotent for already queued/running/completed records.
         return self.start(project_id, record.run_id)
+
+    def auto_start(self, project_id: str) -> DialuxRunRecord:
+        """Start DIALux from an automatically approved model when input is unambiguous."""
+        state = self.projects.get(project_id)
+        model = self._state_model(state)
+        if model is None or model.automation_status != "auto_confirmed":
+            raise RunError("CAD model has not passed automatic validation")
+
+        for previous in self.list(project_id):
+            if (previous.source_sha256 == state.floor_plan.asset.sha256
+                    and previous.model_analysis_sha256 == model.analysis_sha256
+                    and previous.status in {"queued", "running", "completed"}):
+                return previous
+
+        light_root = self.projects.directory / f"{project_id}.photometry"
+        files = sorted(path for path in light_root.glob("*")
+                       if path.is_file() and path.suffix.casefold() in {".ies", ".ldt", ".uld"}) \
+            if light_root.is_dir() else []
+        candidates = [item for item in state.luminaires if self._candidate_has_uld(item)]
+        photometry_path = None
+        luminaire_id = None
+        issue = None
+        if len(files) == 1:
+            photometry_path = str(files[0].relative_to(self.projects.directory)).replace("\\", "/")
+        elif len(files) > 1:
+            if len(candidates) == 1:
+                # A unique catalogue luminaire gives us an unambiguous official
+                # ULD source even if unrelated local files are also present.
+                luminaire_id = candidates[0].luminaire_id
+            else:
+                issue = "Multiple photometry files are available; automatic selection is ambiguous"
+        elif len(candidates) == 1:
+            luminaire_id = candidates[0].luminaire_id
+        elif len(candidates) > 1:
+            issue = "Multiple DIALux luminaires are available; automatic selection is ambiguous"
+        else:
+            issue = "No IES/LDT/ULD photometry file or DIALux luminaire candidate is available"
+
+        request = DialuxRunRequest(expected_revision=state.revision,
+                                   photometry_path=photometry_path, luminaire_id=luminaire_id)
+        record = self.prepare(project_id, request)
+        if record.status == "draft":
+            record.status = "needs_attention"
+            record.error = issue or "; ".join(record.readiness.issues if record.readiness else []) or \
+                "DIALux job is not ready"
+            return self._save(record)
+        return record
 
     @staticmethod
     def _luminaire(state: ProjectState, luminaire_id: str | None):

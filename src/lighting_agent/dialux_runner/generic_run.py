@@ -1,4 +1,4 @@
-"""Desktop adapter for reviewed, simple DXF/DWG-derived IFC jobs."""
+"""Desktop adapter for reviewed DXF/DWG-derived IFC jobs."""
 from __future__ import annotations
 
 import math

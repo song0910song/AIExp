@@ -5,7 +5,7 @@ import re
 
 from shapely import Point, Polygon
 
-from .schemas import FieldProvenance, FloorPlan, SpatialModel, SpatialRoom
+from .schemas import FieldProvenance, FloorPlan, SpatialElement, SpatialModel, SpatialRoom
 
 REQUIRED_ROOM_FIELDS = ("floor", "number", "name", "usage", "elevation_m", "height_m",
                         "ceiling_height_m", "wall_reflectance", "ceiling_reflectance", "floor_reflectance")
@@ -16,6 +16,13 @@ def room_polygon(room: SpatialRoom) -> Polygon:
     if not polygon.is_valid or polygon.area <= 0:
         raise ValueError(f"房间 {room.room_id} 的边界自交、无效或面积为零")
     return polygon
+
+
+def element_polygon(element: SpatialElement) -> Polygon:
+    return Polygon(
+        [(point.x, point.y) for point in element.footprint],
+        [[(point.x, point.y) for point in ring] for ring in element.holes],
+    )
 
 
 def build_spatial_model(plan: FloorPlan, elements: list) -> SpatialModel:
@@ -32,7 +39,10 @@ def build_spatial_model(plan: FloorPlan, elements: list) -> SpatialModel:
     for element in elements:
         if not element.footprint:
             continue
-        centre = Point(sum(p.x for p in element.footprint) / len(element.footprint), sum(p.y for p in element.footprint) / len(element.footprint))
+        footprint = element_polygon(element)
+        if not footprint.is_valid or footprint.area <= 0:
+            continue
+        centre = footprint.representative_point()
         matches = [r for r in rooms if room_polygon(r).covers(centre)]
         if len(matches) > 1 and element.elevation_m is not None:
             matches = [r for r in matches if r.elevation_m is not None and abs(r.elevation_m - element.elevation_m) < .001]
@@ -49,7 +59,20 @@ def assess_model(model: SpatialModel, plan: FloorPlan) -> SpatialModel:
     if model.meters_per_unit is None:
         missing.append("图纸尺度待校准")
     if not plan.read_complete:
-        missing.append("CAD 未完整读取：请修复外部参照/不支持实体后重新导入")
+        read_reasons = []
+        if plan.external_references:
+            read_reasons.append(f"有 {len(plan.external_references)} 项外部参照未载入")
+        if plan.unsupported_entities:
+            kinds = "、".join(
+                f"{kind} × {count}" for kind, count in sorted(plan.unsupported_entities.items())
+            )
+            read_reasons.append(f"有未解析实体：{kinds}")
+        read_reasons.extend(
+            issue.message for issue in plan.issues
+            if issue.severity == "error" and issue.code not in {"external_reference", "unsupported_entity"}
+        )
+        reason = "；".join(dict.fromkeys(read_reasons)) or "仍有未解析内容"
+        missing.append(f"CAD 文件读取不完整：{reason}；修复或转换后重新导入")
     if not model.coverage_confirmed:
         missing.append("待逐房间核对遗漏、断口、重叠边界和候选排除范围")
     if not model.elements_reviewed:
@@ -88,7 +111,7 @@ def assess_model(model: SpatialModel, plan: FloorPlan) -> SpatialModel:
         if re.search(r"\bDLX_(?:APERT|OBJ|LUM|CALC)\b", element.name, re.I):
             continue
         if len(element.footprint) >= 3:
-            footprint = Polygon([(p.x, p.y) for p in element.footprint])
+            footprint = element_polygon(element)
             if footprint.is_valid and footprint.area > 0:
                 element.position = type(element.footprint[0])(x=footprint.centroid.x, y=footprint.centroid.y)
                 rectangle = list(footprint.minimum_rotated_rectangle.exterior.coords)
@@ -99,7 +122,8 @@ def assess_model(model: SpatialModel, plan: FloorPlan) -> SpatialModel:
             continue
         if element.room_id not in polygons:
             missing.append(f"{element.name}：所属房间待确认")
-        if len(element.footprint) < 3 or not Polygon([(p.x, p.y) for p in element.footprint]).is_valid:
+        footprint = element_polygon(element)
+        if len(element.footprint) < 3 or not footprint.is_valid or footprint.area <= 0:
             missing.append(f"{element.name}：构件占地边界待确认")
         for field in ("height_m", "elevation_m", "rotation_deg", "material", "reflectance"):
             if getattr(element, field) in (None, ""):

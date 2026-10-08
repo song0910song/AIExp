@@ -4,7 +4,6 @@ from __future__ import annotations
 import math
 from pathlib import Path
 import re
-import time
 
 from .artifacts import RunError, atomic_json, sha256, verify_artifacts
 from .desktop import controls, one

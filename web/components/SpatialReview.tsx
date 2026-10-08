@@ -17,6 +17,7 @@ export function SpatialReview({ project, onProject }: { project: Project; onProj
   const [boundary, setBoundary] = useState("");
   const [holes, setHoles] = useState("");
   const [footprint, setFootprint] = useState("");
+  const [elementHoles, setElementHoles] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -38,7 +39,10 @@ export function SpatialReview({ project, onProject }: { project: Project; onProj
     setModel(next); setError("");
   }, [plan?.asset.sha256, plan?.spatial_model?.version]);
   useEffect(() => { setBoundary(JSON.stringify(room?.boundary ?? [])); setHoles(JSON.stringify(room?.holes ?? [])); }, [room]);
-  useEffect(() => { setFootprint(JSON.stringify(element?.footprint ?? [])); }, [element]);
+  useEffect(() => {
+    setFootprint(JSON.stringify(element?.footprint ?? []));
+    setElementHoles(JSON.stringify(element?.holes ?? []));
+  }, [element]);
   const viewBox = useMemo(() => {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const points of [...(plan?.drawing_paths ?? []).map(p => p.points), ...(model?.rooms ?? []).map(r => r.boundary)]) {
@@ -107,7 +111,10 @@ export function SpatialReview({ project, onProject }: { project: Project; onProj
       <details><summary>图面识别到的门窗与家具 · {visibleElements.length} 项</summary>
         {visibleElements.length ? <select aria-label="查看图面构件" value={Math.min(elementChoice, visibleElements.length - 1)} onChange={e => setElementChoice(Number(e.target.value))}>{visibleElements.map((e, i) => <option key={e.element_id} value={i}>{({ door: "门洞", window: "窗洞", column: "柱", furniture: "家具", obstruction: "遮挡物" } as Record<string, string>)[e.kind]} · {e.name.replace(/\bDLX_[A-Z_]+\s*\/\s*/ig, "")}</option>)}</select> : <p>当前图纸没有需要单独核对的建筑构件。你可以通过对话补充识别遗漏。</p>}
         {element ? <div><div className="review-grid"><label>类型<select value={element.kind} onChange={e => changeElement({ kind: e.target.value as SpatialElement["kind"] })}>{Object.entries({ door: "门洞", window: "窗洞", column: "柱", furniture: "家具", obstruction: "遮挡物" }).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label><label>名称<input value={element.name} onChange={e => changeElement({ name: e.target.value })} /></label><label>所属房间<select value={element.room_id ?? ""} onChange={e => changeElement({ room_id: e.target.value || null })}><option value="">待确认</option>{model.rooms.map(r => <option key={r.room_id} value={r.room_id}>{r.name || r.room_id}</option>)}</select></label>
-          {Object.entries({ elevation_m: "底部标高 m", height_m: "高度 m", rotation_deg: "朝向 °", reflectance: "反射率" }).map(([key, label]) => <label key={key}>{label}<input type="number" step="any" value={element[key as "height_m"] ?? ""} onChange={e => changeElement({ [key]: numeric(e.target.value) })} /></label>)}<label>材质<input value={element.material ?? ""} onChange={e => changeElement({ material: e.target.value || null })} /></label><label>状态<select value={element.status} onChange={e => changeElement({ status: e.target.value as SpatialElement["status"] })}><option value="pending">待确认</option><option value="confirmed">已确认</option><option value="excluded">排除</option></select></label></div><label>位置及尺寸（WCS 占地多边形）<textarea value={footprint} onChange={e => setFootprint(e.target.value)} /></label><button type="button" onClick={() => { try { const points = JSON.parse(footprint); if (!Array.isArray(points) || points.length < 3 || !points.every(p => Number.isFinite(p.x) && Number.isFinite(p.y))) throw Error("构件占地至少需要三个坐标点"); changeElement({ footprint: points, status: "pending" }); } catch (e) { setError(String(e)); } }}>应用构件轮廓</button></div> : null}
+          {Object.entries({ elevation_m: "底部标高 m", height_m: "高度 m", rotation_deg: "朝向 °", reflectance: "反射率" }).map(([key, label]) => <label key={key}>{label}<input type="number" step="any" value={element[key as "height_m"] ?? ""} onChange={e => changeElement({ [key]: numeric(e.target.value) })} /></label>)}<label>材质<input value={element.material ?? ""} onChange={e => changeElement({ material: e.target.value || null })} /></label><label>状态<select value={element.status} onChange={e => changeElement({ status: e.target.value as SpatialElement["status"] })}><option value="pending">待确认</option><option value="confirmed">已确认</option><option value="excluded">排除</option></select></label></div>
+          <label>WCS 外边界 JSON<textarea value={footprint} onChange={e => setFootprint(e.target.value)} /></label>
+          <label>构件内孔 JSON<textarea value={elementHoles} onChange={e => setElementHoles(e.target.value)} /></label>
+          <button type="button" onClick={() => { try { const points = JSON.parse(footprint), rings = JSON.parse(elementHoles); if (!Array.isArray(points) || points.length < 3 || !points.every(p => Number.isFinite(p.x) && Number.isFinite(p.y)) || !Array.isArray(rings) || !rings.every(r => Array.isArray(r) && r.length >= 3 && r.every(p => Number.isFinite(p.x) && Number.isFinite(p.y)))) throw Error("请输入有效的外边界和内孔坐标"); changeElement({ footprint: points, holes: rings, status: "pending" }); } catch (e) { setError(String(e)); } }}>应用构件边界与内孔</button></div> : null}
       </details>
       <details><summary>文件读取与异常 · {plan.issues.length} 项</summary><p>原图：{plan.asset.source_name} · {plan.read_complete ? "几何读取完整" : "存在未读取区域"}</p>{plan.warnings.map((warning, i) => <p key={i}>{warning}</p>)}{plan.issues.filter(issue => issue.code !== "unsupported_entity" && issue.code !== "incomplete_read").map((issue, i) => <p key={i}><button type="button" onClick={() => { if (issue.position) setFocus(issue.position); }}>{issue.message}{issue.position ? " · 在图纸中定位" : ""}</button></p>)}</details>
       <details><summary>已保存模型的待确认清单 · {model.outstanding.length} 项</summary><ul>{model.outstanding.map((item, i) => <li key={i}>{item}</li>)}</ul><pre>{model.audit_log.join("\n")}</pre></details>

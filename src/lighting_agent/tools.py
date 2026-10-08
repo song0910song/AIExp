@@ -20,6 +20,52 @@ from .schemas import DialuxRunRequest, LuminaireSearchRequest
 LOGGER = logging.getLogger(__name__)
 
 
+def _public_outstanding(model: Any) -> list[str]:
+    """Convert validator details into owner-facing, ID-free messages.
+
+    ``SpatialModel.outstanding`` deliberately keeps precise audit diagnostics,
+    including model-generated identifiers.  That precision belongs in the
+    review workspace, not in a chat tool payload that a language model may
+    quote verbatim, so this boundary emits a small stable vocabulary instead.
+    """
+    public: list[str] = []
+    for issue in model.outstanding:
+        text = str(issue)
+        if "置信度或证据不足" in text:
+            text = "部分空间的图面依据或置信度不足"
+        elif "模型没有判断空间" in text or "模型引用了不存在的空间" in text:
+            text = "部分空间尚未完成图面判断"
+        elif "模型没有判断构件" in text or "模型引用了不存在的构件" in text:
+            text = "部分门窗、家具或遮挡物尚未完成图面判断"
+        elif "重叠" in text and "房间" in text:
+            text = "房间边界存在重叠，需修正或排除外轮廓候选"
+        elif "边界待确认" in text or "覆盖范围" in text:
+            text = "空间边界和覆盖范围待确认"
+        elif "完整性待确认" in text or "构件" in text:
+            text = "门窗、柱、家具及遮挡物完整性待确认"
+        elif text.startswith(("图纸尺度", "CAD 文件读取不完整", "没有待设计房间")):
+            # These messages are already written for owners and do not contain
+            # a model-generated identifier.
+            pass
+        else:
+            text = "图纸识别仍有待确认事项"
+        if text not in public:
+            public.append(text)
+    return public
+
+
+def _public_calculation_mapping(ruleset: Any, model: Any) -> dict[str, Any]:
+    """Keep rule evidence while removing model-only room/rule identifiers."""
+    mapping = calculation_mapping(ruleset, model)
+    for room in mapping.get("rooms", []):
+        room.pop("room_id", None)
+        for evaluation in room.get("evaluations", []):
+            evaluation.pop("rule_ids", None)
+        for requirement in room.get("requirements", []):
+            requirement.pop("rule_id", None)
+    return mapping
+
+
 def _text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -75,9 +121,11 @@ def make_tools(*, projects: Any, evidence: Any, dialux: Any, project_id: str | N
                 "cad": None if not plan else {"file": plan.asset.source_name, "units": plan.drawing_units,
                     "read_complete": plan.read_complete, "model_version": model.version if model else None,
                     "automation_status": model.automation_status if model else "pending",
-                    "rooms": [r.model_dump(mode="json", exclude={"boundary", "holes"}) for r in model.rooms] if model else [],
-                    "outstanding": model.outstanding if model else ["CAD 尚未自动分析"]},
-                "rules_and_settings": calculation_mapping(state.rule_set, model),
+                    "rooms": [{"floor": r.floor, "number": r.number, "name": r.name, "usage": r.usage,
+                               "area_m2": r.area_m2, "status": r.status}
+                              for r in model.rooms] if model else [],
+                    "outstanding": _public_outstanding(model) if model else ["CAD 尚未自动分析"]},
+                "rules_and_settings": _public_calculation_mapping(state.rule_set, model),
                 "invalidated_dependencies": state.invalidated_dependencies,
                 "saved_luminaires": [{"id": x.luminaire_id, "brand": x.brand_name, "name": x.article_name}
                                      for x in state.luminaires[-12:]]}
@@ -101,15 +149,26 @@ def make_tools(*, projects: Any, evidence: Any, dialux: Any, project_id: str | N
             updated = projects.set_floor_plan(project_id, current.revision,
                                               plan.model_copy(update={"spatial_model": analyzed}), None)
             model = updated.floor_plan.spatial_model
+            dialux_result = None
+            if model.automation_status == "auto_confirmed" and dialux_executor is not None:
+                run = dialux_executor.auto_start(project_id)
+                dialux_result = {"status": run.status}
+                if run.error:
+                    dialux_result["error"] = run.error
+            included_rooms = [r for r in model.rooms if r.status == "confirmed"]
+            excluded_rooms = [r for r in model.rooms if r.status == "excluded"]
             return {"status": "vision_analyzed" if model.automation_status == "auto_confirmed" else model.automation_status,
-                    "automation_status": model.automation_status, "source_sha256": updated.floor_plan.asset.sha256,
-                    "analysis": report,
-                    "included_rooms": [r.room_id for r in model.rooms if r.status == "confirmed"],
-                    "excluded_rooms": [r.room_id for r in model.rooms if r.status == "excluded"],
-                    "outstanding": model.outstanding}
-        except Exception as error:
+                    "automation_status": model.automation_status,
+                    "analysis": {
+                        "automation_status": model.automation_status,
+                        "room_count": len(model.rooms),
+                        "included_room_count": len(included_rooms),
+                        "excluded_room_count": len(excluded_rooms),
+                    },
+                    "outstanding": _public_outstanding(model), "dialux": dialux_result}
+        except Exception:
             LOGGER.warning("Automatic CAD analysis failed", exc_info=True)
-            return {"status": "needs_attention", "message": str(error)}
+            return {"status": "needs_attention", "message": "图纸识别未完整完成，请查看图纸工作区中的检查提示。"}
 
     @tool
     def search_evidence(query: str) -> dict:

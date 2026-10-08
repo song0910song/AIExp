@@ -1,15 +1,16 @@
 """Goals 1/2 regression: real CAD/PDF parsing, mocked remote OCR, explicit review."""
 from __future__ import annotations
 
-from io import BytesIO, StringIO
 import math
 import base64
+import json
 from pathlib import Path
 
 import ezdxf
 import fitz
 import pytest
 import requests
+from shapely.geometry import Polygon
 from fastapi.testclient import TestClient
 
 from lighting_agent.document_loader import DocumentLoadError, load_document
@@ -18,9 +19,12 @@ from lighting_agent.floor_plan import parse_floor_plan
 from lighting_agent.drawing_preview import render_drawing_preview
 from lighting_agent.project_store import ProjectStore
 from lighting_agent.rag import LocalEvidenceStore
-from lighting_agent.schemas import StandardRecord, DesignRule
+from lighting_agent.schemas import DesignRule
 from lighting_agent.rules import rule_conflicts
 from lighting_agent.tools import make_tools
+from lighting_agent.agent import build_agent
+from lighting_agent.cad_auto_analysis import apply_model_analysis
+from lighting_agent.config import Settings
 from lighting_agent.web_api import create_app
 
 
@@ -122,6 +126,49 @@ def test_semantic_furniture_is_not_a_room_and_missing_heights_not_invented(tmp_p
     assert all(room.height_m is None for room in plan.spatial_model.rooms)
 
 
+def test_closed_irregular_furniture_outline_is_not_replaced_by_a_rectangle(tmp_path):
+    document, path = cad(tmp_path, [(0, 0)])
+    furniture = document.blocks.new("office_desk")
+    outline = [(0, 0), (1, 0), (1, .4), (.4, .4), (.4, 1), (0, 1)]
+    furniture.add_lwpolyline(outline, close=True)
+    document.modelspace().add_blockref("office_desk", (2, 2))
+    document.saveas(path)
+
+    element = parse(path).spatial_model.elements[0]
+    actual = Polygon([(point.x, point.y) for point in element.footprint])
+    expected = Polygon([(x + 2, y + 2) for x, y in outline])
+    assert actual.equals(expected)
+    assert element.provenance["footprint"].source == "cad"
+
+
+def test_nested_closed_furniture_loops_become_an_ifc_void(tmp_path):
+    document, path = cad(tmp_path, [(0, 0)])
+    furniture = document.blocks.new("office_table")
+    furniture.add_lwpolyline([(0, 0), (2, 0), (2, 2), (0, 2)], close=True)
+    furniture.add_lwpolyline([(.5, .5), (1.5, .5), (1.5, 1.5), (.5, 1.5)], close=True)
+    document.modelspace().add_blockref("office_table", (1, 1))
+    document.saveas(path)
+
+    element = parse(path).spatial_model.elements[0]
+    assert len(element.holes) == 1
+    assert len(element.footprint) == 4
+    assert element.provenance["holes"].source == "cad"
+
+
+def test_nested_room_boundary_loops_keep_the_outer_room_void(tmp_path):
+    document, path = cad(tmp_path, [])
+    modelspace = document.modelspace()
+    modelspace.add_lwpolyline([(0, 0), (8, 0), (8, 6), (0, 6)], close=True, dxfattribs={"layer": "WALL"})
+    modelspace.add_lwpolyline([(2, 2), (4, 2), (4, 4), (2, 4)], close=True, dxfattribs={"layer": "WALL"})
+    document.saveas(path)
+
+    candidates = parse(path).area_candidates
+    outer_room = next(candidate for candidate in candidates if candidate.holes)
+    assert outer_room.raw_area == pytest.approx(44)
+    assert len(outer_room.holes) == 1
+    assert not any(candidate.raw_area == pytest.approx(48) for candidate in candidates)
+
+
 def test_dialux_aperture_codes_are_not_exposed_as_furniture_or_room_candidates(tmp_path):
     document, path = cad(tmp_path, [(0, 0)])
     aperture = document.blocks.new("2CC")
@@ -152,15 +199,34 @@ def test_floor_plan_analysis_sends_rendered_image_and_never_surface_cad_tags(env
             assert image.startswith("data:image/png;base64,")
             preview = base64.b64decode(image.split(",", 1)[1])
             assert preview.startswith(b"\x89PNG")
+            context = json.loads(messages[1].content[0]["text"])
             assert "DLX_APERT" not in messages[1].content[0]["text"]
-            return type("Response", (), {"content": '{"summary":"识别到会议室","spaces":[],"recognized_features":[],"scale_basis":"CAD 单位","design_implications":[],"clarifications":[]}'} )()
+            rooms = [{"candidate_id": item["candidate_id"], "action": "include",
+                      "name": item["name"] or "Room", "usage": "Office", "floor": "1F",
+                      "number": str(index + 1), "confidence": .98,
+                      "evidence": ["closed room boundary in CAD preview"],
+                      "rationale": "closed outline and room label"}
+                     for index, item in enumerate(context["candidates"])]
+            result = {"summary": "room decisions", "rooms": rooms, "elements": []}
+            return type("Response", (), {"content": json.dumps(result, ensure_ascii=False)})()
 
     tool = next(item for item in make_tools(projects=projects, evidence=evidence, dialux=object(),
                                             project_id=state["project_id"], vision_model=Vision())
                 if item.name == "analyze_floor_plan")
     result = tool.invoke({})
     assert result["status"] == "vision_analyzed"
-    assert result["analysis"]["summary"] == "识别到会议室"
+    assert result["analysis"]["room_count"] > 0
+    assert result["analysis"]["included_room_count"] == result["analysis"]["room_count"]
+    assert result["automation_status"] == "auto_confirmed"
+    public_result = json.dumps(result, ensure_ascii=False)
+    assert "candidate_id" not in public_result
+    assert "confidence" not in public_result
+    assert "rationale" not in public_result
+    assert "closed room boundary in CAD preview" not in public_result
+    assert "room decisions" not in public_result
+    saved = projects.get(state["project_id"]).floor_plan.spatial_model
+    assert all(room.status == "confirmed" for room in saved.rooms)
+    assert saved.model_decisions and saved.analysis_sha256
 
 
 def test_floor_plan_analysis_reports_non_vision_model_without_fabricating(environment, tmp_path):
@@ -170,7 +236,81 @@ def test_floor_plan_analysis_reports_non_vision_model_without_fabricating(enviro
                                             project_id=state["project_id"]) if item.name == "analyze_floor_plan")
     result = tool.invoke({})
     assert result["status"] == "vision_unavailable"
-    assert "不能声称" in result["message"]
+    assert "无法自动判断空间" in result["message"]
+
+
+def test_empty_or_incomplete_model_decisions_require_attention(environment, tmp_path):
+    client, projects, evidence = environment
+    state = imported_project(client, tmp_path)
+
+    class Vision:
+        def invoke(self, messages):
+            context = json.loads(messages[1].content[0]["text"])
+            candidate_id = context["candidates"][0]["candidate_id"]
+            result = {"rooms": [{"candidate_id": candidate_id, "action": "include",
+                                 "confidence": .4, "evidence": ["unclear outline"]}], "elements": []}
+            return type("Response", (), {"content": json.dumps(result)})()
+
+    analyzer = next(item for item in make_tools(projects=projects, evidence=evidence, dialux=object(),
+                                                project_id=state["project_id"], vision_model=Vision())
+                    if item.name == "analyze_floor_plan")
+    result = analyzer.invoke({})
+    assert result["status"] == "needs_attention"
+    saved = projects.get(state["project_id"]).floor_plan.spatial_model
+    assert saved.automation_status == "needs_attention"
+    assert not saved.design_ready
+    assert any("置信度" in issue for issue in saved.outstanding)
+    public_result = json.dumps(result, ensure_ascii=False)
+    assert "candidate_id" not in public_result
+
+
+def test_agent_reuses_chat_model_for_multimodal_analysis_by_default(monkeypatch):
+    import langchain.agents
+    import langchain_openai
+    import lighting_agent.agent as agent_module
+
+    instances = []
+
+    class FakeChatModel:
+        def __init__(self, **kwargs):
+            self.options = kwargs
+            instances.append(self)
+
+    captured = {}
+    monkeypatch.setattr(langchain_openai, "ChatOpenAI", FakeChatModel)
+    monkeypatch.setattr(agent_module, "make_tools", lambda **kwargs: captured.update(kwargs) or [])
+    monkeypatch.setattr(langchain.agents, "create_agent", lambda **kwargs: kwargs)
+    result = build_agent(Settings(llm_model="multimodal", llm_api_key="test", llm_prompt_cache_enabled=False),
+                         projects=object(), evidence=object(), dialux=object())
+    assert len(instances) == 1
+    assert captured["vision_model"] is result["model"] is instances[0]
+
+
+def test_cad_upload_runs_injected_vision_model_automatically(tmp_path):
+    projects = ProjectStore(tmp_path / "projects")
+    evidence = LocalEvidenceStore(tmp_path / "evidence.db")
+
+    class Vision:
+        def invoke(self, messages):
+            context = json.loads(messages[1].content[0]["text"])
+            rooms = [{"candidate_id": item["candidate_id"], "action": "include", "name": "Office",
+                      "usage": "Office", "floor": "1F", "confidence": .99,
+                      "evidence": ["closed room outline"], "rationale": "bounded space"}
+                     for item in context["candidates"]]
+            return type("Response", (), {"content": json.dumps({"rooms": rooms, "elements": []})})()
+
+    client = TestClient(create_app(project_store=projects, evidence_store=evidence,
+                                   user_documents_directory=tmp_path / "docs", vision_model=Vision()))
+    project = client.post("/api/projects", json={"project_name": "Auto"}).json()
+    _, path = cad(tmp_path, [(0, 0)])
+    response = client.post(f"/api/projects/{project['project_id']}/floor-plan",
+        data={"expected_revision": project["revision"]}, files={"file": ("auto.dxf", path.read_bytes())})
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["analysis"]["automation_status"] == "auto_confirmed"
+    assert body["project"]["floor_plan"]["spatial_model"]["automation_status"] == "auto_confirmed"
+    assert body["analysis"]["dialux"]["status"] == "needs_attention"
+    assert "photometry" in body["analysis"]["dialux"]["error"].lower()
 
 
 def test_xref_and_unknown_units_are_visible(tmp_path):
@@ -184,6 +324,60 @@ def test_xref_and_unknown_units_are_visible(tmp_path):
     assert plan.external_references == ["missing_xref"]
     assert plan.spatial_model.meters_per_unit is None
     assert not plan.spatial_model.design_ready
+    assert any("外部参照" in item for item in plan.spatial_model.outstanding)
+
+
+def test_acad_table_is_read_as_annotation_and_does_not_block_automatic_analysis():
+    fixture = Path(__file__).parent / "fixtures" / "phase0" / "sample-room.dxf"
+    plan = parse_floor_plan(fixture, storage_path=fixture.name)
+
+    assert plan.entity_counts["ACAD_TABLE"] == 1
+    assert plan.read_complete
+    assert plan.unsupported_entities == {}
+    assert len(plan.area_candidates) == 6  # table cell borders must not become rooms
+    assert any("2958 lm" in text for text in plan.text_items)
+    assert any(issue.code == "table_grid_ignored" for issue in plan.issues)
+
+    report = {
+        "rooms": [
+            {"candidate_id": room.room_id, "action": "include", "confidence": 0.99,
+             "evidence": ["closed room boundary in CAD drawing"]}
+            for room in plan.spatial_model.rooms
+        ],
+        "elements": [],
+    }
+    analyzed = apply_model_analysis(plan, report, model_name="test-vision")
+    assert analyzed.automation_status == "auto_confirmed"
+    assert len(analyzed.model_decisions) == len(plan.spatial_model.rooms)
+
+
+def test_upload_with_acad_table_runs_vision_analysis_automatically(tmp_path):
+    projects = ProjectStore(tmp_path / "projects")
+    evidence = LocalEvidenceStore(tmp_path / "evidence.db")
+    fixture = Path(__file__).parent / "fixtures" / "phase0" / "sample-room.dxf"
+
+    class Vision:
+        def invoke(self, messages):
+            context = json.loads(messages[1].content[0]["text"])
+            assert any("2958 lm" in label for label in context["labels"])
+            rooms = [{"candidate_id": item["candidate_id"], "action": "include",
+                      "confidence": .99, "evidence": ["closed room boundary and drawing labels"]}
+                     for item in context["candidates"]]
+            return type("Response", (), {"content": json.dumps({"rooms": rooms, "elements": []})})()
+
+    client = TestClient(create_app(project_store=projects, evidence_store=evidence,
+                                   user_documents_directory=tmp_path / "docs", vision_model=Vision()))
+    project = client.post("/api/projects", json={"project_name": "CAD table"}).json()
+    response = client.post(
+        f"/api/projects/{project['project_id']}/floor-plan",
+        data={"expected_revision": project["revision"]},
+        files={"file": (fixture.name, fixture.read_bytes(), "application/dxf")},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["floor_plan"]["read_complete"]
+    assert body["analysis"]["automation_status"] == "auto_confirmed"
+    assert body["project"]["floor_plan"]["spatial_model"]["automation_status"] == "auto_confirmed"
 
 
 def make_pdf(tmp_path, mixed_same_page=False):
@@ -342,7 +536,8 @@ def test_failed_ocr_preserves_page_gap_instead_of_claiming_complete(tmp_path):
 def environment(tmp_path):
     projects = ProjectStore(tmp_path / "projects")
     evidence = LocalEvidenceStore(tmp_path / "evidence.db")
-    client = TestClient(create_app(project_store=projects, evidence_store=evidence, user_documents_directory=tmp_path / "docs"))
+    client = TestClient(create_app(project_store=projects, evidence_store=evidence,
+                                  user_documents_directory=tmp_path / "docs", vision_model=False))
     return client, projects, evidence
 
 

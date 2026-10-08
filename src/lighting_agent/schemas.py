@@ -190,6 +190,7 @@ class SpatialElement(StrictModel):
     name: str = ""
     room_id: str | None = None
     footprint: list[CadPoint] = Field(default_factory=list)
+    holes: list[list[CadPoint]] = Field(default_factory=list)
     position: CadPoint | None = None
     length_m: float | None = None
     width_m: float | None = None
@@ -399,6 +400,8 @@ class DialuxRunRecord(CompatibleModel):
     request: DialuxRunRequest | None = None
     result: dict[str, Any] | None = None
     error: str | None = None
+    source_sha256: str | None = None
+    model_analysis_sha256: str | None = None
 
 
 class DesignRule(StrictModel):

@@ -4,12 +4,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-import pytest
 import requests
 
 from lighting_agent.dialux_api import (
     DialuxAPI,
-    DialuxAPIError,
     apply_brief_constraints,
     candidate_summary,
     match_luminaire_candidate,

@@ -87,6 +87,12 @@ def parse_floor_plan(source: Path, *, storage_path: str) -> FloorPlan:
     dialux_metric = _uses_dialux_metric_coordinates(entities)
     effective_meters_per_unit = 1.0 if dialux_metric else meters_per_unit
     inspection = inspect_drawing(document, effective_meters_per_unit)
+    # Include text extracted from supported virtual entities (notably CAD
+    # tables and nested blocks) so the vision model can use it as evidence.
+    text_items = list(dict.fromkeys([
+        *text_items,
+        *(label.text for label in inspection["drawing_labels"] if label.text.strip()),
+    ]))[:MAX_TEXT_ITEMS]
     area_candidates = inspection.pop("area_candidates")
     elements = inspection.pop("elements")
     room_name = _room_name(text_items)

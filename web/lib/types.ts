@@ -32,7 +32,7 @@ export type SpatialRoom = {
 };
 export type SpatialElement = {
   element_id: string; kind: "door" | "window" | "column" | "furniture" | "obstruction";
-  name: string; room_id: string | null; footprint: Point[]; elevation_m: number | null;
+  name: string; room_id: string | null; footprint: Point[]; holes: Point[][]; elevation_m: number | null;
   height_m: number | null; rotation_deg: number | null; material: string | null; reflectance: number | null;
   status: "pending" | "confirmed" | "excluded"; provenance: Record<string, Provenance>;
 };

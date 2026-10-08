@@ -1,8 +1,9 @@
-"""Preparation and validation for user-confirmed DXF/DWG DIALux jobs.
+"""Preparation and validation for reviewed DXF/DWG DIALux jobs.
 
-The desktop runner remains deliberately narrow: it accepts reviewed, simple
-rectilinear rooms and an explicit photometry file.  Complex geometry is
-reported as a blocking readiness issue instead of being silently flattened.
+Rectangular room sets use the validated shared-wall envelope exporter. A single
+room may use an arbitrary valid polygon (including tessellated curves, holes,
+and oblique walls) through the IFC profile exporter. Unsupported topology is
+reported explicitly instead of being replaced with a bounding rectangle.
 """
 from __future__ import annotations
 
@@ -17,12 +18,13 @@ import ifcopenshell
 from shapely.geometry import Polygon, Point, box
 
 from lighting_agent.dialux_runner.envelope import OpeningTreatment, export_envelope
-from lighting_agent.ifc_export import IfcExportOptions, IfcExportError, export_spatial_model
+from lighting_agent.ifc_export import (
+    MAX_IFC_PROFILE_VERTICES, IfcExportError, IfcExportOptions, export_spatial_model,
+)
 from lighting_agent.schemas import (
     DialuxGeometryAssumptions, DialuxLayoutItem, DialuxOptimizationRequest,
-    DialuxReadiness, SpatialElement, SpatialModel,
+    DialuxReadiness, SpatialModel,
 )
-from lighting_agent.spatial_model import room_polygon
 from .artifacts import MAX_LIMITS, RunError, atomic_json, sha256, timestamp, verify_artifacts
 
 
@@ -78,7 +80,28 @@ def _is_simple_orthogonal_polygon(polygon: Polygon) -> bool:
     return True
 
 
-def geometry_mode(model: SpatialModel) -> str:
+def _is_exportable_polygon(polygon: Polygon) -> bool:
+    """Whether IFC can preserve this polygon without repairing or simplifying it."""
+
+    if polygon.geom_type != "Polygon" or not polygon.is_valid or polygon.area <= 1e-7:
+        return False
+    rings = [polygon.exterior, *polygon.interiors]
+    return all(3 <= len(ring.coords) - 1 for ring in rings) and \
+        sum(len(ring.coords) - 1 for ring in rings) <= MAX_IFC_PROFILE_VERTICES
+
+
+def _has_safe_room_spacing(polygons: list[Polygon], wall_thickness_m: float) -> bool:
+    for index, polygon in enumerate(polygons):
+        for other in polygons[index + 1:]:
+            gap = polygon.distance(other)
+            if polygon.intersection(other).area > 1e-7 or gap < wall_thickness_m - 1e-7:
+                return False
+            if wall_thickness_m + 1e-7 < gap < 2 * wall_thickness_m - 1e-7:
+                return False
+    return True
+
+
+def geometry_mode(model: SpatialModel, wall_thickness_m: float = .12) -> str:
     """Return the IFC representation that has a validated DIALux path."""
 
     active_rooms = [room for room in model.rooms if room.status != "excluded"]
@@ -86,17 +109,25 @@ def geometry_mode(model: SpatialModel) -> str:
         return "unsupported"
     scale = model.meters_per_unit or 1
     polygons = [_metric_polygon(room, scale) for room in active_rooms]
-    if all(_is_axis_aligned_rectangle(polygon) for polygon in polygons):
-        return "rectangular_envelope"
     if (
         len(active_rooms) == 1
-        and _is_simple_orthogonal_polygon(polygons[0])
+        and _is_exportable_polygon(polygons[0])
         and not any(
             element.status != "excluded" and element.kind in {"door", "window"}
             for element in model.elements
         )
     ):
-        return "orthogonal_single_room"
+        return ("orthogonal_single_room" if _is_simple_orthogonal_polygon(polygons[0])
+                else "complex_single_room")
+    if all(_is_axis_aligned_rectangle(polygon) for polygon in polygons):
+        return ("rectangular_envelope" if _has_safe_room_spacing(polygons, wall_thickness_m)
+                else "unsupported")
+    if (not any(element.status != "excluded" and element.kind in {"door", "window"}
+                for element in model.elements)
+            and len({(room.floor, room.elevation_m, room.height_m) for room in active_rooms}) == 1
+            and all(_is_exportable_polygon(polygon) for polygon in polygons)):
+        return ("complex_multiroom" if _has_safe_room_spacing(polygons, wall_thickness_m)
+                else "unsupported")
     return "unsupported"
 
 
@@ -138,18 +169,14 @@ def prepare_reviewed_model(
             marker in item for marker in ("待确认", "待设计", "待填写", "待逐房间核对", "完整性待确认")
         )]
         issues.extend(source_issues)
-    complexity = "simple"
-    if len({(room.floor, room.elevation_m, room.height_m) for room in active_rooms}) > 1:
+    mode = geometry_mode(candidate, assumptions.wall_thickness_m)
+    complexity = "complex" if mode in {"complex_single_room", "complex_multiroom", "unsupported"} else "simple"
+    level_conflict = len({(room.floor, room.elevation_m, room.height_m) for room in active_rooms}) > 1
+    if level_conflict:
         complexity = "complex"
         issues.append("存在多个楼层、标高或层高，当前 IFC 执行 profile 不能安全合并")
-    if candidate.meters_per_unit:
-        for room in active_rooms:
-            if not _is_simple_orthogonal_polygon(_metric_polygon(room, candidate.meters_per_unit)):
-                complexity = "complex"
-                issues.append(f"房间 {_room_label(room)} 不是无孔正交闭合轮廓，复杂墙体（曲线/孔洞/斜墙）需单独建模确认")
-    if geometry_mode(candidate) == "unsupported" and complexity != "complex":
-        complexity = "complex"
-        issues.append("当前通用 profile 不能安全表示该房间组合或门窗宿主关系")
+    if mode == "unsupported":
+        issues.append("房间边界、房间组合或门窗宿主关系超出当前 IFC 几何 profile 的安全范围")
     if not candidate.coverage_confirmed and not confirm:
         issues.append("房间覆盖范围尚未确认")
     if not candidate.elements_reviewed and not confirm:
@@ -223,13 +250,14 @@ def prepare_reviewed_model(
 
     if candidate.automation_status == "needs_attention":
         issues.append("CAD 模型自动判断存在冲突或低置信度，不能启动 DIALux")
-    if complexity == "complex":
-        issues.append("复杂几何当前仅支持生成阻断报告，不能自动近似成简单房间")
+    if level_conflict:
+        issues.append("不同楼层或标高的空间不能合并到当前单楼层 IFC profile")
     if any(room.ceiling_height_m > room.height_m for room in active_rooms):
         issues.append("存在净高高于层高的房间")
-    candidate.coverage_confirmed = bool(candidate.coverage_confirmed or (confirm and complexity == "simple"))
-    candidate.elements_reviewed = bool(candidate.elements_reviewed or (confirm and complexity == "simple"))
-    candidate.design_ready = bool(confirm and complexity != "complex" and not issues)
+    supported_geometry = mode != "unsupported" and not level_conflict
+    candidate.coverage_confirmed = bool(candidate.coverage_confirmed or (confirm and supported_geometry))
+    candidate.elements_reviewed = bool(candidate.elements_reviewed or (confirm and supported_geometry))
+    candidate.design_ready = bool(confirm and supported_geometry and not issues)
     candidate.version += 1
     candidate.audit_log.append("DIALux 执行范围检查：" + ("用户确认默认假设" if confirm else "等待用户确认默认假设"))
     candidate.outstanding = [] if candidate.design_ready else list(dict.fromkeys(issues))
@@ -398,14 +426,14 @@ def prepare_generic_job(
         assumptions.wall_thickness_m, assumptions.floor_slab_thickness_m,
         assumptions.ceiling_slab_thickness_m, project_name, project_id,
     )
-    mode = geometry_mode(model)
+    mode = geometry_mode(model, options.wall_thickness_m)
     if mode == "unsupported":
         raise RunError("已确认空间模型超出通用 DXF/DWG profile 的安全几何范围")
     try:
-        if mode == "orthogonal_single_room":
-            # Preserve a reviewed stepped outline from real CAD.  Openings are
-            # intentionally excluded from this profile until their wall-host
-            # relation has a separate desktop acceptance.
+        if mode in {"orthogonal_single_room", "complex_single_room"}:
+            # The IFC profile retains the exact reviewed boundary, including
+            # holes and tessellated curve/diagonal segments. Door/window host
+            # relationships remain outside this single-room profile.
             exported = export_spatial_model(model, options)
         else:
             exported = export_envelope(model, options, treatments)
@@ -427,7 +455,7 @@ def prepare_generic_job(
         photometry_name: photometry_path,
     }
     (inputs / "spatial-model.json").write_text(model.model_dump_json(indent=2), encoding="utf-8")
-    if mode == "orthogonal_single_room":
+    if mode in {"orthogonal_single_room", "complex_single_room"}:
         ifc_data = exported.data
     else:
         ifc_data = exported.ifc.data
@@ -489,7 +517,8 @@ def validate_generic_job(store) -> None:
     if None in required or set(job.get("inputs", {})) != required:
         raise RunError("Generic input package is incomplete")
     model = SpatialModel.model_validate_json((store.root / "inputs/spatial-model.json").read_text(encoding="utf-8"))
-    if job.get("geometry_mode") != geometry_mode(model):
+    export_options = job.get("export_options", {})
+    if job.get("geometry_mode") != geometry_mode(model, export_options.get("wall_thickness_m", .12)):
         raise RunError("Generic geometry profile binding changed")
     cad_review = job.get("cad_review")
     if cad_review is not None:

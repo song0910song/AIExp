@@ -34,17 +34,6 @@ def main() -> int:
     generic.add_argument('--project-name', required=True)
     generic.add_argument('--project-id', required=True)
     generic.add_argument('--default-usage')
-    real_cad = commands.add_parser('prepare-real-cad', help='Review one room from a real DXF/DWG and prepare a generic job')
-    real_cad.add_argument('--cad', type=Path, required=True)
-    real_cad.add_argument('--photometry', type=Path, required=True)
-    real_cad.add_argument('--output', type=Path, required=True)
-    real_cad.add_argument('--dialux', type=Path, required=True)
-    real_cad.add_argument('--project-name', required=True)
-    real_cad.add_argument('--project-id', required=True)
-    real_cad.add_argument('--candidate-index', type=int, default=0)
-    real_cad.add_argument('--room-number')
-    real_cad.add_argument('--room-name')
-    real_cad.add_argument('--usage', default='Meeting room')
     run = commands.add_parser('run', help='Execute on a dedicated DIALux instance')
     run.add_argument('directory', type=Path)
     run.add_argument('--resume', action='store_true', help='Replay immutable inputs in a new attempt after review')
@@ -66,6 +55,8 @@ def main() -> int:
             from lighting_agent.schemas import DialuxGeometryAssumptions, DialuxOptimizationRequest, SpatialModel
             from .generic_jobs import auto_layout, prepare_generic_job, prepare_reviewed_model
             model = SpatialModel.model_validate_json(args.model.read_text(encoding='utf-8'))
+            if model.automation_status != 'auto_confirmed':
+                raise RunError('CAD model has not passed automatic model analysis')
             assumptions = DialuxGeometryAssumptions(default_usage=args.default_usage)
             effective, readiness = prepare_reviewed_model(model, assumptions,
                                                           default_usage=args.default_usage, confirm=True)
@@ -77,25 +68,6 @@ def main() -> int:
                 optimization=DialuxOptimizationRequest(),
                 project_name=args.project_name, project_id=args.project_id,
                 executable=args.dialux, output=args.output,
-            ))
-        elif args.command == 'prepare-real-cad':
-            from .real_cad import prepare_real_cad_model
-            from lighting_agent.schemas import DialuxGeometryAssumptions, DialuxOptimizationRequest
-            from .generic_jobs import auto_layout, prepare_generic_job
-            effective, _, review = prepare_real_cad_model(
-                args.cad,
-                candidate_index=args.candidate_index,
-                room_number=args.room_number,
-                room_name=args.room_name,
-                usage=args.usage,
-                assumptions=DialuxGeometryAssumptions(default_usage=args.usage),
-            )
-            print(prepare_generic_job(
-                cad_path=args.cad, photometry_path=args.photometry, model=effective,
-                assumptions=DialuxGeometryAssumptions(default_usage=args.usage),
-                layout=auto_layout(effective), optimization=DialuxOptimizationRequest(),
-                project_name=args.project_name, project_id=args.project_id,
-                executable=args.dialux, output=args.output, cad_review=review,
             ))
         elif args.command == 'run':
             state = run_job(args.directory, resume=args.resume)

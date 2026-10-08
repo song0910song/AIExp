@@ -66,7 +66,10 @@ class OpeningTreatment(BaseModel):
 class Wall:
     key: str
     polygon: Polygon
-    axis: Literal['x', 'y']
+    # ``general`` is used for exact curved/diagonal/concave wall strips.  Such
+    # walls are exported as-is; openings are intentionally blocked until a
+    # unique host and local frame can be proven.
+    axis: Literal['x', 'y', 'general']
     room_ids: tuple[str, ...]
     reflectance: float
 
@@ -90,6 +93,14 @@ def _rectangle(polygon: Polygon, label: str) -> Polygon:
     if (not polygon.is_valid or polygon.area <= EPS or polygon.interiors
             or polygon.symmetric_difference(box(*polygon.bounds)).area > EPS):
         raise IfcExportError(f'{label}: standalone envelope requires an axis-aligned rectangle without holes')
+    return polygon
+
+
+def _valid_polygon(polygon: Polygon, label: str) -> Polygon:
+    if polygon.geom_type != 'Polygon' or not polygon.is_valid or polygon.area <= EPS:
+        raise IfcExportError(f'{label}: envelope requires a valid planar polygon')
+    if sum(len(ring.coords) - 1 for ring in (polygon.exterior, *polygon.interiors)) > 50_000:
+        raise IfcExportError(f'{label}: IFC profile exceeds the 50000-vertex limit')
     return polygon
 
 
@@ -121,10 +132,15 @@ def _validate_model(model: SpatialModel) -> tuple[list[SpatialRoom], dict[str, P
             raise IfcExportError(f'Room {room.room_id} has unconfirmed or missing parameters')
         if room.ceiling_height_m > room.height_m:
             raise IfcExportError(f'Room {room.room_id}: clear height exceeds storey height')
-        polygon = _rectangle(_room_polygon(room, model.meters_per_unit), room.room_id)
+        polygon = _valid_polygon(_room_polygon(room, model.meters_per_unit), room.room_id)
         if room.area_m2 is not None and not math.isclose(room.area_m2, polygon.area, abs_tol=EPS, rel_tol=0):
             raise IfcExportError(f'Room {room.room_id}: area differs from its exact boundary')
         polygons[room.room_id] = polygon
+    complex_rooms = any(polygon.symmetric_difference(box(*polygon.bounds)).area > EPS
+                        for polygon in polygons.values())
+    if complex_rooms and any(element.status != 'excluded' and element.kind in ('door', 'window')
+                             for element in model.elements):
+        raise IfcExportError('Complex room envelopes with doors/windows require a validated wall host')
     if len({(r.floor, r.elevation_m, r.height_m) for r in rooms}) != 1:
         raise IfcExportError('Standalone envelope currently requires one floor, elevation and storey height')
     for element in model.elements:
@@ -150,6 +166,20 @@ def _validate_model(model: SpatialModel) -> tuple[list[SpatialRoom], dict[str, P
 
 def wall_topology(rooms: list[SpatialRoom], polygons: dict[str, Polygon], thickness: float) -> list[Wall]:
     """Partition the union of wall strips once, retaining exact clear dimensions."""
+    if any(polygon.symmetric_difference(box(*polygon.bounds)).area > EPS for polygon in polygons.values()):
+        interiors = unary_union(list(polygons.values()))
+        strips = [polygon.buffer(thickness, join_style='mitre').difference(polygon)
+                  for polygon in polygons.values()]
+        wall_area = unary_union(strips).difference(interiors)
+        walls = []
+        for part in sorted(_parts(wall_area), key=lambda polygon: polygon.bounds):
+            ids = tuple(room.room_id for room in rooms
+                        if part.distance(polygons[room.room_id].boundary) <= thickness + EPS)
+            reflectances = {room.wall_reflectance for room in rooms if room.room_id in ids}
+            if not ids or len(reflectances) != 1:
+                raise IfcExportError('General walls need one consistent reflectance and an unambiguous room relation')
+            walls.append(Wall(f'wall-{len(walls) + 1:03d}', part, 'general', ids, reflectances.pop()))
+        return walls
     for i, room in enumerate(rooms):
         a = polygons[room.room_id]
         for other in rooms[i + 1:]:

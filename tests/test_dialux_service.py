@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 from io import BytesIO, StringIO
+from pathlib import Path
 
 import ezdxf
 from fastapi.testclient import TestClient
 
 from lighting_agent.project_store import ProjectStore
 from lighting_agent.rag import LocalEvidenceStore
-from lighting_agent.schemas import DialuxLayoutItem, DialuxOptimizationRequest, DialuxRunRecord, DialuxRunRequest
+from lighting_agent.schemas import (
+    DesignBrief,
+    DialuxLayoutItem,
+    DialuxOptimizationRequest,
+    DialuxRunRecord,
+    DialuxRunRequest,
+    FloorPlan,
+    FloorPlanAsset,
+    ProjectState,
+    SpatialModel,
+)
 from lighting_agent.dialux_service import DialuxExecutionService
+from lighting_agent.cad_auto_analysis import apply_model_analysis
 from lighting_agent.web_api import create_app
 
 
@@ -22,61 +34,94 @@ def _drawing() -> bytes:
     return stream.getvalue().encode("utf-8")
 
 
-def test_dialux_http_workflow_stops_at_confirmation_and_records_assumptions(tmp_path):
+def test_auto_start_uses_single_available_photometry(tmp_path, monkeypatch):
     projects = ProjectStore(tmp_path / "projects")
     evidence = LocalEvidenceStore(tmp_path / "evidence.sqlite3")
     client = TestClient(create_app(project_store=projects, evidence_store=evidence,
-                                   user_documents_directory=tmp_path / "documents"))
-    project = client.post("/api/projects", json={"project_name": "Run"}).json()
+                                   user_documents_directory=tmp_path / "documents", vision_model=False))
+    project = client.post("/api/projects", json={"project_name": "Run", "space_type": "Office"}).json()
     project_id = project["project_id"]
-    upload = client.post(
+    client.post(
         f"/api/projects/{project_id}/floor-plan",
         data={"expected_revision": "0"}, files={"file": ("room.dxf", BytesIO(_drawing()), "application/dxf")},
     )
-    selected = client.put(
-        f"/api/projects/{project_id}/floor-plan/selection",
-        params={"expected_revision": upload.json()["project"]["revision"], "candidate_index": 0},
-    ).json()
-    photometry = client.post(
-        f"/api/projects/{project_id}/dialux/light-files",
-        data={"expected_revision": str(selected["revision"])},
-        files={"file": ("fixture.ies", b"IESNA:LM-63-2002\n", "application/octet-stream")},
+    state = projects.get(project_id)
+    plan = state.floor_plan
+    executor = DialuxExecutionService(projects, executable=tmp_path / "DIALux_x64.exe")
+    blocked, effective, _ = executor.readiness(
+        project_id, DialuxRunRequest(expected_revision=state.revision)
     )
-    assert photometry.status_code == 201, photometry.text
-    body = {
-        "expected_revision": selected["revision"],
-        "photometry_path": photometry.json()["path"],
-        "assumptions": {"default_usage": "Office"},
-    }
-    readiness = client.post(f"/api/projects/{project_id}/dialux/readiness", json=body)
-    assert readiness.status_code == 200, readiness.text
-    assert readiness.json()["readiness"]["status"] == "needs_confirmation"
-    assert readiness.json()["readiness"]["complexity"] == "simple"
-    power_limited = client.post(
-        f"/api/projects/{project_id}/dialux/readiness",
-        json={**body, "optimization": {
-            "enabled": True, "max_iterations": 2, "target_illuminance_lx": 500, "max_power_w": 100,
-        }},
+    assert blocked.status == "blocked"
+    assert effective is None
+    candidate = plan.area_candidates[0]
+    model = apply_model_analysis(plan, {"rooms": [{
+        "candidate_id": candidate.candidate_id, "action": "include", "name": "Office",
+        "usage": "Office", "floor": "1F", "number": "1", "confidence": .99,
+        "evidence": ["closed boundary"], "rationale": "bounded room",
+    }], "elements": []}, model_name="test-multimodal")
+    state = projects.set_floor_plan(project_id, state.revision,
+                                    plan.model_copy(update={"spatial_model": model}), None)
+    photometry = projects.directory / f"{project_id}.photometry" / "fixture.ies"
+    photometry.parent.mkdir(parents=True, exist_ok=True)
+    photometry.write_bytes(b"IESNA:LM-63-2002\n")
+
+    captured = {}
+
+    def fake_prepare(pid, request):
+        captured["project_id"] = pid
+        captured["request"] = request
+        return DialuxRunRecord(run_id="automatic-run", project_id=pid, status="needs_attention",
+                               profile="test", request=request, error="DIALux executable missing")
+
+    monkeypatch.setattr(executor, "prepare", fake_prepare)
+    record = executor.auto_start(project_id)
+    assert captured["project_id"] == project_id
+    assert captured["request"].photometry_path == str(photometry.relative_to(projects.directory)).replace("\\", "/")
+    assert captured["request"].luminaire_id is None
+    assert record.error == "DIALux executable missing"
+
+
+def test_readiness_generates_layout_for_supported_complex_single_room(tmp_path):
+    model = SpatialModel.model_validate_json(
+        (Path(__file__).parent / "fixtures/phase0/bridge-spatial-model.json").read_text(encoding="utf-8")
     )
-    assert power_limited.json()["readiness"]["status"] == "blocked"
-    assert not power_limited.json()["readiness"]["can_prepare"]
-    assert any("max_power_w" in issue for issue in power_limited.json()["readiness"]["issues"])
-    unsupported_objective = client.post(
-        f"/api/projects/{project_id}/dialux/readiness",
-        json={**body, "optimization": {
-            "enabled": True, "max_iterations": 2, "target_illuminance_lx": 500, "objective": "min_power",
-        }},
+    model.automation_status = "auto_confirmed"
+    model.rooms[0].boundary = [
+        type(model.rooms[0].boundary[0])(x=x, y=y)
+        for x, y in [(0, 0), (6, 0), (7, 2), (6, 4), (0, 4)]
+    ]
+    model.rooms[0].holes = [[
+        type(model.rooms[0].boundary[0])(x=x, y=y)
+        for x, y in [(1, 1), (2, 1), (2, 2), (1, 2)]
+    ]]
+    model.rooms[0].area_m2 = None
+    state = ProjectState(
+        project_id="complex-room",
+        brief=DesignBrief(project_name="Complex room", space_type="Office"),
+        floor_plan=FloorPlan(
+            asset=FloorPlanAsset(source_name="room.dxf", source_type="dxf", storage_path="room.dxf",
+                                 sha256=model.source_sha256, size_bytes=0),
+            drawing_units="m", meters_per_drawing_unit=1, read_complete=True,
+            spatial_model=model,
+        ),
     )
-    assert unsupported_objective.json()["readiness"]["status"] == "blocked"
-    draft = client.post(f"/api/projects/{project_id}/dialux/runs", json=body)
-    assert draft.status_code == 200, draft.text
-    assert draft.json()["status"] == "draft"
-    assert draft.json()["readiness"]["assumptions"]["wall_thickness_m"] == .12
-    confirmed = client.post(f"/api/projects/{project_id}/dialux/runs/{draft.json()['run_id']}/confirm")
-    # The test machine has no DIALux executable; confirmation still records a
-    # fully audited preparation failure instead of pretending to have calculated.
-    assert confirmed.status_code == 200, confirmed.text
-    assert confirmed.json()["status"] in {"needs_attention", "prepared"}
+
+    class Projects:
+        def get(self, project_id):
+            assert project_id == state.project_id
+            return state
+
+    service = DialuxExecutionService(Projects(), executable=tmp_path / "DIALux_x64.exe")
+    readiness, effective, layout = service.readiness(
+        state.project_id,
+        DialuxRunRequest(expected_revision=state.revision, photometry_path="fixture.ies"),
+    )
+
+    assert readiness.status == "ready"
+    assert readiness.can_prepare
+    assert readiness.complexity == "complex"
+    assert len(layout) == 1
+    assert layout[0].room_id == effective.rooms[0].room_id
 
 
 def test_optimization_rejects_partial_room_metrics_and_only_requires_selected_constraints():

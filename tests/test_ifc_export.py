@@ -6,6 +6,7 @@ import ifcopenshell
 import ifcopenshell.geom
 import ifcopenshell.util.unit
 from ifcopenshell.util.element import get_psets
+from ifcopenshell.util.shape import get_volume
 from ifcopenshell.validate import json_logger, validate
 import pytest
 from fastapi.testclient import TestClient
@@ -166,6 +167,28 @@ def test_millimetre_coordinates_and_storey_elevation_are_applied_once():
     assert max(shape.geometry.verts[2::3]) == pytest.approx(6.0)
 
 
+def test_irregular_furniture_with_an_internal_void_keeps_its_profile():
+    model = reviewed_model()
+    furniture = model.elements[0]
+    furniture.footprint = [
+        CadPoint(x=1, y=1), CadPoint(x=3, y=1), CadPoint(x=3, y=3),
+        CadPoint(x=2, y=3), CadPoint(x=2, y=2), CadPoint(x=1, y=2),
+    ]
+    furniture.holes = [[
+        CadPoint(x=1.2, y=1.2), CadPoint(x=1.5, y=1.2),
+        CadPoint(x=1.5, y=1.5), CadPoint(x=1.2, y=1.5),
+    ]]
+
+    document = ifcopenshell.file.from_string(export_spatial_model(model, options()).data.decode("utf-8"))
+    product = document.by_type("IfcFurniture")[0]
+    profile = product.Representation.Representations[0].Items[0].SweptArea
+    assert profile.is_a("IfcArbitraryProfileDefWithVoids")
+    settings = ifcopenshell.geom.settings()
+    settings.set(settings.USE_WORLD_COORDS, True)
+    volume = get_volume(ifcopenshell.geom.create_shape(settings, product).geometry)
+    assert volume == pytest.approx((3 - .09) * .75, abs=1e-5)
+
+
 @pytest.mark.parametrize("model", [
     SpatialModel(source_sha256="a" * 64, meters_per_unit=1, design_ready=False),
     reviewed_model(two_rooms=True),
@@ -195,6 +218,7 @@ def test_project_api_exports_ifc_pinned_to_current_model_revision(tmp_path):
         project_store=projects,
         evidence_store=evidence,
         user_documents_directory=tmp_path / "documents",
+        vision_model=False,
     ))
     state = projects.create(DesignBrief(project_name="Bridge project"))
     model = reviewed_model()

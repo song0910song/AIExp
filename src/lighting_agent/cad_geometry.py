@@ -13,6 +13,7 @@ from collections import Counter
 from typing import Any
 
 from ezdxf.path import make_path
+from ezdxf.math import Matrix44, Vec3
 from shapely import LineString, Point, Polygon, STRtree, ops
 
 from .schemas import (CadPoint, DrawingLabel, DrawingPath, FieldProvenance,
@@ -25,6 +26,8 @@ CURVE_TOLERANCE_M = 0.001
 GAP_TOLERANCE_M = 0.001
 GEOMETRY = {"LINE", "LWPOLYLINE", "POLYLINE", "ARC", "CIRCLE", "ELLIPSE", "SPLINE"}
 ANNOTATIONS = {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "DIMENSION", "LEADER", "POINT", "HATCH"}
+TABLE_TEXT = {"TEXT", "MTEXT", "ATTRIB", "ATTDEF", "DIMENSION"}
+TABLE_GRID = {"LINE", "LWPOLYLINE", "POLYLINE"}
 KINDS = {
     "door": r"door|门", "window": r"window|窗",
     "column": r"column|柱", "furniture": r"furn|desk|chair|table|家具|桌|椅|柜",
@@ -40,7 +43,7 @@ def inspect_drawing(document, scale: float | None) -> dict[str, Any]:
     issues: list[ModelIssue] = []
     repairs: list[str] = []
     unsupported: Counter[str] = Counter()
-    records: list[tuple[Any, str, str]] = []
+    records: list[tuple[Any, str, str, str]] = []
     visited = 0
     xrefs = [str(block.name) for block in document.blocks
              if bool(int(block.block.dxf.get("flags", 0)) & (4 | 8))]
@@ -59,6 +62,83 @@ def inspect_drawing(document, scale: float | None) -> dict[str, Any]:
                     issues.append(ModelIssue(code="entity_limit", message="实体超过 100000；需拆分图纸", severity="error"))
                 return
             handle = f"{chain}/{entity.dxf.get('handle') or index}".strip("/")
+            if entity.dxftype() == "ACAD_TABLE":
+                table_name = str(entity.get_block_name())
+                block = document.blocks.get(table_name)
+                if not table_name or block is None:
+                    unsupported["ACAD_TABLE"] += 1
+                    issues.append(ModelIssue(
+                        code="unsupported_entity",
+                        message="CAD 表格内容块缺失，无法读取表格文字",
+                        source_handle=handle,
+                        severity="error",
+                    ))
+                    continue
+                try:
+                    source_count = len(block)
+                    if visited + source_count >= MAX_ENTITIES:
+                        issues.append(ModelIssue(code="entity_limit", message="实体超过 100000；需拆分图纸", severity="error"))
+                        return
+                    # ezdxf's ACAD_TABLE virtual-entity adapter currently only
+                    # translates by the insertion point and omits OCS rotation.
+                    # Apply the table's own axes so text positions stay WCS-correct.
+                    normal_value = (entity.dxf.get("extrusion")
+                                    if entity.dxf.is_supported("extrusion") else (0, 0, 1))
+                    normal = Vec3(normal_value).normalize()
+                    horizontal = Vec3(entity.dxf.get("horizontal_direction", (1, 0, 0)))
+                    horizontal = horizontal - normal * horizontal.dot(normal)
+                    if horizontal.magnitude <= 1e-9:
+                        raise ValueError("表格方向与法向量平行")
+                    x_axis = horizontal.normalize()
+                    y_axis = normal.cross(x_axis).normalize()
+                    transform = Matrix44.ucs(
+                        x_axis, y_axis, normal, origin=entity.get_insert_location()
+                    )
+                    children = []
+                    for source_entity in block:
+                        child = source_entity.copy()
+                        child.transform(transform)
+                        children.append(child)
+                    if len(children) != source_count:
+                        raise ValueError("表格实体数量不一致")
+                    table_text_count = 0
+                    grid_count = 0
+                    for child_index, child in enumerate(children):
+                        visited += 1
+                        child_kind = child.dxftype()
+                        child_handle = f"{handle}/cell/{child.dxf.get('handle') or child_index}"
+                        if child_kind in TABLE_TEXT:
+                            records.append((child, child_handle, f"ACAD_TABLE:{table_name}", inherited_layer))
+                            table_text_count += 1
+                        elif child_kind in TABLE_GRID:
+                            # Cell borders are table formatting, not room boundaries.
+                            grid_count += 1
+                        else:
+                            unsupported[child_kind] += 1
+                            issues.append(ModelIssue(
+                                code="unsupported_table_content",
+                                message=f"CAD 表格含有无法安全忽略的内容（{child_kind}）",
+                                source_handle=child_handle,
+                                severity="error",
+                            ))
+                    if grid_count:
+                        issues.append(ModelIssue(
+                            code="table_grid_ignored",
+                            message=f"已读取 CAD 表格文字 {table_text_count} 项；{grid_count} 条单元格边框仅作表格格式，不参与空间边界识别",
+                            source_handle=handle,
+                            position=_point(entity.get_insert_location()),
+                            severity="info",
+                        ))
+                    repairs.append(f"读取 CAD 表格 {handle} 的 {table_text_count} 项文字；排除 {grid_count} 条非空间表格边框")
+                except Exception as error:
+                    unsupported["ACAD_TABLE"] += 1
+                    issues.append(ModelIssue(
+                        code="table_content_unreadable",
+                        message=f"CAD 表格内容无法完整读取：{error}",
+                        source_handle=handle,
+                        severity="error",
+                    ))
+                continue
             if entity.dxftype() == "INSERT":
                 name = str(entity.dxf.name)
                 if name in xrefs:
@@ -91,7 +171,7 @@ def inspect_drawing(document, scale: float | None) -> dict[str, Any]:
         kind = entity.dxftype()
         source_layer = str(entity.dxf.get("layer", "0"))
         layer = source_layer if source_layer != "0" else inherited_layer or source_layer
-        if kind in {"TEXT", "MTEXT", "ATTRIB"}:
+        if kind in {"TEXT", "MTEXT", "ATTRIB", "ATTDEF"}:
             value = entity.plain_text() if kind == "MTEXT" else str(entity.dxf.text)
             labels.append(DrawingLabel(text=value, position=_point(entity.dxf.insert), layer=layer, source_handle=handle, elevation_raw=float(entity.dxf.insert.z)))
         elif kind == "DIMENSION":
@@ -102,7 +182,7 @@ def inspect_drawing(document, scale: float | None) -> dict[str, Any]:
                 position = entity.dxf.get("text_midpoint", entity.dxf.defpoint)
                 labels.append(DrawingLabel(text=value, position=_point(position), layer=layer,
                                            source_handle=handle, elevation_raw=float(position.z)))
-            except (AttributeError, ValueError, TypeError) as error:
+            except (AttributeError, ValueError, TypeError):
                 issues.append(ModelIssue(code="dimension_unreadable", message="一处尺寸标注无法读取数值，请对照原图核对", source_handle=handle))
         if kind not in GEOMETRY:
             if kind not in ANNOTATIONS:
@@ -154,8 +234,6 @@ def inspect_drawing(document, scale: float | None) -> dict[str, Any]:
                 polygon = Polygon(coords)
                 if not polygon.is_valid or polygon.area <= 0:
                     issues.append(ModelIssue(code="invalid_boundary", message="闭合边界自交或退化，请人工修正", source_handle=handle, position=_point(coords[0])))
-                else:
-                    closed.append((polygon, layer, [handle], flattened[0].z))
         except Exception as error:
             unsupported[kind] += 1
             issues.append(ModelIssue(code="geometry_error", message=f"{kind}: {error}", source_handle=handle, severity="error"))
@@ -201,18 +279,78 @@ def inspect_drawing(document, scale: float | None) -> dict[str, Any]:
         ))
     elements = []
     for (kind, handle), group in semantic_groups.items():
-        pts = [v for p in group for v in p.points]
-        rectangle = Polygon([(v.x, v.y) for v in pts]).minimum_rotated_rectangle if len(pts) >= 3 else LineString([(v.x, v.y) for v in pts]).envelope
-        footprint = [_point(p) for p in list(rectangle.exterior.coords)[:-1]] if rectangle.geom_type == "Polygon" else pts
-        rotation = None
-        if len(footprint) >= 2:
-            a, b = footprint[:2]
-            rotation = math.degrees(math.atan2(b.y - a.y, b.x - a.x))
-        elements.append(SpatialElement(kind=kind, name=f"{sources[group[0].source_handle].get('block') or group[0].layer} / {handle}", footprint=footprint, rotation_deg=rotation,
-            elevation_m=group[0].elevation_raw * scale if scale else None,
-            provenance={"footprint": FieldProvenance(source="inferred", locator=handle, confidence=0.6),
-                        "kind": FieldProvenance(source="inferred", locator=group[0].layer, confidence=0.5),
-                        "elevation_m": FieldProvenance(source="cad", locator=handle)}))
+        points = [point for path in group for point in path.points]
+        polygons = []
+        exact_closed_geometry = kind not in {"door", "window"} and all(path.closed for path in group)
+        if exact_closed_geometry:
+            rings = [Polygon([(point.x, point.y) for point in path.points]) for path in group]
+            if any(not polygon.is_valid or polygon.area <= 0 for polygon in rings):
+                unsupported[kind] += 1
+                issues.append(ModelIssue(
+                    code="invalid_element_geometry",
+                    message=f"构件闭合轮廓无效，不能安全简化：{kind}",
+                    source_handle=handle,
+                    severity="error",
+                ))
+                continue
+            else:
+                # Polygonize nested closed CAD loops with even/odd fill semantics:
+                # an inner loop is a void, not a second solid filled object.
+                faces = list(ops.polygonize(ops.unary_union([polygon.boundary for polygon in rings])))
+                polygons = [face for face in faces
+                            if sum(ring.covers(face.representative_point()) for ring in rings) % 2 == 1]
+                if not polygons:
+                    unsupported[kind] += 1
+                    issues.append(ModelIssue(
+                        code="invalid_element_geometry",
+                        message=f"构件闭合轮廓未形成有效实体：{kind}",
+                        source_handle=handle,
+                        severity="error",
+                    ))
+                    continue
+                merged = ops.unary_union(polygons)
+                polygons = list(merged.geoms) if merged.geom_type == "MultiPolygon" else [merged]
+                if not all(polygon.geom_type == "Polygon" and polygon.is_valid and polygon.area > 0
+                           for polygon in polygons):
+                    unsupported[kind] += 1
+                    issues.append(ModelIssue(
+                        code="invalid_element_geometry",
+                        message=f"构件轮廓无法转换为有效 IFC 面：{kind}",
+                        source_handle=handle,
+                        severity="error",
+                    ))
+                    continue
+        if not polygons:
+            outline = (Polygon([(point.x, point.y) for point in points]).minimum_rotated_rectangle
+                       if len(points) >= 3 else LineString([(point.x, point.y) for point in points]).envelope)
+            polygons = [outline] if outline.geom_type == "Polygon" and outline.area > 0 else []
+
+        for component, polygon in enumerate(polygons, start=1):
+            footprint = [_point(point) for point in list(polygon.exterior.coords)[:-1]]
+            rotation = None
+            if len(footprint) >= 2:
+                a, b = footprint[:2]
+                rotation = math.degrees(math.atan2(b.y - a.y, b.x - a.x))
+            component_handle = f"{handle}/component-{component}" if len(polygons) > 1 else handle
+            elements.append(SpatialElement(
+                kind=kind,
+                name=f"{sources[group[0].source_handle].get('block') or group[0].layer} / {component_handle}",
+                footprint=footprint,
+                holes=[[_point(point) for point in list(ring.coords)[:-1]] for ring in polygon.interiors],
+                rotation_deg=rotation,
+                elevation_m=group[0].elevation_raw * scale if scale else None,
+                provenance={"footprint": FieldProvenance(
+                                source="cad" if exact_closed_geometry else "inferred",
+                                locator=handle, confidence=0.9 if exact_closed_geometry else 0.4,
+                                note="由闭合 CAD 轮廓合并" if exact_closed_geometry
+                                else "从未闭合 CAD 线段推得的最小旋转矩形，需核对"),
+                            "holes": FieldProvenance(
+                                source="cad" if exact_closed_geometry else "inferred",
+                                locator=handle, confidence=0.9 if exact_closed_geometry else 0.4,
+                                note="保留闭合 CAD 轮廓中的内环" if polygon.interiors else "原始轮廓无内环"),
+                            "kind": FieldProvenance(source="inferred", locator=group[0].layer, confidence=0.5),
+                            "elevation_m": FieldProvenance(source="cad", locator=handle)},
+            ))
     if unsupported:
         issues.append(ModelIssue(code="incomplete_read", message="存在未完整建模实体，不能声称完整读取"))
     return dict(area_candidates=candidates, elements=elements, layers=sorted({
@@ -272,6 +410,9 @@ def _polygonize_level(contour_paths, elevation, scale, tolerance, issues, repair
         tree = STRtree(source_lines)
         for polygon in polygons.geoms:
             # Provenance includes intersecting contour sources, not a guessed room name.
-            handles = [contour_paths[int(i)].source_handle for i in tree.query(polygon.boundary.buffer(tolerance), predicate="intersects")]
-            closed.append((polygon, "CONTOUR", handles, elevation))
+            source_indices = tree.query(polygon.boundary.buffer(tolerance), predicate="intersects")
+            handles = [contour_paths[int(i)].source_handle for i in source_indices]
+            source_layers = {contour_paths[int(i)].layer for i in source_indices}
+            layer = next(iter(source_layers)) if len(source_layers) == 1 else "CONTOUR"
+            closed.append((polygon, layer, handles, elevation))
     return closed
